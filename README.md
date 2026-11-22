@@ -118,6 +118,9 @@ share. Tools outside the reviewed set require owner approval.
   every Monday at 9 am**. Use **Schedules** in the Mini App to set an IANA
   time zone and cancel upcoming runs. Cron expressions use five fields in the
   time zone selected when the schedule was created.
+- When a schedule is due, your Chief receives the saved prompt in a new task
+  and sends the result to Telegram. Use `/tasks` and `/switch ID` to reopen
+  the scheduled run.
 - If TinyBot restarts during an approved external operation, inspect the
   destination and send `/reconcile` before the task continues. During a
   service outage, a recurring job advances from the current time when TinyBot
