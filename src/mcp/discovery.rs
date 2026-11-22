@@ -1,6 +1,6 @@
-use super::{LIMIT, Mcp, get_json};
+use super::{Mcp, get_json};
 use crate::{net, security::clip, workers::Workers};
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -99,7 +99,8 @@ impl Mcp {
             "enter a product, MCP server name or public endpoint"
         );
         let query = clip(&query, 100);
-        let (registry, web) = tokio::join!(registry(query), web_lookup(workers, query));
+        let web_query = format!("{query} official MCP server endpoint");
+        let (registry, web) = tokio::join!(registry(query), workers.web_search(&web_query));
         if registry.is_err() && web.is_err() {
             anyhow::bail!("the MCP Registry and web search are unavailable");
         }
@@ -178,37 +179,4 @@ async fn registry(name: &str) -> Result<Discovery> {
         }
     }
     Ok(result)
-}
-
-async fn web_lookup(workers: &Workers, query: &str) -> Result<Vec<Value>> {
-    if let Ok(key) = std::env::var("TINYBOT_BRAVE_SEARCH_KEY")
-        && !key.is_empty()
-    {
-        let mut url = net::https("https://api.search.brave.com/res/v1/web/search")?;
-        url.query_pairs_mut()
-            .append_pair("q", &format!("{query} official MCP server endpoint"))
-            .append_pair("count", "8")
-            .append_pair("result_filter", "web");
-        let response = net::request(reqwest::Method::GET, &url)
-            .await?
-            .header("X-Subscription-Token", key)
-            .send()
-            .await?
-            .error_for_status()?;
-        let data: Value = serde_json::from_slice(&net::body(response, LIMIT).await?)?;
-        return Ok(data["web"]["results"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default());
-    }
-    let result = workers
-        .browser(
-            "search",
-            &json!({"query":format!("{query} official MCP server endpoint")}),
-        )
-        .await?;
-    result["results"]
-        .as_array()
-        .cloned()
-        .context("the search engine returned no results")
 }

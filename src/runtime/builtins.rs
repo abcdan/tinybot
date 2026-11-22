@@ -14,6 +14,7 @@ pub(super) enum Builtin {
     ListMcp,
     CallMcp,
     Browse,
+    SearchWeb,
     Form,
     Input,
     AgentSpec,
@@ -34,6 +35,7 @@ pub fn tools() -> Vec<Box<dyn Tool>> {
         Builtin::ListMcp,
         Builtin::CallMcp,
         Builtin::Browse,
+        Builtin::SearchWeb,
         Builtin::Form,
         Builtin::Input,
         Builtin::AgentSpec,
@@ -60,6 +62,7 @@ impl Tool for Builtin {
             Self::ListMcp => "list_mcp_tools",
             Self::CallMcp => "call_mcp",
             Self::Browse => "browse",
+            Self::SearchWeb => "search_web",
             Self::Form => "request_form",
             Self::Input => "request_input",
             Self::AgentSpec => "propose_agent",
@@ -88,6 +91,9 @@ impl Tool for Builtin {
             Self::CallMcp => "Call a connector tool. Args: connector, tool, arguments object.",
             Self::Browse => {
                 "Read visible text and links from a public website. Args: url (an HTTPS URL or a website domain)."
+            }
+            Self::SearchWeb => {
+                "Find public websites or indexed descriptions about a subject. Args: query. Use public search terms only. Distinguish search results from pages you read with browse."
             }
             Self::Form => {
                 "Ask for values to fill a website form. Args: url, optional zero-based index."
@@ -129,6 +135,12 @@ impl Tool for Builtin {
                     net::https(raw)?
                 };
                 destination = url.origin().ascii_serialization();
+                Risk::Read
+            }
+            Self::SearchWeb => {
+                ensure!(ctx.owner, "web search is restricted on shared agents");
+                string(args, "query", 240)?;
+                destination = "Public web search".into();
                 Risk::Read
             }
             Self::Discover => {
