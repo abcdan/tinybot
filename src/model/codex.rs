@@ -200,3 +200,35 @@ async fn wait_result(lines: &mut Lines<BufReader<ChildStdout>>, id: u64) -> Resu
     }
     Err(anyhow!("Codex App Server disconnected"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn streams_only_the_started_final_answer_item() {
+        let mut preview = AnswerItem::default();
+        let commentary = json!({"method":"item/started","params":{
+            "threadId":"thread","item":{"type":"agentMessage","phase":"commentary","id":"comment","text":"commentary"}
+        }});
+        assert!(preview.update("thread", &commentary).is_none());
+        let final_item = json!({"method":"item/started","params":{
+            "threadId":"thread","item":{"type":"agentMessage","phase":"final_answer","id":"answer","text":"part"}
+        }});
+        assert_eq!(preview.update("thread", &final_item), Some("part"));
+        let tool = json!({"method":"item/commandExecution/outputDelta","params":{
+            "threadId":"thread","itemId":"answer","delta":"tool output"
+        }});
+        assert!(preview.update("thread", &tool).is_none());
+        let text = json!({"method":"item/agentMessage/delta","params":{
+            "threadId":"thread","itemId":"answer","delta":"ial"
+        }});
+        assert!(preview.update("other-thread", &text).is_none());
+        assert_eq!(preview.update("thread", &text), Some("ial"));
+        let completed = json!({"method":"item/completed","params":{
+            "threadId":"thread","item":{"id":"answer"}
+        }});
+        assert!(preview.update("thread", &completed).is_none());
+        assert!(preview.update("thread", &text).is_none());
+    }
+}
