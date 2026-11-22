@@ -1,5 +1,108 @@
 <style>
-body { margin: 0; padding: 12px; color: var(--tg-theme-text-color); font: 14px sans-serif; }
-strong { font-size: 16px; }
+body {
+    margin: 0;
+    padding: 10px 12px max(12px, env(content-safe-area-inset-bottom));
+    color: var(--tg-theme-text-color, #17212b);
+    font: 14px sans-serif;
+}
+nav, .actions { display: flex; flex-wrap: wrap; gap: 6px; }
+button {
+    padding: 8px 10px;
+    border: 0;
+    border-radius: 8px;
+    background: var(--tg-theme-secondary-bg-color, #ebf4fb);
+    color: var(--tg-theme-link-color, #236994);
+    font: inherit;
+}
+button[aria-pressed="true"], .primary {
+    background: var(--tg-theme-button-color, #236994);
+    color: var(--tg-theme-button-text-color, #fff);
+}
+button:disabled { opacity: 0.55; }
+article { padding: 8px 0; }
+article + article { border-top: 1px solid var(--tg-theme-secondary-bg-color, #dce4eb); }
+strong { display: block; overflow-wrap: anywhere; }
+p { margin: 4px 0 8px; overflow-wrap: anywhere; }
+.hint { color: var(--tg-theme-hint-color, #4d6170); font-size: 13px; }
 </style>
-<strong>TinyBot</strong>
+<nav id="tabs" aria-label="TinyBot"></nav>
+<p id="notice" class="hint" role="status">Loading TinyBot…</p>
+<div id="items"></div>
+<div id="pages" class="actions"></div>
+<script>
+const widget = window.TelegramWidget;
+const byId = id => document.getElementById(id);
+const views = {
+    requests: { label: 'Requests', empty: 'No pending requests.', action: 'decline', button: 'Decline' },
+    tasks: { label: 'Tasks', empty: 'Send a message to start a task.', action: 'select', button: 'Switch to task' },
+    schedules: { label: 'Schedules', empty: 'Ask TinyBot to schedule a task.', action: 'cancel', button: 'Cancel schedule' }
+};
+let page = { view: 'requests', page: 0, rows: [] };
+let busy = false;
+const button = (label, click) => {
+    const element = document.createElement('button');
+    element.textContent = label;
+    element.disabled = busy;
+    element.addEventListener('click', click);
+    return element;
+};
+function section(tag, text, className) {
+    const element = document.createElement(tag);
+    element.textContent = text;
+    if (className) element.className = className;
+    return element;
+}
+function draw() {
+    const view = views[page.view];
+    const tabs = Object.entries(views).map(([name, item]) => {
+        const tab = button(item.label, () => request(name + '/0'));
+        tab.setAttribute('aria-pressed', name === page.view ? 'true' : 'false');
+        return tab;
+    });
+    byId('tabs').replaceChildren(...tabs);
+    const cards = page.rows.map(row => {
+        const card = document.createElement('article');
+        card.append(section('strong', row.title), section('p', row.detail, 'hint'));
+        if (row.actionable) {
+            const actions = document.createElement('div');
+            actions.className = 'actions';
+            const apply = () => request(view.action + '/' + row.id);
+            const start = view.action === 'select' ? apply : () => {
+                actions.replaceChildren(button('Keep', draw), button('Confirm ' + view.button.toLowerCase(), apply));
+            };
+            actions.append(button(view.button, start));
+            card.append(actions);
+        }
+        return card;
+    });
+    byId('items').replaceChildren(...(cards.length ? cards : [section('p', view.empty, 'hint')]));
+    const pages = [];
+    if (page.page > 0) pages.push(button('Previous', () => request(page.view + '/' + (page.page - 1))));
+    if (page.more) pages.push(button('Next', () => request(page.view + '/' + (page.page + 1))));
+    byId('pages').replaceChildren(...pages);
+}
+async function request(data) {
+    if (busy) return;
+    if (!widget) {
+        byId('notice').textContent = 'Open this panel in Telegram.';
+        return;
+    }
+    busy = true;
+    draw();
+    byId('notice').textContent = 'Loading…';
+    try {
+        const { result } = await widget.request(data);
+        const next = JSON.parse(result);
+        if (next.error) throw new Error(next.error);
+        page = next;
+        byId('notice').textContent = page.notice;
+    } catch {
+        byId('notice').textContent = 'Tap a tab to refresh, or open Settings & forms.';
+    } finally {
+        busy = false;
+        draw();
+    }
+}
+widget?.ready();
+request('requests/0');
+</script>

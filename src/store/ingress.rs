@@ -46,7 +46,7 @@ pub async fn ingest(
                     .execute(&mut *tx)
                     .await?;
                 response = Some(format!(
-                    "Invitation accepted. Open the Mini App or use /use {agent} to ask this agent a question."
+                    "Invitation accepted. Open Settings & forms or use /use {agent} to ask this agent a question."
                 ));
             }
         } else {
@@ -65,7 +65,8 @@ pub async fn ingest(
     let mut active = active_task;
     if response.is_none() {
         match command {
-            "/start" | "/help" => response = Some("Open TinyBot to set up your model, manage agents, and see pending requests. Use /new to start a task, /tasks to list tasks, /switch ID to switch, or /cancel to stop. Use /reconcile after checking an uncertain action.".into()),
+            "/start" | "/help" => response = Some("Use the panel for requests, tasks, and schedules. Set up your model under Settings & forms. Use /new to start a task, /panel to reopen the panel, /cancel to stop, or /reconcile after checking an uncertain action.".into()),
+            "/panel" => response = Some("Manage TinyBot from this chat.".into()),
             "/invite" if user == operator => {
                 let raw = token();
                 sqlx::query("INSERT INTO invitations VALUES (?,?,NULL,?)").bind(hash(&raw)).bind(user)
@@ -181,7 +182,7 @@ pub async fn ingest(
             } else if provider.is_none() {
                 sqlx::query("INSERT INTO outbox(user,body,button) VALUES(?,?,'mini')")
                     .bind(user)
-                    .bind("I saved your task. Choose a model in the Mini App and I’ll pick it up.")
+                    .bind("I saved your task. Choose a model under Settings & forms and I’ll pick it up.")
                     .execute(&mut *tx)
                     .await?;
             }
