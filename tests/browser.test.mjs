@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {chromium} from 'playwright';
 import {describe,populate,publicUrl} from './forms.mjs';
-import {allowsRead, visit} from './server.mjs';
+import {allowsRead, indexedUrl, visit} from './server.mjs';
 
 test('public URL parsing accepts HTTPS and rejects credentials, fragments and alternate ports', () => {
     assert.equal(publicUrl('https://example.org/form').href, 'https://example.org/form');
@@ -31,6 +31,16 @@ test('rendering allows page resources while rejecting write methods', () => {
     assert.equal(allowsRead('POST', 'fetch', true), false);
     assert.equal(allowsRead('PUT', 'xhr', true), false);
     assert.equal(allowsRead('GET', 'websocket', true), false);
+});
+
+test('indexed links use the published website rather than a search provider redirect', () => {
+    const target = 'https://core.telegram.org/bots/api';
+    const bing = `https://www.bing.com/ck/a?u=a1${Buffer.from(target).toString('base64url')}`;
+    const google = `https://www.google.com/url?q=${encodeURIComponent(target)}`;
+    assert.equal(indexedUrl(bing, 'www.bing.com'), target);
+    assert.equal(indexedUrl(google, 'www.google.com'), target);
+    assert.throws(() => indexedUrl('https://www.bing.com/ck/a?u=bad', 'www.bing.com'));
+    assert.throws(() => indexedUrl('https://www.google.com/url?q=http://example.org', 'www.google.com'));
 });
 
 test('a native form can be inspected and filled and a changed target invalidates the approval', async () => {

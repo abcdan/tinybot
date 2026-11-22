@@ -22,6 +22,51 @@ export async function visit(page, url, waitUntil = 'domcontentloaded') {
     return publicUrl(page.url());
 }
 
+export function indexedUrl(raw, host) {
+    const link = new URL(raw);
+    let target = link.href;
+    if (link.hostname === host && host === 'www.bing.com' && link.pathname === '/ck/a') {
+        const encoded = link.searchParams.get('u');
+        requireInput(encoded?.startsWith('a1'), 'Invalid Bing result link.');
+        target = Buffer.from(encoded.slice(2), 'base64url').toString('utf8');
+    } else if (link.hostname === host && host === 'www.google.com' && link.pathname === '/url') {
+        target = link.searchParams.get('q') || link.searchParams.get('url');
+    }
+    const url = publicUrl(target);
+    requireInput(url.hostname !== host, 'Expected a public result link.');
+    return url.href;
+}
+
+async function search(page, query) {
+    requireInput(typeof query === 'string' && query.trim() && query.length <= 240, 'Invalid search query.');
+    const providers = [
+        ['www.bing.com', 'li.b_algo h2 a'],
+        ['www.google.com', 'a h3'],
+    ];
+    for (const [host, selector] of providers) {
+        try {
+            const url = new URL(`https://${host}/search`);
+            url.searchParams.set('q', query);
+            await visit(page, url);
+            const candidates = await page.locator(selector).evaluateAll(headlines =>
+                headlines.slice(0, 18).map(headline => ({
+                    title: headline.textContent.trim().slice(0, 150),
+                    url: headline.closest('a').href,
+                    description: headline.closest('li.b_algo')?.querySelector('.b_caption p')
+                        ?.textContent.trim().slice(0, 360) || '',
+                })));
+            const results = candidates.flatMap(candidate => {
+                try { return [{...candidate, url: indexedUrl(candidate.url, host)}]; }
+                catch { return []; }
+            }).slice(0, 8);
+            if (results.length) return {results};
+        } catch {
+            // Search providers can redirect or challenge automated browsers.
+        }
+    }
+    throw new InputError('The search providers did not return public results.');
+}
+
 async function operate(browser, route, data) {
     const render = route === '/browse';
     const context = await browser.newContext({javaScriptEnabled: render, serviceWorkers: 'block', acceptDownloads: false});
@@ -54,23 +99,7 @@ async function operate(browser, route, data) {
                 await intercepted.continue();
             } else await intercepted.abort();
         });
-        if (route === '/search') {
-            requireInput(typeof data.query === 'string' && data.query.length <= 240, 'Invalid search query.');
-            const url = new URL('https://www.google.com/search');
-            url.searchParams.set('q', data.query);
-            await visit(page, url);
-            const results = await page.evaluate(() => [...document.querySelectorAll('a h3')].slice(0, 18).map(title => {
-                const link = new URL(title.closest('a').href);
-                return {title: title.textContent.trim().slice(0, 150),
-                    url: link.pathname === '/url' ? link.searchParams.get('q') || link.searchParams.get('url') : link.href};
-            }));
-            const publicResults = results.filter(result => {
-                try { return !/(^|\.)google\.com$/.test(publicUrl(result.url).hostname); }
-                catch { return false; }
-            }).slice(0, 8);
-            requireInput(publicResults.length, 'The web search did not return public results.');
-            return {results: publicResults};
-        }
+        if (route === '/search') return await search(page, data.query);
         if (route === '/browse') {
             await visit(page, publicUrl(data.url), 'commit');
             await page.waitForLoadState('domcontentloaded');
