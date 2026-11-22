@@ -292,10 +292,27 @@ async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> Resul
                     name.as_str(),
                     "request_form" | "request_input" | "propose_agent" | "delegate" | "connect_mcp"
                 ) {
-                    match tool.execute(&ctx, args).await? {
-                        Outcome::Pause => return Ok(()),
-                        Outcome::Continue(value) => {
+                    match tool.execute(&ctx, args).await {
+                        Ok(Outcome::Pause) => return Ok(()),
+                        Ok(Outcome::Continue(value)) => {
                             store::append(&app.db, &task.id, "tool", &value.to_string()).await?
+                        }
+                        Err(error) => {
+                            if !store::current(&app.db, task).await? {
+                                return store::settle(&app.db, task, "idle", None).await;
+                            }
+                            let reason = error.to_string();
+                            tracing::warn!(task=%task.id, tool=%name, reason=%reason, "interactive tool did not complete");
+                            store::append(
+                                &app.db,
+                                &task.id,
+                                "tool",
+                                &format!(
+                                    "The {name} tool did not complete. {}",
+                                    clip(&reason, 360)
+                                ),
+                            )
+                            .await?;
                         }
                     }
                     continue;

@@ -137,10 +137,14 @@ pub(super) async fn execute(tool: Builtin, ctx: &ToolContext<'_>, args: Value) -
         }
         Builtin::Input => {
             let purpose = string(&args, "purpose", 500)?;
-            let reviewer = app.models.forms(&task.user).await?;
-            let spec:FormSpec=json_reply(&*reviewer,
+            let spec: FormSpec = if let Some(fields) = args.get("fields") {
+                serde_json::from_value(json!({"fields":fields}))?
+            } else {
+                let model = app.models.forms(&task.user).await?;
+                json_reply(&*model,
                     &format!("{UI_SPEC}\nReturn only JSON with fields. Propose up to eight fields for the stated task. Use text, textarea, number, date, select or checkbox. Use private=false, with options for selects. Ask only for ordinary task preferences. Never request contact, credentials, payment, identity, medical or other private information."),
-                    &json!({"purpose":purpose})).await?;
+                    &json!({"purpose":purpose})).await?
+            };
             spec.validate()?;
             ensure!(
                 spec.fields.len() <= 8
@@ -161,20 +165,21 @@ pub(super) async fn execute(tool: Builtin, ctx: &ToolContext<'_>, args: Value) -
                             "api key"
                         ]
                         .iter()
-                        .any(|word| format!(
-                            "{} {}",
-                            field.name, field.label
-                        )
-                        .to_lowercase()
-                        .contains(word))),
+                        .any(|word| {
+                            std::iter::once(&field.name)
+                                .chain(std::iter::once(&field.label))
+                                .chain(field.hint.iter())
+                                .chain(&field.options)
+                                .any(|part| part.to_lowercase().contains(word))
+                        })),
                 "unsupported task input"
             );
             store::pause(
                 &app.db,
                 task,
                 "elicitation",
-                &serde_json::to_value(spec)?,
-                "I prepared a short form in TinyBot. Open it to answer so I can continue.",
+                &serde_json::to_value(&spec)?,
+                "Open Settings & forms to answer so I can continue.",
                 Some("mini"),
                 900,
                 &id(),
