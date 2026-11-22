@@ -1,0 +1,6 @@
+/.env
+/secrets/
+/target/
+/data/
+/mcp-programs/
+__pycache__/

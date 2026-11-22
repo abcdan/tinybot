@@ -1,0 +1,7 @@
+.git
+.env
+secrets
+data
+mcp-programs
+target
+__pycache__
