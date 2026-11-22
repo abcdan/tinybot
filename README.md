@@ -73,13 +73,19 @@ after adding the domain. Then check `https://your-domain/health` and send
   `TINYBOT_REVIEW_OPENROUTER_KEY` is the deployment fallback for model review
   and form generation. Personal OpenRouter credentials take precedence.
 
+## Public websites
+
+The Chief can read public websites from a domain or HTTPS link and search for
+public sources. Set `TINYBOT_BRAVE_SEARCH_KEY` to use Brave Search. Without a
+key, searches run through the browser worker. Sites may require verification
+before TinyBot can read them.
+
 ## MCP connectors
 
 Send a message such as **Connect the Atlassian MCP**. TinyBot searches the MCP
 Registry and the web, then asks you to approve the selected endpoint and
-complete authorization. Set `TINYBOT_BRAVE_SEARCH_KEY` to use Brave's search
-API. Otherwise TinyBot tries a browser search and can still use registry
-results if the search engine is unavailable.
+complete authorization. It can still use registry results if web search is
+unavailable.
 
 Remote servers can use Streamable HTTP or legacy HTTP+SSE. Connector setup
 supports public endpoints, OAuth with client metadata discovery, dynamic

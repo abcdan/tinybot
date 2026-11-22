@@ -103,6 +103,9 @@ pub(super) async fn execute(tool: Builtin, ctx: &ToolContext<'_>, args: Value) -
                 .browser("browse", &json!({"url":url.as_str()}))
                 .await?
         }
+        Builtin::SearchWeb => {
+            json!({"results": app.workers.web_search(string(&args, "query", 240)?).await?})
+        }
         Builtin::Form => {
             let mut form: WebsiteForm =
                 serde_json::from_value(app.workers.browser("inspect", &args).await?)?;
