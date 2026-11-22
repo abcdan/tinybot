@@ -44,7 +44,8 @@ repository root. Set these variables in the service’s Environment settings.
 
 Generate the encryption key with `openssl rand -hex 32` on a trusted machine.
 Back it up with your deployment secrets and keep it across redeployments.
-Dokploy supplies both secret variables to Compose secret mounts.
+Compose passes both credentials as environment variables to the read-only
+TinyBot container. Users with Docker access can inspect its environment.
 
 In **Domains**, route the hostname to service `tinybot`, container port
 `8080`, with path `/` and HTTPS enabled. The Dokploy Compose entry point

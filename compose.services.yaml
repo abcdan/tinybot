@@ -14,14 +14,11 @@ services:
     environment:
       TINYBOT_ORIGIN: https://${TINYBOT_DOMAIN:?Set TINYBOT_DOMAIN in .env}
       TELEGRAM_OPERATOR_ID: ${TELEGRAM_OPERATOR_ID:?Set TELEGRAM_OPERATOR_ID in .env}
-      TELEGRAM_BOT_TOKEN_FILE: /run/secrets/telegram_bot_token
-      TINYBOT_ENCRYPTION_KEY_FILE: /run/secrets/encryption_key
       TINYBOT_REVIEW_MODEL: ${TINYBOT_REVIEW_MODEL:-}
       TINYBOT_REVIEW_OPENROUTER_KEY: ${TINYBOT_REVIEW_OPENROUTER_KEY:-}
       TINYBOT_BRAVE_SEARCH_KEY: ${TINYBOT_BRAVE_SEARCH_KEY:-}
       TINYBOT_TIMEZONE: ${TINYBOT_TIMEZONE:-UTC}
       TINYBOT_MCP_READ_POLICY_FILE: /etc/tinybot/mcp-reads.json
-    secrets: [telegram_bot_token, encryption_key]
     volumes:
       - app_data:/data
       - browser_socket:/browser:ro

@@ -3,6 +3,9 @@ services:
     extends:
       file: compose.services.yaml
       service: tinybot
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?Set TELEGRAM_BOT_TOKEN in Dokploy}
+      TINYBOT_ENCRYPTION_KEY: ${TINYBOT_ENCRYPTION_KEY:?Set TINYBOT_ENCRYPTION_KEY in Dokploy}
     expose:
       - "8080"
     networks:
@@ -34,12 +37,6 @@ services:
     extends:
       file: compose.services.yaml
       service: mcp-stdio
-
-secrets:
-  telegram_bot_token:
-    environment: TELEGRAM_BOT_TOKEN
-  encryption_key:
-    environment: TINYBOT_ENCRYPTION_KEY
 
 networks:
   dokploy-network:
