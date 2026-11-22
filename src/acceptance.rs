@@ -29,6 +29,26 @@ async fn fixture() -> SqlitePool {
     db
 }
 
+fn app_with_model(db: &SqlitePool, rust_model: Arc<dyn ModelProvider>) -> App {
+    let vault = security::Vault::new(&"f0".repeat(32)).unwrap();
+    let origin = url::Url::parse("https://tinybot.example").unwrap();
+    App {
+        db: db.clone(),
+        vault: vault.clone(),
+        token: "unused".into(),
+        origin: origin.origin().ascii_serialization(),
+        models: model::Models::new(db.clone(), vault.clone(), "codex".into(), None, None)
+            .with_fixture(rust_model),
+        mcp: mcp::Mcp::new(db.clone(), vault, origin),
+        forms: forms::Forms::default(),
+        workers: workers::Workers {
+            browser: "unused".into(),
+            python: "unused".into(),
+        },
+        tools: runtime::tools(),
+    }
+}
+
 async fn message(db: &SqlitePool, id: i64, user: &str, text: &str) {
     store::ingest(db, "1", "test", id, user, text)
         .await
@@ -318,6 +338,54 @@ async fn compaction_is_atomic_and_preserves_new_and_unprocessed_context() {
     assert_eq!(remaining.last().unwrap().2, "latest change");
 }
 
+struct ScheduledChief;
+
+#[async_trait]
+impl ModelProvider for ScheduledChief {
+    async fn complete(&self, _system: &str, input: &str) -> Result<String> {
+        let input: Value = serde_json::from_str(input)?;
+        let first = &input["history"][0];
+        assert_eq!(first["role"], "user");
+        assert!(
+            first["text"]
+                .as_str()
+                .unwrap()
+                .ends_with("Check the report")
+        );
+        assert!(input["agent_role"].is_null());
+        let response = if input["goal"] == "Remind the user to check the report" {
+            json!({"kind":"reply","text":"Time to check the report."})
+        } else {
+            json!({"kind":"tool","name":"set_goal","args":{"text":"Remind the user to check the report"}})
+        };
+        Ok(response.to_string())
+    }
+}
+
+#[tokio::test]
+async fn due_reminder_runs_the_chief_and_delivers_its_reply() {
+    let db = fixture().await;
+    let time = now();
+    sqlx::query(
+        "INSERT INTO schedules(id,owner,title,input,kind,time_zone,next_run)
+        VALUES('legacy-reminder','2','Report','Check the report','reminder','UTC',?)",
+    )
+    .bind(time)
+    .execute(&db)
+    .await
+    .unwrap();
+    schedules::dispatch(&db, time).await.unwrap();
+    assert!(store::claim_outbox(&db).await.unwrap().is_none());
+    let task = store::claim(&db).await.unwrap().unwrap();
+    assert_eq!(task.user, "2");
+    let app = app_with_model(&db, Arc::new(ScheduledChief));
+    runtime::work(&app, &task).await.unwrap();
+    let reply = store::claim_outbox(&db).await.unwrap().unwrap();
+    assert_eq!(reply.user, "2");
+    assert_eq!(reply.task.as_deref(), Some(task.id.as_str()));
+    assert_eq!(reply.body, "Time to check the report.");
+}
+
 struct ScriptedChief {
     reached: Notify,
     resume: Notify,
@@ -361,23 +429,7 @@ async fn chief_uses_live_steering_and_escalates_the_helpers_question() {
         reached: Notify::new(),
         resume: Notify::new(),
     });
-    let vault = security::Vault::new(&"f0".repeat(32)).unwrap();
-    let origin = url::Url::parse("https://tinybot.example").unwrap();
-    let app = Arc::new(App {
-        db: db.clone(),
-        vault: vault.clone(),
-        token: "unused".into(),
-        origin: origin.origin().ascii_serialization(),
-        models: model::Models::new(db.clone(), vault.clone(), "codex".into(), None, None)
-            .with_fixture(rust_model.clone()),
-        mcp: mcp::Mcp::new(db.clone(), vault, origin),
-        forms: forms::Forms::default(),
-        workers: workers::Workers {
-            browser: "unused".into(),
-            python: "unused".into(),
-        },
-        tools: runtime::tools(),
-    });
+    let app = Arc::new(app_with_model(&db, rust_model.clone()));
     let task = store::claim(&db).await.unwrap().unwrap();
     let first = tokio::spawn({
         let app = app.clone();
