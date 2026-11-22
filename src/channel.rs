@@ -1,3 +1,5 @@
+mod widget;
+
 use crate::{
     net,
     security::{clip, now},
@@ -12,10 +14,13 @@ use std::time::Duration;
 
 const PANEL_HTML: &str = include_str!("../web/telegram-widget.html");
 
-pub struct Inbound {
-    pub external_id: i64,
-    pub user: String,
-    pub text: String,
+pub enum Inbound {
+    Message {
+        external_id: i64,
+        user: String,
+        text: String,
+    },
+    Widget(widget::Query),
 }
 
 enum Dispatch {
@@ -29,6 +34,9 @@ pub trait ChannelAdapter: Send + Sync {
     fn name(&self) -> &'static str;
     async fn receive(&self, offset: i64) -> Result<(Vec<Inbound>, i64)>;
     async fn send(&self, user: &str, body: &str, button: Option<&str>) -> Result<Option<i64>>;
+    async fn answer_widget(&self, _query: &str, _data: &str) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub struct Telegram {
@@ -71,6 +79,7 @@ impl Telegram {
 struct Update {
     update_id: i64,
     message: Option<Message>,
+    widget_query: Option<widget::Query>,
 }
 #[derive(Deserialize)]
 struct Message {
@@ -90,6 +99,12 @@ struct User {
     is_bot: bool,
 }
 
+impl Chat {
+    fn is_private_with(&self, user: &User) -> bool {
+        self.kind == "private" && self.id == user.id && !user.is_bot
+    }
+}
+
 #[async_trait]
 impl ChannelAdapter for Telegram {
     fn name(&self) -> &'static str {
@@ -100,7 +115,7 @@ impl ChannelAdapter for Telegram {
         let output = self
             .call(
                 "getUpdates",
-                json!({"offset":offset,"timeout":25,"allowed_updates":["message"]}),
+                json!({"offset":offset,"timeout":25,"allowed_updates":["message","widget_query"]}),
             )
             .await?;
         ensure!(
@@ -112,12 +127,15 @@ impl ChannelAdapter for Telegram {
         let messages = updates
             .into_iter()
             .filter_map(|update| {
+                if let Some(query) = update.widget_query {
+                    return query.is_private().then_some(Inbound::Widget(query));
+                }
                 let message = update.message?;
                 let user = message.from?;
-                if message.chat.kind != "private" || user.is_bot || message.chat.id != user.id {
+                if !message.chat.is_private_with(&user) {
                     return None;
                 }
-                Some(Inbound {
+                Some(Inbound::Message {
                     external_id: update.update_id,
                     user: user.id.to_string(),
                     text: message.text.unwrap_or_default(),
@@ -138,7 +156,7 @@ impl ChannelAdapter for Telegram {
             if body.chars().count() <= 900 {
                 let widget = self.call("sendWidget", json!({
                     "chat_id":user,"html":PANEL_HTML,"caption":body,
-                    "show_caption_above_media":true,"reply_markup":keyboard
+                    "show_caption_above_media":true,"allow_queries":true,"protect_content":true,"reply_markup":keyboard
                 })).await?;
                 if widget["ok"] == true {
                     return Ok(None);
@@ -159,6 +177,22 @@ impl ChannelAdapter for Telegram {
         }
         anyhow::bail!("Telegram rejected the reply")
     }
+
+    async fn answer_widget(&self, query: &str, data: &str) -> Result<()> {
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            self.call(
+                "answerWidgetQuery",
+                json!({"widget_query_id":query,"data":data}),
+            ),
+        )
+        .await??;
+        ensure!(
+            response["ok"] == true,
+            "Telegram rejected the widget answer"
+        );
+        Ok(())
+    }
 }
 
 pub async fn listen(db: SqlitePool, operator: String, adapter: std::sync::Arc<dyn ChannelAdapter>) {
@@ -167,15 +201,22 @@ pub async fn listen(db: SqlitePool, operator: String, adapter: std::sync::Arc<dy
         let result = async {
             let (messages, next) = adapter.receive(offset).await?;
             for message in messages {
-                store::ingest(
-                    &db,
-                    &operator,
-                    adapter.name(),
-                    message.external_id,
-                    &message.user,
-                    &message.text,
-                )
-                .await?;
+                match message {
+                    Inbound::Message {
+                        external_id,
+                        user,
+                        text,
+                    } => {
+                        store::ingest(&db, &operator, adapter.name(), external_id, &user, &text)
+                            .await?;
+                    }
+                    Inbound::Widget(query) => {
+                        let data = widget::answer(&db, &query).await;
+                        if adapter.answer_widget(&query.id, &data).await.is_err() {
+                            tracing::debug!("widget answer expired or could not be delivered");
+                        }
+                    }
+                }
             }
             Ok::<_, anyhow::Error>(next)
         }

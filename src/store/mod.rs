@@ -4,11 +4,12 @@ mod requests;
 
 pub use ingress::ingest;
 pub use queue::{
-    append, claim, compact, compaction_batch, current, expire, has_access, history, recover, settle,
+    append, claim, compact, compaction_batch, current, expire, has_access, history, list_tasks,
+    recover, select_task, settle,
 };
 pub use requests::{
-    can_deliver, claim_approval, claim_outbox, finish_action, notify, pause, respond, start_action,
-    uncertain_action,
+    can_deliver, claim_approval, claim_outbox, finish_action, list_requests, notify, pause,
+    respond, start_action, uncertain_action,
 };
 
 use crate::security::{id, now};

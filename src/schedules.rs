@@ -19,16 +19,16 @@ pub struct Request {
 
 #[derive(Serialize, FromRow)]
 pub struct Schedule {
-    id: String,
+    pub id: String,
     owner: String,
-    title: String,
+    pub title: String,
     #[serde(skip)]
     input: String,
     kind: String,
     cron: Option<String>,
-    time_zone: String,
-    next_run: Option<i64>,
-    state: String,
+    pub time_zone: String,
+    pub next_run: Option<i64>,
+    pub state: String,
 }
 
 pub async fn timezone(db: &SqlitePool, user: &str) -> Result<Tz> {
@@ -114,7 +114,7 @@ pub async fn create(db: &SqlitePool, user: &str, request: Request, time: i64) ->
 pub async fn list(db: &SqlitePool, user: &str) -> Result<Vec<Schedule>> {
     Ok(sqlx::query_as(
         "SELECT * FROM schedules WHERE owner=?
-        ORDER BY state<>'active', next_run ASC NULLS LAST LIMIT 60",
+        ORDER BY state<>'active', next_run ASC NULLS LAST, id LIMIT 60",
     )
     .bind(user)
     .fetch_all(db)
