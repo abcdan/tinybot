@@ -166,26 +166,35 @@ pub async fn dispatch(db: &SqlitePool, time: i64) -> Result<()> {
             .bind(&schedule.id)
             .execute(&mut *tx)
             .await?;
-        if schedule.kind == "reminder" {
-            sqlx::query("INSERT INTO outbox(user,body) VALUES(?,?)")
-                .bind(&schedule.owner)
-                .bind(format!("Reminder · {}\n{}", schedule.title, schedule.input))
+        let task = id();
+        let created = sqlx::query(
+            "INSERT INTO tasks(id,user,title,state,goal,updated,schedule)
+            SELECT ?,id,?,CASE WHEN provider IS NULL THEN 'setup' ELSE 'queued' END,?,?,?
+            FROM users WHERE id=? AND NOT EXISTS(
+                SELECT 1 FROM tasks WHERE schedule=? AND state IN ('queued','running','waiting','setup','uncertain')
+            )",
+        )
+        .bind(&task)
+        .bind(&schedule.title)
+        .bind(clip(&schedule.input, 1500))
+        .bind(time)
+        .bind(&schedule.id)
+        .bind(&schedule.owner)
+        .bind(&schedule.id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if created == 1 {
+            let instruction = if schedule.kind == "reminder" {
+                "My scheduled reminder is due now. Send me a reminder based on this request:"
+            } else {
+                "My scheduled task is due now. Carry out this request:"
+            };
+            sqlx::query("INSERT INTO events(task,role,body) VALUES(?,'user',?)")
+                .bind(&task)
+                .bind(format!("{instruction}\n\n{}", schedule.input))
                 .execute(&mut *tx)
                 .await?;
-        } else {
-            let task = id();
-            let created=sqlx::query("INSERT INTO tasks(id,user,title,state,goal,updated,schedule)
-                SELECT ?,id,?,CASE WHEN provider IS NULL THEN 'setup' ELSE 'queued' END,?,?,? FROM users WHERE id=?
-                AND NOT EXISTS(SELECT 1 FROM tasks WHERE schedule=? AND state IN ('queued','running','waiting','setup','uncertain'))")
-                .bind(&task).bind(&schedule.title).bind(clip(&schedule.input,1500)).bind(time).bind(&schedule.id)
-                .bind(&schedule.owner).bind(&schedule.id).execute(&mut *tx).await?.rows_affected();
-            if created == 1 {
-                sqlx::query("INSERT INTO events(task,role,body) VALUES(?,'user',?)")
-                    .bind(&task)
-                    .bind(&schedule.input)
-                    .execute(&mut *tx)
-                    .await?;
-            }
         }
     }
     tx.commit().await?;
@@ -211,7 +220,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn due_dispatch_is_durable_and_does_not_replay_reminders() {
+    async fn due_dispatch_queues_both_kinds_without_overlapping_or_replaying() {
         let db = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -224,7 +233,7 @@ mod tests {
         let start = DateTime::parse_from_rfc3339("2026-11-22T10:00:00Z")
             .unwrap()
             .timestamp();
-        create(
+        let reminder = create(
             &db,
             "1",
             Request {
@@ -253,34 +262,43 @@ mod tests {
         .await
         .unwrap();
         assert!(cancel(&db, "2", &recurring.id).await.is_err());
-        dispatch(&db, start + 600).await.unwrap();
-        dispatch(&db, start + 600).await.unwrap();
+        let late = start + 1800;
+        dispatch(&db, late).await.unwrap();
+        dispatch(&db, late).await.unwrap();
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT count(*) FROM outbox")
                 .fetch_one(&db)
                 .await
                 .unwrap(),
-            1
+            0
         );
+        let prompts: Vec<(String, String, String, String)> = sqlx::query_as(
+            "SELECT tasks.schedule, tasks.user, tasks.state, events.body FROM tasks
+            JOIN events ON events.task=tasks.id WHERE tasks.agent IS NULL AND events.role='user'
+            ORDER BY tasks.title",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(prompts.len(), 2);
+        assert_eq!(prompts[0].0, reminder.id);
+        assert_eq!(prompts[0].1, "1");
+        assert_eq!(prompts[0].2, "setup");
+        assert!(prompts[0].3.contains("scheduled reminder is due now"));
+        assert!(prompts[0].3.ends_with("Check the report"));
+        assert_eq!(prompts[1].0, recurring.id);
+        assert!(prompts[1].3.contains("scheduled task is due now"));
+        assert!(prompts[1].3.ends_with("Draft the report"));
+        assert_eq!(list(&db, "1").await.unwrap()[0].next_run, Some(late + 600));
+        dispatch(&db, late + 600).await.unwrap();
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT count(*) FROM tasks")
                 .fetch_one(&db)
                 .await
                 .unwrap(),
-            1
+            2
         );
-        dispatch(&db, start + 1200).await.unwrap();
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM tasks")
-                .fetch_one(&db)
-                .await
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            list(&db, "1").await.unwrap()[0].next_run,
-            Some(start + 1800)
-        );
+        assert_eq!(list(&db, "1").await.unwrap()[0].next_run, Some(late + 1200));
         cancel(&db, "1", &recurring.id).await.unwrap();
     }
 }
