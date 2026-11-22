@@ -1,0 +1,56 @@
+services:
+  tinybot:
+    extends:
+      file: compose.services.yaml
+      service: tinybot
+    expose:
+      - "8080"
+    networks:
+      - edge
+      - dokploy-network
+    depends_on:
+      browser:
+        condition: service_healthy
+      sandbox:
+        condition: service_healthy
+
+  browser:
+    extends:
+      file: compose.services.yaml
+      service: browser
+    depends_on: [egress]
+
+  egress:
+    extends:
+      file: compose.services.yaml
+      service: egress
+
+  sandbox:
+    extends:
+      file: compose.services.yaml
+      service: sandbox
+
+  mcp-stdio:
+    extends:
+      file: compose.services.yaml
+      service: mcp-stdio
+
+secrets:
+  telegram_bot_token:
+    environment: TELEGRAM_BOT_TOKEN
+  encryption_key:
+    environment: TINYBOT_ENCRYPTION_KEY
+
+networks:
+  dokploy-network:
+    external: true
+  edge:
+  browser_internal:
+    internal: true
+  browser_public:
+
+volumes:
+  app_data:
+  browser_socket:
+  sandbox_socket:
+  stdio_socket:
