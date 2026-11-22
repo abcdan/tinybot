@@ -26,7 +26,11 @@ impl ModelProvider for Codex {
         input: &str,
         delta: &mut TextDelta<'_>,
     ) -> Result<String> {
-        tokio::time::timeout(Duration::from_secs(100), self.run(system, input, Some(delta))).await?
+        tokio::time::timeout(
+            Duration::from_secs(100),
+            self.run(system, input, Some(delta)),
+        )
+        .await?
     }
 }
 

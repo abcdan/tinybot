@@ -1,6 +1,10 @@
 use super::execution::{execute_approved, finish};
+use super::feedback::Feedback;
 use super::review::{Verdict, review};
-use super::{Call, ENGINE, Outcome, Risk, Step, ToolContext, connector_context, descriptions};
+use super::{
+    Call, ENGINE, MAX_REPLY_BYTES, Outcome, Risk, Step, ToolContext, connector_context,
+    descriptions,
+};
 use crate::{
     App,
     channel::ChannelAdapter,
@@ -33,12 +37,13 @@ pub async fn run(app: Arc<App>, channel: Arc<dyn ChannelAdapter>) {
                         let app=app.clone();
                         let channel=channel.clone();
                         jobs.spawn(async move {
-                            let processing=work(&app,&task);
+                            let feedback=Feedback::default();
+                            let processing=work_task(&app,&task,Some(&feedback));
                             tokio::pin!(processing);
                             let result=tokio::select! {
                                 biased;
                                 result=&mut processing=>result,
-                                ()=show_typing(&app,&task,&*channel)=>processing.await,
+                                ()=feedback.show(&app.db,&task,&*channel)=>processing.await,
                             };
                             if let Err(error)=result {
                                 tracing::warn!(task=%task.id,error_category=%error,"task paused");
@@ -56,23 +61,12 @@ pub async fn run(app: Arc<App>, channel: Arc<dyn ChannelAdapter>) {
     }
 }
 
-async fn show_typing(app: &App, task: &Task, channel: &dyn ChannelAdapter) {
-    let mut delay = Duration::from_millis(400);
-    loop {
-        tokio::time::sleep(delay).await;
-        if !matches!(store::current(&app.db, task).await, Ok(true)) {
-            return;
-        }
-        delay = channel
-            .typing(&task.user)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or(Duration::from_secs(4));
-    }
+#[cfg(test)]
+pub(crate) async fn work(app: &App, task: &Task) -> Result<()> {
+    work_task(app, task, None).await
 }
 
-pub(crate) async fn work(app: &App, task: &Task) -> Result<()> {
+async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> Result<()> {
     if !store::has_access(&app.db, &task.user, task.agent.as_deref()).await? {
         return store::settle(&app.db, task, "cancelled", None).await;
     }
@@ -206,18 +200,32 @@ pub(crate) async fn work(app: &App, task: &Task) -> Result<()> {
             .rev()
             .collect::<Vec<_>>();
         let zone = schedules::timezone(&app.db, &task.user).await?;
-        let step:Step=json_reply(&*model,ENGINE,&json!({
+        let input = json!({
             "goal":goal,"summary":summary,"history":history,"memory":memory,
             "local_time":schedules::local_iso(now(),zone),"time_zone":zone.name(),
             "agent_role":agent.as_ref().map(|agent|clip(&agent.instructions,2500)),
             "saved_agents":saved,"tools":descriptions(&tools),"connectors":connector_context(&ctx)
-        })).await?;
+        });
+        let step: Step = if let Some(feedback) = feedback {
+            let Some(step) = feedback.complete(&*model, &input).await? else {
+                return store::settle(&app.db, task, "idle", None).await;
+            };
+            step
+        } else {
+            json_reply(&*model, ENGINE, &input).await?
+        };
         if !store::current(&app.db, task).await? {
             return store::settle(&app.db, task, "idle", None).await;
         }
         match step {
             Step::Reply { text } => {
-                return store::settle(&app.db, task, "idle", Some(clip(&text, 3600))).await;
+                // Wait for any in-flight draft before queuing the durable reply.
+                let _delivery = match feedback {
+                    Some(feedback) => Some(feedback.delivery.lock().await),
+                    None => None,
+                };
+                return store::settle(&app.db, task, "idle", Some(clip(&text, MAX_REPLY_BYTES)))
+                    .await;
             }
             Step::Tool { name, args } => {
                 let Some(tool) = tools.iter().find(|tool| tool.name() == name) else {
