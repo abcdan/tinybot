@@ -35,6 +35,25 @@ pub struct FormSpec {
 }
 
 impl FormSpec {
+    pub fn widget_choice(&self) -> Option<&Field> {
+        let [field] = self.fields.as_slice() else {
+            return None;
+        };
+        // One question with short options fits Telegram's 1024-byte query response,
+        // including the request ID and JSON escaping.
+        (field.kind == "select"
+            && !field.private
+            && (2..=6).contains(&field.options.len())
+            && field.label.len() + field.options.iter().map(String::len).sum::<usize>() <= 420
+            && !field.label.trim().is_empty()
+            && !field.label.chars().any(char::is_control)
+            && field
+                .options
+                .iter()
+                .all(|option| !option.trim().is_empty() && !option.chars().any(char::is_control)))
+        .then_some(field)
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(
             (1..=24).contains(&self.fields.len()),

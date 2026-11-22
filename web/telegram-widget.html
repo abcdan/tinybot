@@ -38,6 +38,7 @@ const views = {
     schedules: { label: 'Schedules', empty: 'Ask TinyBot to schedule a task.', action: 'cancel', button: 'Cancel schedule' }
 };
 let page = { view: 'requests', page: 0, rows: [] };
+let choice = null;
 let busy = false;
 const button = (label, click) => {
     const element = document.createElement('button');
@@ -60,6 +61,19 @@ function draw() {
         return tab;
     });
     byId('tabs').replaceChildren(...tabs);
+    if (choice) {
+        const question = section('strong', choice.label);
+        const options = document.createElement('div');
+        options.className = 'actions';
+        options.append(...choice.options.map((label, index) =>
+            button(label, () => request('answer/' + choice.id + '/' + index))));
+        byId('items').replaceChildren(question, options);
+        byId('pages').replaceChildren(button('Back', () => {
+            choice = null;
+            draw();
+        }));
+        return;
+    }
     const cards = page.rows.map(row => {
         const card = document.createElement('article');
         card.append(section('strong', row.title), section('p', row.detail, 'hint'));
@@ -70,6 +84,7 @@ function draw() {
             const start = view.action === 'select' ? apply : () => {
                 actions.replaceChildren(button('Keep', draw), button('Confirm ' + view.button.toLowerCase(), apply));
             };
+            if (row.choice) actions.append(button('Answer', () => request('choice/' + row.id)));
             actions.append(button(view.button, start));
             card.append(actions);
         }
@@ -94,8 +109,9 @@ async function request(data) {
         const { result } = await widget.request(data);
         const next = JSON.parse(result);
         if (next.error) throw new Error(next.error);
-        page = next;
-        byId('notice').textContent = page.notice;
+        choice = next.choice || null;
+        if (!choice) page = next;
+        byId('notice').textContent = choice ? '' : page.notice;
     } catch {
         byId('notice').textContent = 'Tap a tab to refresh, or open Settings & forms.';
     } finally {

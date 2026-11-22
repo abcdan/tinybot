@@ -61,10 +61,10 @@ after adding the domain. Then check `https://your-domain/health` and send
   code in the Mini App and run `tinybot codex connect https://your-domain` on a
   computer with a browser. Build the local command with `cargo build --locked
   --release` and use the binary in the build output.
-- **Mini Apps** always use OpenRouter's `inception/mercury-3` to propose fields.
-  If Codex handles your tasks, add an OpenRouter key under **Mini App
-  generation**. TinyBot renders all generated forms with its own controls and
-  styles. Field instructions and examples live in `src/runtime/mini_app_ui.md`.
+- **Forms** with a single choice can be answered in the Telegram widget. Use
+  Settings & forms for longer forms and typed inputs. TinyBot can use the
+  task model to generate fields. When an OpenRouter key is available, it can
+  use `inception/mercury-3` for form generation.
   Website values go directly from the Mini App to TinyBot over HTTPS and stay
   in memory until use or expiry. Review the masked preview before submitting.
 - **Action review** defaults to a separate call to the active task model. Set

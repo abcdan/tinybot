@@ -1,8 +1,8 @@
 use super::{Chat, User};
-use crate::{schedules, security::clip, store};
+use crate::{forms, schedules, security::clip, store};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqlx::SqlitePool;
 use std::time::Duration;
 
@@ -35,6 +35,7 @@ struct Row {
     title: String,
     detail: String,
     actionable: bool,
+    choice: bool,
 }
 
 impl Row {
@@ -44,6 +45,7 @@ impl Row {
             title: display(title, 88),
             detail: display(detail, 70),
             actionable,
+            choice: false,
         }
     }
 }
@@ -70,7 +72,7 @@ struct Page {
 pub(super) async fn answer(db: &SqlitePool, query: &Query) -> String {
     let result = tokio::time::timeout(
         Duration::from_secs(8),
-        panel(db, &query.from.id.to_string(), &query.data),
+        query_reply(db, &query.from.id.to_string(), &query.data),
     )
     .await;
     if let Ok(Ok(page)) = result
@@ -82,8 +84,24 @@ pub(super) async fn answer(db: &SqlitePool, query: &Query) -> String {
     r#"{"error":"This request is unavailable. Refresh the panel to try again."}"#.into()
 }
 
-async fn panel(db: &SqlitePool, user: &str, data: &str) -> Result<Page> {
+async fn query_reply(db: &SqlitePool, user: &str, data: &str) -> Result<Value> {
     ensure!(data.len() <= 64, "oversized widget query");
+    if let Some(request) = data.strip_prefix("choice/") {
+        uuid::Uuid::parse_str(request)?;
+        return Ok(json!({"choice":forms::widget_choice(db, user, request).await?}));
+    }
+    if let Some(selection) = data.strip_prefix("answer/") {
+        let (request, option) = selection.split_once('/').context("missing answer")?;
+        uuid::Uuid::parse_str(request)?;
+        forms::answer_choice(db, user, request, option.parse()?).await?;
+        let mut page = panel(db, user, "requests/0").await?;
+        page.notice = "Answer sent.";
+        return Ok(serde_json::to_value(page)?);
+    }
+    Ok(serde_json::to_value(panel(db, user, data).await?)?)
+}
+
+async fn panel(db: &SqlitePool, user: &str, data: &str) -> Result<Page> {
     let (action, value) = data.split_once('/').context("invalid widget query")?;
     let (provider, active): (Option<String>, Option<String>) =
         sqlx::query_as("SELECT provider,active_task FROM users WHERE id=?")
@@ -162,7 +180,18 @@ async fn panel(db: &SqlitePool, user: &str, data: &str) -> Result<Page> {
                         "elicitation" => "Answer questions",
                         _ => "Review an action",
                     };
-                    Row::new(request.id, label, "Open Settings & forms to review.", true)
+                    let mut row =
+                        Row::new(request.id, label, "Open Settings & forms to review.", true);
+                    if request.kind == "elicitation"
+                        && let Ok(spec) = serde_json::from_str::<forms::FormSpec>(&request.payload)
+                        && spec.validate().is_ok()
+                        && let Some(field) = spec.widget_choice()
+                    {
+                        row.title = display(&field.label, 88);
+                        row.detail.clear();
+                        row.choice = true;
+                    }
+                    row
                 });
             Ok(page_of("requests", page, notice, rows))
         }

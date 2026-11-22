@@ -179,7 +179,11 @@ pub(super) async fn execute(tool: Builtin, ctx: &ToolContext<'_>, args: Value) -
                 task,
                 "elicitation",
                 &serde_json::to_value(&spec)?,
-                "Open Settings & forms to answer so I can continue.",
+                if spec.widget_choice().is_some() {
+                    "Tap Answer in Requests to pick an option, or open Settings & forms."
+                } else {
+                    "Open Settings & forms to answer so I can continue."
+                },
                 Some("mini"),
                 900,
                 &id(),

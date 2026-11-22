@@ -44,7 +44,7 @@ export function model(state) {
         pairing.textContent = result.command + '\n\nEnter this code when prompted\n' + result.code;
         pairing.hidden = false;
     }), pairing);
-    const generator = card('Mini App generation', 'Mercury 3 generates forms. A separate OpenRouter key lets you use Mercury while Codex handles tasks.');
+    const generator = card('Form generation', 'TinyBot can use your task model to generate forms. Add an OpenRouter key to use Mercury 3.');
     generator.append(form('Save OpenRouter key', [field('key', 'OpenRouter API key', {type: 'password', max: 8192})], async (data, element) => {
         try {
             await api('openrouter-forms', data);
