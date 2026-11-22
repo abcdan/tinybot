@@ -1,0 +1,3 @@
+{$TINYBOT_DOMAIN} {
+    reverse_proxy tinybot:8080
+}

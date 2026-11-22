@@ -1,0 +1,101 @@
+x-worker-security: &worker-security
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  init: true
+  restart: unless-stopped
+
+services:
+  tinybot:
+    <<: *worker-security
+    build:
+      context: .
+      target: core
+    environment:
+      TINYBOT_ORIGIN: https://${TINYBOT_DOMAIN:?Set TINYBOT_DOMAIN in .env}
+      TELEGRAM_OPERATOR_ID: ${TELEGRAM_OPERATOR_ID:?Set TELEGRAM_OPERATOR_ID in .env}
+      TELEGRAM_BOT_TOKEN_FILE: /run/secrets/telegram_bot_token
+      TINYBOT_ENCRYPTION_KEY_FILE: /run/secrets/encryption_key
+      TINYBOT_REVIEW_MODEL: ${TINYBOT_REVIEW_MODEL:-}
+      TINYBOT_REVIEW_OPENROUTER_KEY: ${TINYBOT_REVIEW_OPENROUTER_KEY:-}
+      TINYBOT_BRAVE_SEARCH_KEY: ${TINYBOT_BRAVE_SEARCH_KEY:-}
+      TINYBOT_TIMEZONE: ${TINYBOT_TIMEZONE:-UTC}
+      TINYBOT_MCP_READ_POLICY_FILE: /etc/tinybot/mcp-reads.json
+    secrets: [telegram_bot_token, encryption_key]
+    volumes:
+      - app_data:/data
+      - browser_socket:/browser:ro
+      - sandbox_socket:/sandbox:ro
+      - stdio_socket:/mcp-stdio:ro
+      - ${TINYBOT_MCP_READ_POLICY_PATH:-./deploy/mcp-reads.json}:/etc/tinybot/mcp-reads.json:ro
+    tmpfs:
+      - /tmp:mode=1777,size=64m
+    networks: [edge]
+    healthcheck:
+      test: ["CMD", "tinybot", "health"]
+      interval: 10s
+      timeout: 4s
+      retries: 6
+      start_period: 5s
+
+  browser:
+    <<: *worker-security
+    build: ./workers/browser
+    security_opt:
+      - "no-new-privileges:true"
+      - "seccomp:./deploy/chromium-seccomp.json"
+    environment:
+      HOME: /tmp
+    volumes:
+      - browser_socket:/browser
+    tmpfs:
+      - /tmp:mode=1777,size=192m
+    shm_size: 256m
+    mem_limit: 1536m
+    pids_limit: 256
+    networks: [browser_internal]
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('node:http').get({socketPath:'/browser/browser.sock',path:'/health'}, r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 4s
+      retries: 6
+      start_period: 12s
+
+  egress:
+    <<: *worker-security
+    build:
+      context: .
+      target: egress
+    mem_limit: 128m
+    pids_limit: 96
+    networks: [browser_internal, browser_public]
+
+  sandbox:
+    <<: *worker-security
+    build: ./workers/sandbox
+    volumes:
+      - sandbox_socket:/sandbox
+    tmpfs:
+      - /work:mode=0700,uid=1000,gid=1000,size=16m
+      - /tmp:mode=1777,size=16m
+    network_mode: none
+    mem_limit: 512m
+    pids_limit: 64
+    healthcheck:
+      test: ["CMD", "python", "/opt/tinybot/server.py", "--health"]
+      interval: 10s
+      timeout: 4s
+      retries: 6
+
+  mcp-stdio:
+    <<: *worker-security
+    profiles: [stdio]
+    build: ./workers/mcp-stdio
+    network_mode: none
+    volumes:
+      - stdio_socket:/mcp-stdio
+      - ./mcp-programs:/programs:ro
+    tmpfs:
+      - /tmp:mode=1777,size=32m
+    mem_limit: 384m
+    pids_limit: 64
