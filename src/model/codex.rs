@@ -1,4 +1,4 @@
-use super::ModelProvider;
+use super::{ModelProvider, TextDelta};
 use anyhow::{Context, Result, anyhow, ensure};
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -17,12 +17,26 @@ pub(super) struct Codex {
 #[async_trait]
 impl ModelProvider for Codex {
     async fn complete(&self, system: &str, input: &str) -> Result<String> {
-        tokio::time::timeout(Duration::from_secs(100), self.run(system, input)).await?
+        tokio::time::timeout(Duration::from_secs(100), self.run(system, input, None)).await?
+    }
+
+    async fn complete_streaming(
+        &self,
+        system: &str,
+        input: &str,
+        delta: &mut TextDelta<'_>,
+    ) -> Result<String> {
+        tokio::time::timeout(Duration::from_secs(100), self.run(system, input, Some(delta))).await?
     }
 }
 
 impl Codex {
-    async fn run(&self, system: &str, input: &str) -> Result<String> {
+    async fn run(
+        &self,
+        system: &str,
+        input: &str,
+        mut delta: Option<&mut TextDelta<'_>>,
+    ) -> Result<String> {
         let mut command = Command::new(&self.binary);
         command.args([
             "app-server",
@@ -86,6 +100,7 @@ impl Codex {
             .context("Codex did not create a thread")?;
         rpc(&mut child,json!({"id":3,"method":"turn/start","params":{"threadId":thread,"environments":[],"input":[{"type":"text","text":input}]}})).await?;
         let mut result = String::new();
+        let mut preview = AnswerItem::default();
         while let Some(line) = lines.next_line().await? {
             let value: Value = serde_json::from_str(&line)?;
             if value.get("method").is_some() && value.get("id").is_some() {
@@ -95,6 +110,11 @@ impl Codex {
                 value["id"] != 3 || value.get("error").is_none(),
                 "Codex rejected the turn"
             );
+            if let Some(delta) = delta.as_deref_mut()
+                && let Some(text) = preview.update(thread, &value)
+            {
+                delta(text);
+            }
             match value["method"].as_str() {
                 Some("item/completed") => {
                     let item = &value["params"]["item"];
@@ -117,6 +137,42 @@ impl Codex {
         Err(anyhow!(
             "Codex App Server stopped before completing the turn"
         ))
+    }
+}
+
+#[derive(Default)]
+struct AnswerItem {
+    id: Option<String>,
+    completed: bool,
+}
+
+impl AnswerItem {
+    fn update<'a>(&mut self, thread: &str, notification: &'a Value) -> Option<&'a str> {
+        let params = &notification["params"];
+        if params["threadId"] != thread || self.completed {
+            return None;
+        }
+        let item = &params["item"];
+        match notification["method"].as_str()? {
+            "item/started"
+                if self.id.is_none()
+                    && item["type"] == "agentMessage"
+                    && item["phase"] == "final_answer" =>
+            {
+                self.id = Some(item["id"].as_str()?.to_owned());
+                item["text"].as_str()
+            }
+            "item/agentMessage/delta"
+                if self.id.as_deref().is_some_and(|id| params["itemId"] == id) =>
+            {
+                params["delta"].as_str()
+            }
+            "item/completed" if self.id.as_deref().is_some_and(|id| item["id"] == id) => {
+                self.completed = true;
+                None
+            }
+            _ => None,
+        }
     }
 }
 

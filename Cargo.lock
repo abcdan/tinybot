@@ -2716,6 +2716,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "croner",
+ "futures",
  "hex",
  "hmac",
  "ipnet",
