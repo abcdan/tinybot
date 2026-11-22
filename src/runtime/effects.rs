@@ -97,7 +97,12 @@ pub(super) async fn execute(tool: Builtin, ctx: &ToolContext<'_>, args: Value) -
                 .await?;
             json!({"connector":connector.name,"result":clip(&result.to_string(),10500)})
         }
-        Builtin::Browse => app.workers.browser("browse", &args).await?,
+        Builtin::Browse => {
+            let url = net::website(string(&args, "url", 2048)?)?;
+            app.workers
+                .browser("browse", &json!({"url":url.as_str()}))
+                .await?
+        }
         Builtin::Form => {
             let mut form: WebsiteForm =
                 serde_json::from_value(app.workers.browser("inspect", &args).await?)?;

@@ -2,19 +2,29 @@ import { InputError, requireInput, publicUrl, describe, populate } from './forms
 import { chmod, unlink } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
-import { chromium } from 'playwright';
+import { chromium, errors } from 'playwright';
 
 const LIMIT = 96_000;
 const socketPath = '/browser/browser.sock';
+const readResources = new Set(['document', 'script', 'stylesheet', 'fetch', 'xhr']);
 
-async function visit(page, url) {
-    const response = await page.goto(url.href, {waitUntil: 'domcontentloaded'});
-    requireInput(response?.ok(), 'The website did not return a successful HTTPS page.');
+export function allowsRead(method, resource, render) {
+    return (method === 'GET' || method === 'HEAD') &&
+        (resource === 'document' || (render && readResources.has(resource)));
+}
+
+export async function visit(page, url, waitUntil = 'domcontentloaded') {
+    const response = await page.goto(url.href, {waitUntil});
+    requireInput(response, 'The website did not return an HTTPS response.');
+    requireInput(response.headers()['cf-mitigated'] !== 'challenge',
+        'Cloudflare requires verification before this website can be read.');
+    requireInput(response.ok(), `The website returned HTTP ${response.status()}.`);
     return publicUrl(page.url());
 }
 
 async function operate(browser, route, data) {
-    const context = await browser.newContext({javaScriptEnabled: false, serviceWorkers: 'block', acceptDownloads: false});
+    const render = route === '/browse';
+    const context = await browser.newContext({javaScriptEnabled: render, serviceWorkers: 'block', acceptDownloads: false});
     context.setDefaultTimeout(8000);
     context.setDefaultNavigationTimeout(12000);
     let permit;
@@ -40,7 +50,7 @@ async function operate(browser, route, data) {
                 } else await intercepted.abort();
                 return;
             }
-            if (request.resourceType() === 'document' && ['GET', 'HEAD'].includes(request.method())) {
+            if (allowsRead(request.method(), request.resourceType(), render)) {
                 await intercepted.continue();
             } else await intercepted.abort();
         });
@@ -62,12 +72,19 @@ async function operate(browser, route, data) {
             return {results: publicResults};
         }
         if (route === '/browse') {
-            const url = await visit(page, publicUrl(data.url));
-            const text = await page.locator('body').innerText();
-            const links = await page.evaluate(() => [...document.querySelectorAll('a[href]')].slice(0, 60)
-                .map(anchor => ({text:anchor.textContent.trim().slice(0, 90),url:anchor.href.slice(0, 500)}))
-                .filter(anchor => anchor.text && anchor.url.startsWith('https://')));
-            return {url: url.href, title: (await page.title()).slice(0, 200), text: text.slice(0, 6900), links: links.slice(0, 16)};
+            await visit(page, publicUrl(data.url), 'commit');
+            await page.waitForLoadState('domcontentloaded');
+            try { await page.waitForLoadState('load', {timeout: 3000}); }
+            catch (error) { if (!(error instanceof errors.TimeoutError)) throw error; }
+            const content = await page.locator('body').evaluate(body => ({
+                title: document.title.slice(0, 200),
+                text: body.innerText.slice(0, 6900),
+                links: [...body.querySelectorAll('a[href]')].slice(0, 60)
+                    .filter(anchor => typeof anchor.href === 'string')
+                    .map(anchor => ({text: anchor.textContent.trim().slice(0, 90), url: anchor.href.slice(0, 500)}))
+                    .filter(anchor => anchor.text && anchor.url.startsWith('https://')).slice(0, 16),
+            }));
+            return {url: publicUrl(page.url()).href, ...content};
         }
         if (route === '/inspect') {
             const index = data.index ?? 0;
