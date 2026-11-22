@@ -10,6 +10,8 @@ use serde_json::{Value, json};
 use sqlx::SqlitePool;
 use std::time::Duration;
 
+const PANEL_HTML: &str = include_str!("../web/telegram-widget.html");
+
 pub struct Inbound {
     pub external_id: i64,
     pub user: String,
@@ -129,12 +131,24 @@ impl ChannelAdapter for Telegram {
         let user = user.parse::<i64>().context("invalid Telegram recipient")?;
         let mut data = json!({"chat_id":user,"text":clip(body,3900),"link_preview_options":{"is_disabled":true}});
         if let Some(button) = button {
-            let keyboard = if button == "mini" {
-                json!({"text":"Open TinyBot","web_app":{"url":format!("{}/mini",self.origin)}})
-            } else {
-                anyhow::bail!("unknown channel button");
-            };
-            data["reply_markup"] = json!({"inline_keyboard":[[keyboard]]});
+            ensure!(button == "mini", "unknown channel button");
+            let keyboard = json!({"inline_keyboard":[[{
+                "text":"Settings & forms","web_app":{"url":format!("{}/mini",self.origin)}
+            }]]});
+            if body.chars().count() <= 900 {
+                let widget = self.call("sendWidget", json!({
+                    "chat_id":user,"html":PANEL_HTML,"caption":body,
+                    "show_caption_above_media":true,"reply_markup":keyboard
+                })).await?;
+                if widget["ok"] == true {
+                    return Ok(None);
+                }
+                if let Some(delay) = widget["parameters"]["retry_after"].as_i64() {
+                    return Ok(Some(delay.clamp(1, 600)));
+                }
+                // Older Bot API servers can reject sendWidget. Keep the notice accessible.
+            }
+            data["reply_markup"] = keyboard;
         }
         let output = self.call("sendMessage", data).await?;
         if output["ok"] == true {
