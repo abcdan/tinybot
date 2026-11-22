@@ -37,6 +37,10 @@ pub trait ChannelAdapter: Send + Sync {
     async fn answer_widget(&self, _query: &str, _data: &str) -> Result<()> {
         Ok(())
     }
+
+    async fn typing(&self, _user: &str) -> Result<Option<Duration>> {
+        Ok(None)
+    }
 }
 
 pub struct Telegram {
@@ -56,6 +60,17 @@ impl Telegram {
             token,
             origin,
         })
+    }
+
+    async fn feedback(&self, method: &str, data: Value) -> Result<Option<Duration>> {
+        let output = tokio::time::timeout(Duration::from_secs(3), self.call(method, data)).await??;
+        if output["ok"] == true {
+            return Ok(None);
+        }
+        if let Some(seconds) = output["parameters"]["retry_after"].as_u64() {
+            return Ok(Some(Duration::from_secs(seconds.clamp(1, 600))));
+        }
+        anyhow::bail!("Telegram rejected the chat feedback")
     }
 
     async fn call(&self, method: &str, data: Value) -> Result<Value> {
@@ -109,6 +124,12 @@ impl Chat {
 impl ChannelAdapter for Telegram {
     fn name(&self) -> &'static str {
         "telegram"
+    }
+
+    async fn typing(&self, user: &str) -> Result<Option<Duration>> {
+        let user = user.parse::<i64>().context("invalid Telegram recipient")?;
+        self.feedback("sendChatAction", json!({"chat_id":user,"action":"typing"}))
+            .await
     }
 
     async fn receive(&self, offset: i64) -> Result<(Vec<Inbound>, i64)> {

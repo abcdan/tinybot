@@ -141,17 +141,10 @@ async fn main() -> Result<()> {
         },
         tools: runtime::tools(),
     });
-    let channels: Vec<Arc<dyn channel::ChannelAdapter>> =
-        vec![Arc::new(channel::Telegram::new(token, origin_string)?)];
-    for adapter in channels {
-        tokio::spawn(channel::listen(
-            db.clone(),
-            operator.clone(),
-            adapter.clone(),
-        ));
-        tokio::spawn(channel::outbox(db.clone(), adapter));
-    }
-    tokio::spawn(runtime::run(app.clone()));
+    let telegram = Arc::new(channel::Telegram::new(token, origin_string)?);
+    tokio::spawn(channel::listen(db.clone(), operator, telegram.clone()));
+    tokio::spawn(channel::outbox(db.clone(), telegram.clone()));
+    tokio::spawn(runtime::run(app.clone(), telegram));
     tokio::spawn(schedules::run(db));
     let address: SocketAddr = env::var("TINYBOT_LISTEN")
         .unwrap_or_else(|_| "0.0.0.0:8080".into())
