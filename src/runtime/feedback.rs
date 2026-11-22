@@ -161,7 +161,12 @@ fn complete_string_prefix(source: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::reply_preview;
+    use super::*;
+    use crate::{channel::Inbound, model::TextDelta};
+    use async_trait::async_trait;
+    use serde_json::json;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use std::future::pending;
 
     #[test]
     fn previews_only_the_reply_string_as_its_escapes_arrive() {
@@ -194,5 +199,105 @@ mod tests {
             reply_preview(r#"{"kind":"reply","text":"visible","secret":"hidden"}"#).as_deref(),
             Some("visible")
         );
+    }
+
+    #[derive(Default)]
+    struct TestChannel {
+        typing: Notify,
+        draft: Notify,
+        sent: Mutex<Vec<(String, i32, String)>>,
+    }
+
+    #[async_trait]
+    impl ChannelAdapter for TestChannel {
+        fn name(&self) -> &'static str {
+            "test"
+        }
+
+        async fn receive(&self, _: i64) -> Result<(Vec<Inbound>, i64)> {
+            unreachable!()
+        }
+
+        async fn send(&self, _: &str, _: &str, _: Option<&str>) -> Result<Option<i64>> {
+            unreachable!()
+        }
+
+        async fn typing(&self, user: &str) -> Result<Option<Duration>> {
+            assert_eq!(user, "42");
+            self.typing.notify_one();
+            Ok(None)
+        }
+
+        async fn draft(&self, user: &str, id: i32, text: &str) -> Result<Option<Duration>> {
+            self.sent
+                .lock()
+                .unwrap()
+                .push((user.into(), id, text.into()));
+            self.draft.notify_one();
+            Ok(None)
+        }
+    }
+
+    struct SlowReply<'a>(&'a TestChannel);
+
+    #[async_trait]
+    impl ModelProvider for SlowReply<'_> {
+        async fn complete(&self, _: &str, _: &str) -> Result<String> {
+            unreachable!()
+        }
+
+        async fn complete_streaming(
+            &self,
+            _: &str,
+            _: &str,
+            delta: &mut TextDelta<'_>,
+        ) -> Result<String> {
+            self.0.typing.notified().await;
+            delta(r#"{"kind":"reply","text":"Partial answer"#);
+            pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn types_and_streams_until_the_task_revision_changes() {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!().run(&db).await.unwrap();
+        store::seed(&db, "42").await.unwrap();
+        sqlx::query("INSERT INTO tasks(id,user,title,updated) VALUES('draft-task','42','Draft',0)")
+            .execute(&db)
+            .await
+            .unwrap();
+        let task = store::claim(&db).await.unwrap().unwrap();
+        let feedback = Feedback::default();
+        let channel = TestChannel::default();
+        let model = SlowReply(&channel);
+        let input = json!({});
+        let revise = async {
+            channel.draft.notified().await;
+            sqlx::query("UPDATE tasks SET revision=revision+1 WHERE id=?")
+                .bind(&task.id)
+                .execute(&db)
+                .await
+                .unwrap();
+        };
+        let ((), result, ()) = tokio::time::timeout(Duration::from_secs(8), async {
+            tokio::join!(
+                feedback.show(&db, &task, &channel),
+                feedback.complete(&model, &input),
+                revise,
+            )
+        })
+        .await
+        .unwrap();
+        assert!(result.unwrap().is_none());
+        let sent = channel.sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, "42");
+        assert!(sent[0].1 > 0);
+        assert_eq!(sent[0].2, "Partial answer");
     }
 }
