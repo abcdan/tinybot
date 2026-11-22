@@ -13,65 +13,16 @@ import subprocess
 import sys
 import tempfile
 
+from wasm_runtime import FILE_LIMIT, JOB_FILE, guest
+
 SOCKET = "/sandbox/sandbox.sock"
 JOB_ROOT = "/work"
-BUNDLE = "/opt/python-wasi"
-JOB_FILE = ".tinybot-job.py"
-FILE_LIMIT = 32_768
 TOTAL_LIMIT = 262_144
 FILE_COUNT = 24
 REQUEST_LIMIT = 1_600_000
 OUTPUT_LIMIT = 5_000
 WALL_SECONDS = 18
 FILENAME = re.compile(r"[a-zA-Z0-9_-][a-zA-Z0-9_.-]{0,95}")
-
-
-def engine_and_module(module, fuel):
-    import wasmtime
-
-    config = wasmtime.Config()
-    config.parallel_compilation = False
-    config.consume_fuel = fuel is not None
-    engine = wasmtime.Engine(config)
-    store = wasmtime.Store(engine)
-    if fuel is not None:
-        store.set_fuel(fuel)
-        store.set_limits(memory_size=96 * 1024 * 1024, instances=1, memories=1)
-    linker = wasmtime.Linker(engine)
-    linker.define_wasi()
-    return store, linker, wasmtime.Module.from_file(engine, module)
-
-
-def invoke(module, wasi, fuel=None, limit_files=False):
-    import wasmtime
-
-    store, linker, module = engine_and_module(module, fuel)
-    store.set_wasi(wasi)
-    try:
-        instance = linker.instantiate(store, module)
-        if limit_files:
-            resource.setrlimit(resource.RLIMIT_FSIZE, (FILE_LIMIT, FILE_LIMIT))
-        instance.exports(store)["_start"](store)
-    except wasmtime.ExitTrap as failure:
-        return failure.code
-    return 0
-
-
-def guest(workspace):
-    from wasmtime import Trap, WasiConfig, WasmtimeError
-
-    wasi = WasiConfig()
-    wasi.argv = ["python", "-S", "-B", f"/{JOB_FILE}"]
-    wasi.env = [("PYTHONHOME", "/stdlib"), ("PYTHONUTF8", "1")]
-    wasi.preopen_dir(workspace, "/")
-    wasi.preopen_dir(BUNDLE, "/stdlib", fs_mutable=False)
-    wasi.inherit_stdout()
-    wasi.inherit_stderr()
-    try:
-        return invoke(f"{BUNDLE}/python.wasm", wasi, fuel=900_000_000, limit_files=True)
-    except (Trap, WasmtimeError):
-        print("Python stopped because the sandbox hit a resource limit or a WASI error.", file=sys.stderr)
-        return 1
 
 
 def limited_process():
@@ -110,7 +61,7 @@ def collect(workspace):
     return output
 
 
-def run_job(data):
+def run_job(data, *, diagnostics=False):
     if not isinstance(data, dict) or not isinstance(code := data.get("code"), str):
         raise ValueError("Supply Python source code.")
     code = code.encode("utf-8")
@@ -126,7 +77,7 @@ def run_job(data):
         with tempfile.TemporaryFile(dir=JOB_ROOT) as stdout, tempfile.TemporaryFile(dir=JOB_ROOT) as stderr:
             try:
                 process = subprocess.run(
-                    [sys.executable, __file__, "--guest", workspace],
+                    [sys.executable, __file__, "--guest-self-test" if diagnostics else "--guest", workspace],
                     cwd=workspace, env={}, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
                     timeout=WALL_SECONDS, preexec_fn=limited_process,
                 )
@@ -137,6 +88,8 @@ def run_job(data):
             standard = stdout.read(OUTPUT_LIMIT).decode("utf-8", errors="replace")
             errors = stderr.read(OUTPUT_LIMIT).decode("utf-8", errors="replace")
             if process.returncode != 0:
+                if diagnostics and not errors:
+                    errors = f"Sandbox subprocess exited with status {process.returncode}."
                 return {"ok": False, "stdout": standard, "stderr": errors or "Python exceeded an execution limit.", "files": {}}
         return {"ok": True, "stdout": standard, "stderr": errors, "files": collect(workspace)}
 
@@ -202,13 +155,15 @@ def serve():
 def main():
     if sys.argv[1:2] == ["--guest"]:
         return guest(sys.argv[2])
+    if sys.argv[1:2] == ["--guest-self-test"]:
+        return guest(sys.argv[2], diagnostics=True)
     if sys.argv[1:] == ["--health"]:
         client = UnixConnection("localhost", timeout=3)
         client.request("GET", "/health")
         return int(client.getresponse().status != 200)
     if sys.argv[1:] == ["--self-test"]:
         result = run_job({"code": "import csv\nprint(open('input.txt').read())\nopen('out.txt', 'w').write('done')",
-                          "files": {"input.txt": "TinyBot"}})
+                          "files": {"input.txt": "TinyBot"}}, diagnostics=True)
         if not result["ok"] or result["stdout"] != "TinyBot\n" or result["files"].get("out.txt") != "done":
             print(result, file=sys.stderr)
             return 1
