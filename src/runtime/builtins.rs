@@ -86,7 +86,9 @@ impl Tool for Builtin {
                 "Get available MCP tool names and schemas. Args: connector, optional search."
             }
             Self::CallMcp => "Call a connector tool. Args: connector, tool, arguments object.",
-            Self::Browse => "Read visible text from a public HTTPS page. Args: url.",
+            Self::Browse => {
+                "Read visible text and links from a public website. Args: url (an HTTPS URL or a website domain)."
+            }
             Self::Form => {
                 "Ask for values to fill a website form. Args: url, optional zero-based index."
             }
@@ -120,7 +122,12 @@ impl Tool for Builtin {
         let risk = match self {
             Self::Browse | Self::Form => {
                 ensure!(ctx.owner, "browser access is restricted on shared agents");
-                let url = net::https(string(args, "url", 2048)?)?;
+                let raw = string(args, "url", 2048)?;
+                let url = if matches!(self, Self::Browse) {
+                    net::website(raw)?
+                } else {
+                    net::https(raw)?
+                };
                 destination = url.origin().ascii_serialization();
                 Risk::Read
             }

@@ -2,12 +2,35 @@ import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {chromium} from 'playwright';
 import {describe,populate,publicUrl} from './forms.mjs';
+import {allowsRead, visit} from './server.mjs';
 
 test('public URL parsing accepts HTTPS and rejects credentials, fragments and alternate ports', () => {
     assert.equal(publicUrl('https://example.org/form').href, 'https://example.org/form');
     for (const url of ['http://example.org/', 'https://example.org:444/', 'https://user@example.org/', 'https://example.org/#private']) {
         assert.throws(() => publicUrl(url));
     }
+});
+
+test('a website response explains challenge pages and other HTTP failures', async () => {
+    const url = new URL('https://fixture.example/');
+    const pageWith = (status, headers = {}) => ({
+        goto: async () => ({status: () => status, headers: () => headers, ok: () => status === 200}),
+        url: () => url.href,
+    });
+    assert.equal((await visit(pageWith(200), url)).href, url.href);
+    await assert.rejects(visit(pageWith(403, {'cf-mitigated': 'challenge'}), url), /Cloudflare requires verification/);
+    await assert.rejects(visit(pageWith(404), url), /returned HTTP 404/);
+});
+
+test('rendering allows page resources while rejecting write methods', () => {
+    assert.equal(allowsRead('GET', 'document', false), true);
+    assert.equal(allowsRead('GET', 'script', false), false);
+    assert.equal(allowsRead('GET', 'script', true), true);
+    assert.equal(allowsRead('GET', 'fetch', true), true);
+    assert.equal(allowsRead('HEAD', 'xhr', true), true);
+    assert.equal(allowsRead('POST', 'fetch', true), false);
+    assert.equal(allowsRead('PUT', 'xhr', true), false);
+    assert.equal(allowsRead('GET', 'websocket', true), false);
 });
 
 test('a native form can be inspected and filled and a changed target invalidates the approval', async () => {

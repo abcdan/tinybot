@@ -73,6 +73,28 @@ pub fn https(raw: &str) -> Result<Url> {
     Ok(url)
 }
 
+pub fn website(raw: &str) -> Result<Url> {
+    let raw = raw.trim();
+    let mut url = match Url::parse(raw) {
+        Ok(url) => url,
+        Err(url::ParseError::RelativeUrlWithoutBase)
+            if raw
+                .split(['/', '?', '#'])
+                .next()
+                .is_some_and(|host| host.contains('.')) =>
+        {
+            Url::parse(&format!("https://{raw}"))?
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if url.scheme() == "http" && url.port().is_none() {
+        url.set_scheme("https")
+            .map_err(|()| anyhow::anyhow!("expected a public HTTPS website"))?;
+    }
+    url.set_fragment(None);
+    https(url.as_str())
+}
+
 pub async fn request(method: reqwest::Method, url: &Url) -> Result<RequestBuilder> {
     https(url.as_str())?;
     let host = url
@@ -104,6 +126,29 @@ pub async fn body(mut response: reqwest::Response, limit: usize) -> Result<Vec<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn website_normalizes_user_links_without_expanding_https_access() {
+        for (input, expected) in [
+            (" example.org/docs ", "https://example.org/docs"),
+            ("http://example.org/#about", "https://example.org/"),
+            (
+                "https://example.org?q=public",
+                "https://example.org/?q=public",
+            ),
+        ] {
+            assert_eq!(website(input).unwrap().as_str(), expected);
+        }
+        for input in [
+            "/path/with.a.dot",
+            "https://user@example.org",
+            "http://example.org:81",
+            "ftp://example.org",
+            "https://example.org:444",
+        ] {
+            assert!(website(input).is_err(), "{input}");
+        }
+    }
 
     #[test]
     fn rejects_internal_and_special_addresses() {
