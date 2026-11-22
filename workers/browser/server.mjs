@@ -139,8 +139,9 @@ async function serve() {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-    serve().catch(() => {
-        console.error('TinyBot browser failed to start with Chromium isolation enabled.');
+    serve().catch(error => {
+        // Startup finishes before the worker accepts any user requests.
+        console.error('TinyBot browser failed to start with Chromium isolation enabled.', error.message);
         process.exit(1);
     });
 }

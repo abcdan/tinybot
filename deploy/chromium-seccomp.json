@@ -64,6 +64,12 @@
 			"excludes": {}
 		},
 		{
+			"comment": "Return ENOSYS for clone3 so glibc falls back to clone for thread creation.",
+			"names": ["clone3"],
+			"action": "SCMP_ACT_ERRNO",
+			"errnoRet": 38
+		},
+		{
 			"names": [
 				"accept",
 				"accept4",
