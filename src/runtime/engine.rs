@@ -3,6 +3,7 @@ use super::review::{Verdict, review};
 use super::{Call, ENGINE, Outcome, Risk, Step, ToolContext, connector_context, descriptions};
 use crate::{
     App,
+    channel::ChannelAdapter,
     model::json_reply,
     schedules,
     security::{clip, id, now},
@@ -13,7 +14,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 
-pub async fn run(app: Arc<App>) {
+pub async fn run(app: Arc<App>, channel: Arc<dyn ChannelAdapter>) {
     let mut jobs = tokio::task::JoinSet::new();
     let mut cleanup = tokio::time::interval(Duration::from_secs(12));
     loop {
@@ -30,8 +31,16 @@ pub async fn run(app: Arc<App>) {
                 match store::claim(&app.db).await {
                     Ok(Some(task))=>{
                         let app=app.clone();
+                        let channel=channel.clone();
                         jobs.spawn(async move {
-                            if let Err(error)=work(&app,&task).await {
+                            let processing=work(&app,&task);
+                            tokio::pin!(processing);
+                            let result=tokio::select! {
+                                biased;
+                                result=&mut processing=>result,
+                                ()=show_typing(&app,&task,&*channel)=>processing.await,
+                            };
+                            if let Err(error)=result {
                                 tracing::warn!(task=%task.id,error_category=%error,"task paused");
                                 let _=store::settle(&app.db,&task,"blocked",Some(
                                     "I paused this task because a model or tool could not finish. Check the Mini App configuration, then send a message to continue."
@@ -44,6 +53,22 @@ pub async fn run(app: Arc<App>) {
                 }
             }
         }
+    }
+}
+
+async fn show_typing(app: &App, task: &Task, channel: &dyn ChannelAdapter) {
+    let mut delay = Duration::from_millis(400);
+    loop {
+        tokio::time::sleep(delay).await;
+        if !matches!(store::current(&app.db, task).await, Ok(true)) {
+            return;
+        }
+        delay = channel
+            .typing(&task.user)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(Duration::from_secs(4));
     }
 }
 
