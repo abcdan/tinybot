@@ -172,20 +172,65 @@ pub async fn answer(
     request: &str,
     values: BTreeMap<String, String>,
 ) -> Result<()> {
-    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
-    let pending: Pending = sqlx::query_as(
-        "SELECT p.* FROM pending p JOIN tasks t ON t.id=p.task
+    submit_answer(db, user, request, |_| Ok(values)).await
+}
+
+pub async fn widget_choice(db: &SqlitePool, user: &str, request: &str) -> Result<Value> {
+    let pending = waiting_input(db, user, request).await?;
+    let spec: FormSpec = serde_json::from_str(&pending.payload)?;
+    spec.validate()?;
+    let field = spec
+        .widget_choice()
+        .context("answer this form in Settings & forms")?;
+    Ok(json!({"id":pending.id,"label":field.label,"options":field.options}))
+}
+
+pub async fn answer_choice(
+    db: &SqlitePool,
+    user: &str,
+    request: &str,
+    option: usize,
+) -> Result<()> {
+    submit_answer(db, user, request, |spec| {
+        let field = spec
+            .widget_choice()
+            .context("answer this form in Settings & forms")?;
+        let value = field.options.get(option).context("invalid choice")?;
+        Ok(BTreeMap::from([(field.name.clone(), value.clone())]))
+    })
+    .await
+}
+
+async fn waiting_input<'a>(
+    db: impl sqlx::Executor<'a, Database = sqlx::Sqlite>,
+    user: &str,
+    request: &str,
+) -> Result<Pending> {
+    sqlx::query_as(
+        "SELECT p.* FROM pending p JOIN tasks t ON t.id=p.task AND t.user=p.user
         WHERE p.id=? AND p.user=? AND p.kind='elicitation' AND p.state='waiting' AND p.expires>=?
-        AND t.revision=p.revision AND t.state='waiting'",
+        AND t.revision=p.revision AND t.state='waiting'
+        AND (t.agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=t.agent AND a.owner=p.user))",
     )
     .bind(request)
     .bind(user)
     .bind(now())
-    .fetch_optional(&mut *tx)
+    .fetch_optional(db)
     .await?
-    .context("form expired")?;
+    .context("form expired or unavailable")
+}
+
+async fn submit_answer(
+    db: &SqlitePool,
+    user: &str,
+    request: &str,
+    values: impl FnOnce(&FormSpec) -> Result<BTreeMap<String, String>>,
+) -> Result<()> {
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+    let pending = waiting_input(&mut *tx, user, request).await?;
     let spec: FormSpec = serde_json::from_str(&pending.payload)?;
     spec.validate()?;
+    let values = values(&spec)?;
     validate_values(&spec.fields, &values)?;
     sqlx::query("UPDATE pending SET state='done' WHERE id=?")
         .bind(request)
@@ -194,7 +239,7 @@ pub async fn answer(
     sqlx::query("INSERT INTO events(task,role,body) VALUES(?,'user',?)")
         .bind(&pending.task)
         .bind(format!(
-            "My answers to your Mini App form: {}",
+            "My answers to your form: {}",
             serde_json::to_string(&values)?
         ))
         .execute(&mut *tx)
