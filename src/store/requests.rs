@@ -4,6 +4,15 @@ use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 use sqlx::SqlitePool;
 
+pub async fn list_requests(db: &SqlitePool, user: &str) -> Result<Vec<Pending>> {
+    Ok(sqlx::query_as("SELECT p.* FROM pending p JOIN tasks t ON t.id=p.task
+        WHERE p.user=? AND p.state='waiting' AND p.expires>=? AND p.kind IN ('approve','form','form-submit','agent-spec','elicitation')
+        AND t.state='waiting' AND t.revision=p.revision
+        AND (t.agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=t.agent
+        AND (a.owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=?))))
+        ORDER BY p.expires, p.id LIMIT 30").bind(user).bind(now()).bind(user).bind(user).fetch_all(db).await?)
+}
+
 pub async fn pause(
     db: &SqlitePool,
     task: &Task,

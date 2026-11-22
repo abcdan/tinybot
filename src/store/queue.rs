@@ -3,6 +3,20 @@ use crate::security::{clip, now};
 use anyhow::Result;
 use sqlx::SqlitePool;
 
+pub async fn list_tasks(db: &SqlitePool, user: &str) -> Result<Vec<Task>> {
+    Ok(sqlx::query_as("SELECT * FROM tasks t WHERE user=? AND state<>'revoked' AND (agent IS NULL OR EXISTS
+        (SELECT 1 FROM agents a WHERE a.id=t.agent AND (a.owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=?))))
+        ORDER BY updated DESC, id LIMIT 40").bind(user).bind(user).bind(user).fetch_all(db).await?)
+}
+
+pub async fn select_task(db: &SqlitePool, user: &str, task: &str) -> Result<bool> {
+    let changed=sqlx::query("UPDATE users SET active_task=? WHERE id=? AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=?
+        AND t.user=? AND t.state NOT IN ('cancelled','revoked') AND (t.agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=t.agent
+        AND (a.owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=?)))))")
+        .bind(task).bind(user).bind(task).bind(user).bind(user).bind(user).execute(db).await?.rows_affected();
+    Ok(changed == 1)
+}
+
 pub async fn recover(db: &SqlitePool) -> Result<()> {
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query("UPDATE tasks SET state='queued' WHERE state='running'")

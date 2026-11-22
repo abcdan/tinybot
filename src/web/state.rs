@@ -1,9 +1,4 @@
-use crate::{
-    App,
-    mcp::Connector,
-    security::{clip, now},
-    store::{self, Pending, Task},
-};
+use crate::{App, mcp::Connector, security::clip, store};
 use anyhow::Result;
 use serde_json::{Value, json};
 
@@ -31,15 +26,9 @@ pub(super) async fn status(app: &App, user: &str) -> Result<Value> {
             }
         })
         .collect::<Vec<_>>();
-    let tasks:Vec<Task>=sqlx::query_as("SELECT * FROM tasks t WHERE user=? AND state<>'revoked' AND (agent IS NULL OR EXISTS
-        (SELECT 1 FROM agents a WHERE a.id=t.agent AND (a.owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=?))))
-        ORDER BY updated DESC LIMIT 40").bind(user).bind(user).bind(user).fetch_all(&app.db).await?;
-    let pending:Vec<Pending>=sqlx::query_as("SELECT p.* FROM pending p JOIN tasks t ON t.id=p.task
-        WHERE p.user=? AND p.state='waiting' AND p.expires>=? AND p.kind IN ('approve','form','form-submit','agent-spec','elicitation')
-        AND (t.agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=t.agent
-        AND (a.owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=?))))
-        ORDER BY p.expires LIMIT 30").bind(user).bind(now()).bind(user).bind(user).fetch_all(&app.db).await?;
-    let requests = pending
+    let tasks = store::list_tasks(&app.db, user).await?;
+    let requests = store::list_requests(&app.db, user)
+        .await?
         .into_iter()
         .map(|entry| {
             let mut payload: Value = serde_json::from_str(&entry.payload).unwrap_or_default();

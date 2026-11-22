@@ -207,11 +207,10 @@ async fn operation(app: &App, user: &str, action: &str, data: Value) -> Result<V
         }
         "select-task" => {
             let task = text(&data, "task", 64)?;
-            let changed=sqlx::query("UPDATE users SET active_task=? WHERE id=? AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=?
-                AND t.user=? AND t.state NOT IN ('cancelled','revoked') AND (t.agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=t.agent
-                AND (a.owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=?)))))")
-                .bind(task).bind(user).bind(task).bind(user).bind(user).bind(user).execute(&app.db).await?.rows_affected();
-            ensure!(changed == 1, "task unavailable");
+            ensure!(
+                store::select_task(&app.db, user, task).await?,
+                "task unavailable"
+            );
         }
         "search-mcp" => {
             result = serde_json::to_value(
