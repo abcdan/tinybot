@@ -1,7 +1,7 @@
 <style>
 body {
     margin: 0;
-    padding: 10px 12px max(12px, env(content-safe-area-inset-bottom));
+    padding: 10px 12px max(12px, env(safe-area-inset-bottom));
     color: var(--tg-theme-text-color, #17212b);
     font: 14px sans-serif;
 }
@@ -14,7 +14,7 @@ button {
     color: var(--tg-theme-link-color, #236994);
     font: inherit;
 }
-button[aria-pressed="true"], .primary {
+button[aria-pressed="true"] {
     background: var(--tg-theme-button-color, #236994);
     color: var(--tg-theme-button-text-color, #fff);
 }
