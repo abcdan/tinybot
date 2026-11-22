@@ -14,9 +14,20 @@ use sqlx::SqlitePool;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+pub type TextDelta<'a> = dyn FnMut(&str) + Send + 'a;
+
 #[async_trait]
 pub trait ModelProvider: Send + Sync {
     async fn complete(&self, system: &str, input: &str) -> Result<String>;
+
+    async fn complete_streaming(
+        &self,
+        system: &str,
+        input: &str,
+        _delta: &mut TextDelta<'_>,
+    ) -> Result<String> {
+        self.complete(system, input).await
+    }
 }
 
 pub struct Models {
@@ -183,6 +194,10 @@ pub async fn json_reply<T: DeserializeOwned>(
     input: &Value,
 ) -> Result<T> {
     let response = model.complete(instructions, &input.to_string()).await?;
+    parse_json_reply(&response)
+}
+
+pub fn parse_json_reply<T: DeserializeOwned>(response: &str) -> Result<T> {
     let text = response.trim();
     let text = text
         .strip_prefix("```json")
