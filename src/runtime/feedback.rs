@@ -38,11 +38,23 @@ impl Feedback {
                 source.push_str(clip(text, remaining));
             }
         };
-        let response = tokio::select! {
+        let streamed = tokio::select! {
+            biased;
             _ = self.stale.notified() => return Ok(None),
-            result = model.complete_streaming(ENGINE, &input, &mut append) => result?,
+            result = model.complete_streaming(ENGINE, &input, &mut append) => result,
         };
-        Ok(Some(parse_json_reply(&response)?))
+        if let Ok(step) = streamed.and_then(|response| parse_json_reply(&response)) {
+            return Ok(Some(step));
+        }
+
+        self.source.lock().expect("draft buffer").clear();
+        tracing::debug!("streamed model response failed; retrying with buffered completion");
+        let buffered = tokio::select! {
+            biased;
+            _ = self.stale.notified() => return Ok(None),
+            result = model.complete(ENGINE, &input) => result?,
+        };
+        parse_json_reply(&buffered).map(Some)
     }
 
     pub(super) async fn show(&self, db: &SqlitePool, task: &Task, channel: &dyn ChannelAdapter) {
@@ -166,7 +178,10 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::json;
     use sqlx::sqlite::SqlitePoolOptions;
-    use std::future::pending;
+    use std::{
+        future::pending,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     #[test]
     fn previews_only_the_reply_string_as_its_escapes_arrive() {
@@ -199,6 +214,78 @@ mod tests {
             reply_preview(r#"{"kind":"reply","text":"visible","secret":"hidden"}"#).as_deref(),
             Some("visible")
         );
+    }
+
+    struct FallbackModel {
+        streamed: Option<&'static str>,
+        buffered: Option<&'static str>,
+        calls: AtomicUsize,
+        buffering: Notify,
+    }
+
+    #[async_trait]
+    impl ModelProvider for FallbackModel {
+        async fn complete(&self, _: &str, _: &str) -> Result<String> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.buffering.notify_one();
+            match self.buffered {
+                Some(text) => Ok(text.into()),
+                None => pending().await,
+            }
+        }
+
+        async fn complete_streaming(
+            &self,
+            _: &str,
+            _: &str,
+            delta: &mut TextDelta<'_>,
+        ) -> Result<String> {
+            delta(r#"{"kind":"reply","text":"Incomplete"#);
+            self.streamed
+                .map(String::from)
+                .ok_or_else(|| anyhow::anyhow!("provider stream failed"))
+        }
+    }
+
+    #[tokio::test]
+    async fn retries_a_failed_or_invalid_stream_once_without_drafting_the_fallback() {
+        for streamed in [None, Some(r#"{"kind":"reply","text":"Incomplete"#)] {
+            let model = FallbackModel {
+                streamed,
+                buffered: Some(r#"{"kind":"reply","text":"Recovered"}"#),
+                calls: AtomicUsize::new(0),
+                buffering: Notify::new(),
+            };
+            let feedback = Feedback::default();
+            let result = feedback.complete(&model, &json!({})).await.unwrap();
+            assert!(matches!(result, Some(Step::Reply { text }) if text == "Recovered"));
+            assert_eq!(model.calls.load(Ordering::Relaxed), 1);
+            assert!(feedback.source.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_task_revision_change_cancels_the_buffered_retry() {
+        let model = FallbackModel {
+            streamed: None,
+            buffered: None,
+            calls: AtomicUsize::new(0),
+            buffering: Notify::new(),
+        };
+        let feedback = Feedback::default();
+        let input = json!({});
+        let complete = feedback.complete(&model, &input);
+        let change_revision = async {
+            model.buffering.notified().await;
+            feedback.stale.notify_one();
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(complete, change_revision)
+        })
+        .await
+        .unwrap();
+        assert!(result.unwrap().is_none());
+        assert_eq!(model.calls.load(Ordering::Relaxed), 1);
     }
 
     #[derive(Default)]
