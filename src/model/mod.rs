@@ -67,7 +67,7 @@ impl Models {
         self
     }
 
-    async fn openrouter_key(&self, user: &str) -> Result<String> {
+    async fn configured_openrouter_key(&self, user: &str) -> Result<Option<String>> {
         let (auxiliary, task): (Option<String>, Option<String>) = sqlx::query_as(
             "SELECT openrouter_key,
             CASE WHEN provider='openrouter' THEN credential END FROM users WHERE id=?",
@@ -76,17 +76,21 @@ impl Models {
         .fetch_one(&self.db)
         .await?;
         if let Some(key) = auxiliary {
-            return Ok(String::from_utf8(
+            return Ok(Some(String::from_utf8(
                 self.vault.open(&format!("openrouter:{user}"), &key)?,
-            )?);
+            )?));
         }
         if let Some(key) = task {
-            return Ok(String::from_utf8(
+            return Ok(Some(String::from_utf8(
                 self.vault.open(&format!("model:{user}"), &key)?,
-            )?);
+            )?));
         }
-        self.review_key.clone().context(
-            "Add an OpenRouter key in the Mini App for Mercury 3 or the configured decision model.",
+        Ok(self.review_key.clone())
+    }
+
+    async fn openrouter_key(&self, user: &str) -> Result<String> {
+        self.configured_openrouter_key(user).await?.context(
+            "Add an OpenRouter key under Settings & forms for the configured decision model.",
         )
     }
 
@@ -95,8 +99,11 @@ impl Models {
         if let Some(model) = &self.fixture {
             return Ok(model.clone());
         }
+        let Some(key) = self.configured_openrouter_key(user).await? else {
+            return self.provider(user, false).await;
+        };
         Ok(Arc::new(OpenRouter {
-            key: self.openrouter_key(user).await?,
+            key,
             model: "inception/mercury-3".into(),
         }))
     }
@@ -206,4 +213,37 @@ pub fn parse_json_reply<T: DeserializeOwned>(response: &str) -> Result<T> {
         .unwrap_or(text)
         .trim();
     Ok(serde_json::from_str(text).context("model returned an invalid structured response")?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn codex_can_generate_forms_without_an_openrouter_key() {
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!().run(&db).await.unwrap();
+        crate::store::seed(&db, "1").await.unwrap();
+        let vault = Vault::new(&"f1".repeat(32)).unwrap();
+        let profile = json!({
+            "client_id":"test","access_token":"dummy","refresh_token":"dummy",
+            "id_token":"dummy","subject":"test","expires":now()+600
+        });
+        let credential = vault
+            .seal("model:1", profile.to_string().as_bytes())
+            .unwrap();
+        sqlx::query(
+            "UPDATE users SET provider='codex',model='test-model',credential=? WHERE id='1'",
+        )
+        .bind(credential)
+        .execute(&db)
+        .await
+        .unwrap();
+        let models = Models::new(db, vault, "codex".into(), None, None);
+        assert!(models.forms("1").await.is_ok());
+    }
 }
