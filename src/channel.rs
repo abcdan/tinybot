@@ -41,6 +41,10 @@ pub trait ChannelAdapter: Send + Sync {
     async fn typing(&self, _user: &str) -> Result<Option<Duration>> {
         Ok(None)
     }
+
+    async fn draft(&self, _user: &str, _id: i32, _text: &str) -> Result<Option<Duration>> {
+        Ok(None)
+    }
 }
 
 pub struct Telegram {
@@ -63,7 +67,8 @@ impl Telegram {
     }
 
     async fn feedback(&self, method: &str, data: Value) -> Result<Option<Duration>> {
-        let output = tokio::time::timeout(Duration::from_secs(3), self.call(method, data)).await??;
+        let output =
+            tokio::time::timeout(Duration::from_secs(3), self.call(method, data)).await??;
         if output["ok"] == true {
             return Ok(None);
         }
@@ -130,6 +135,15 @@ impl ChannelAdapter for Telegram {
         let user = user.parse::<i64>().context("invalid Telegram recipient")?;
         self.feedback("sendChatAction", json!({"chat_id":user,"action":"typing"}))
             .await
+    }
+
+    async fn draft(&self, user: &str, id: i32, text: &str) -> Result<Option<Duration>> {
+        let user = user.parse::<i64>().context("invalid Telegram recipient")?;
+        self.feedback(
+            "sendMessageDraft",
+            json!({"chat_id":user,"draft_id":id,"text":text}),
+        )
+        .await
     }
 
     async fn receive(&self, offset: i64) -> Result<(Vec<Inbound>, i64)> {

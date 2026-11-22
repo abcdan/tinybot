@@ -46,7 +46,9 @@ impl ModelProvider for OpenRouter {
             let mut stream = agent.stream_prompt(input).await;
             while let Some(item) = stream.next().await {
                 match item.map_err(|_| anyhow!("OpenRouter could not complete the request"))? {
-                    MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text)) => {
+                    MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
+                        text,
+                    )) => {
                         delta(&text.text);
                     }
                     MultiTurnStreamItem::FinalResponse(response) => {
