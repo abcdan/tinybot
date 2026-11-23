@@ -1,6 +1,35 @@
 import { action, button, card, field, form, node, row } from './mini-ui.js';
 import { api, content, refresh, show, telegram } from './mini.js';
 
+export function browser({browser_proxy: proxy}) {
+    const status = {
+        saved: 'Using the saved proxy for browser traffic.',
+        environment: 'Using the proxy configured in deployment settings.',
+        direct: 'Using a direct browser connection.',
+    }[proxy.source];
+    if (!status) {
+        content.append(card('Browser proxy', 'Proxy settings are unavailable. Tap Refresh to try again.'));
+        return;
+    }
+    const settings = card('Browser proxy', status);
+    const url = field('url', 'Proxy URL', {
+        type: 'password', max: 2048,
+        hint: 'Use a socks5:// or http:// URL. For a proxy with credentials, add username:password@ before the host.',
+    });
+    settings.append(form('Save proxy', [url], async (data, element) => {
+        show('Saving browser proxy…');
+        try {
+            await api('save-browser-proxy', data);
+            show('Browser proxy saved.');
+            await refresh();
+        } finally { element.reset(); }
+    }));
+    if (proxy.source === 'saved') {
+        settings.append(row(action('Remove saved proxy', 'remove-browser-proxy', {}, 'Saved proxy removed.', true)));
+    }
+    content.append(settings);
+}
+
 export function schedules(state) {
     const zone = card('Time zone', 'Ask your Chief to set a reminder or schedule a task. For example, “Remind me to review the report every Monday at 9 am.”');
     zone.append(form('Save time zone', [field('zone', 'IANA time zone', {value: state.time_zone, max: 100})], async data => {

@@ -2,13 +2,14 @@ import { action, button, card, field, form, node, row } from './mini-ui.js';
 import { agentForm, agents } from './mini-agents.js';
 import { audit } from './mini-audit.js';
 import { connectors } from './mini-connectors.js';
-import { schedules, model } from './mini-settings.js';
+import { browser, schedules, model } from './mini-settings.js';
 
 export const telegram = window.Telegram?.WebApp;
 export const content = document.querySelector('#view');
 const notice = document.querySelector('#status');
 const refreshButton = document.querySelector('#refresh');
 const tabs = document.querySelector('#tabs');
+const browserTab = tabs.querySelector('[data-tab="browser"]');
 const sourceLink = document.querySelector('#source-link');
 const formId = new URLSearchParams(window.location.search).get('form');
 let state;
@@ -45,7 +46,9 @@ export async function refresh() {
             content.replaceChildren(item);
         } else {
             state = result;
-            render();
+            browserTab.hidden = state.browser_proxy == null;
+            if (tab === 'browser' && browserTab.hidden) setTab('home');
+            else render();
         }
     } catch (error) {
         if (sequence === generation) {
@@ -67,7 +70,7 @@ function setTab(next) {
 function render() {
     if (!state) return;
     content.replaceChildren();
-    ({home, agents, connectors, schedules, audit, model})[tab](state);
+    ({home, agents, connectors, browser, schedules, audit, model})[tab](state);
 }
 
 function home() {
