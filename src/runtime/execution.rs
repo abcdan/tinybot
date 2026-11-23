@@ -1,5 +1,5 @@
 use super::{Call, Outcome, ToolContext};
-use crate::{security::clip, store};
+use crate::{audit, security::clip, store};
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 
@@ -15,7 +15,10 @@ pub(super) async fn execute_approved(ctx: &ToolContext<'_>, payload: Call) -> Re
         .find(|tool| tool.name() == payload.name)
         .context("tool unavailable")?;
     tool.inspect(ctx, &payload.args).await?;
-    tool.execute(ctx, payload.args).await
+    audit::tool_started(tool.name(), &payload.args).await;
+    let result = tool.execute(ctx, payload.args).await;
+    audit::tool_finished(tool.name(), &result).await;
+    result
 }
 
 pub(super) async fn finish(
