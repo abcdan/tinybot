@@ -517,3 +517,137 @@ async fn chief_uses_live_steering_and_escalates_the_helpers_question() {
     assert!(history.iter().all(|entry| entry.2 != "superseded response"));
     assert_eq!(history.last().unwrap().2, "Which quarter should I use?");
 }
+
+struct ReplyMenuModel;
+
+#[async_trait]
+impl ModelProvider for ReplyMenuModel {
+    async fn complete(&self, _: &str, _: &str) -> Result<String> {
+        Ok(json!({
+            "kind":"reply","text":"Which summary would you like?",
+            "suggested_replies":["Give me the short version.", "/cancel", 13, "Give me the details."]
+        })
+        .to_string())
+    }
+}
+
+#[tokio::test]
+async fn tapped_reply_resumes_its_original_task_once() {
+    let db = fixture().await;
+    let app = app_with_model(&db, Arc::new(ReplyMenuModel));
+    message(&db, 101, "1", "Summarize the options.").await;
+    let task = store::claim(&db).await.unwrap().unwrap();
+    runtime::work(&app, &task).await.unwrap();
+    let item = store::claim_outbox(&db).await.unwrap().unwrap();
+    assert_eq!(item.body, "Which summary would you like?");
+    let options = store::suggested_replies(&db, item.id).await.unwrap();
+    assert_eq!(options.len(), 2);
+    assert_eq!(options[0].body, "Give me the short version.");
+    assert_eq!(options[1].body, "Give me the details.");
+    assert!(
+        !store::redeem_reply(&db, "2", &options[0].token)
+            .await
+            .unwrap()
+    );
+
+    message(&db, 102, "1", "/new A different task").await;
+    let different_task: String = sqlx::query_scalar("SELECT active_task FROM users WHERE id='1'")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_ne!(different_task, task.id);
+
+    // A message already accepted by Telegram may have been visible before recovery.
+    store::recover(&db).await.unwrap();
+    let (first, second) = tokio::join!(
+        store::redeem_reply(&db, "1", &options[0].token),
+        store::redeem_reply(&db, "1", &options[1].token),
+    );
+    let first = first.unwrap();
+    assert_ne!(first, second.unwrap());
+    assert!(
+        !store::redeem_reply(&db, "1", &options[0].token)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store::redeem_reply(&db, "1", &options[1].token)
+            .await
+            .unwrap()
+    );
+
+    let current = task_for(&db, &task.id).await;
+    assert_eq!(current.revision, task.revision + 1);
+    assert_eq!(current.state, "queued");
+    let active: String = sqlx::query_scalar("SELECT active_task FROM users WHERE id='1'")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(active, task.id);
+    let events = store::history(&db, &task.id).await.unwrap();
+    let (_, role, body) = events.last().unwrap();
+    assert_eq!(role, "user");
+    assert_eq!(body, &options[if first { 0 } else { 1 }].body);
+    assert_eq!(store::history(&db, &different_task).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn stale_expired_and_revoked_reply_buttons_cannot_queue_input() {
+    let db = fixture().await;
+    sqlx::query("INSERT INTO agents(id,owner,name,instructions,tools) VALUES('helper','2','Helper','','[]')")
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO grants(agent,member) VALUES('helper','1')")
+        .execute(&db)
+        .await
+        .unwrap();
+    let app = app_with_model(&db, Arc::new(ReplyMenuModel));
+    message(&db, 103, "1", "/use helper").await;
+    store::claim_outbox(&db).await.unwrap().unwrap();
+    message(&db, 104, "1", "Give me options.").await;
+    let task = store::claim(&db).await.unwrap().unwrap();
+    runtime::work(&app, &task).await.unwrap();
+    let item = store::claim_outbox(&db).await.unwrap().unwrap();
+    let options = store::suggested_replies(&db, item.id).await.unwrap();
+    assert_eq!(options.len(), 2);
+
+    sqlx::query("UPDATE suggested_replies SET expires=0 WHERE token=?")
+        .bind(&options[0].token)
+        .execute(&db)
+        .await
+        .unwrap();
+    assert!(
+        !store::redeem_reply(&db, "1", &options[0].token)
+            .await
+            .unwrap()
+    );
+    sqlx::query("DELETE FROM grants WHERE agent='helper' AND member='1'")
+        .execute(&db)
+        .await
+        .unwrap();
+    assert!(
+        !store::redeem_reply(&db, "1", &options[1].token)
+            .await
+            .unwrap()
+    );
+
+    sqlx::query("INSERT INTO grants(agent,member) VALUES('helper','1')")
+        .execute(&db)
+        .await
+        .unwrap();
+    message(&db, 105, "1", "This follow-up is newer.").await;
+    let revised = store::claim(&db).await.unwrap().unwrap();
+    runtime::work(&app, &revised).await.unwrap();
+    assert!(
+        store::suggested_replies(&db, item.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !store::redeem_reply(&db, "1", &options[1].token)
+            .await
+            .unwrap()
+    );
+}
