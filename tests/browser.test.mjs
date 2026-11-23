@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {chromium, errors} from 'playwright';
 import {describe,populate,publicUrl} from './forms.mjs';
-import {allowsRead, indexedUrl, readableUrl, visit} from './server.mjs';
+import {allowsRead, indexedUrl, readableUrl, search, visit} from './server.mjs';
 
 test('public URL parsing accepts HTTPS and rejects credentials, fragments and alternate ports', () => {
     assert.equal(publicUrl('https://example.org/form').href, 'https://example.org/form');
@@ -65,6 +65,46 @@ test('indexed links use the published website rather than a search provider redi
     assert.equal(indexedUrl(google, 'www.google.com'), target);
     assert.throws(() => indexedUrl('https://www.bing.com/ck/a?u=bad', 'www.bing.com'));
     assert.throws(() => indexedUrl('https://www.google.com/url?q=http://example.org', 'www.google.com'));
+});
+
+function searchFixture(bing, google = []) {
+    const providers = {'www.bing.com': bing, 'www.google.com': google};
+    const visits = [];
+    let url;
+    const page = {
+        goto: async href => {
+            url = new URL(href);
+            visits.push(url.hostname);
+            return {status: () => 200, headers: () => ({}), ok: () => true};
+        },
+        url: () => url.href,
+        locator: () => ({evaluateAll: async () => providers[url.hostname]}),
+    };
+    return {page, visits};
+}
+
+test('a literal domain search prefers a first-party result to an indexed mention', async () => {
+    const mention = {url: 'https://directory.example/1', title: 'Studio profile', description: 'Website: lngzl.nl.'};
+    const irrelevant = {url: 'https://www.google.nl/index.html', title: 'Google', description: 'Public search'};
+    const official = {url: 'https://lngzl.nl/', title: 'Studio', description: ''};
+    const {page, visits} = searchFixture([irrelevant, mention], [official]);
+    assert.deepEqual(await search(page, ' LNGZL.nl '), {results: [official]});
+    assert.deepEqual(visits, ['www.bing.com', 'www.google.com']);
+    const mentionsOnly = searchFixture([irrelevant, mention]);
+    assert.deepEqual(await search(mentionsOnly.page, 'lngzl.nl'), {results: [mention]});
+});
+
+test('a site-scoped search rejects unrelated hosts and falls back to the next provider', async () => {
+    const deceptive = {url: 'https://lngzl.nl.other.example/', title: 'Directory', description: 'This says lngzl.nl'};
+    const official = {url: 'https://docs.lngzl.nl/hosting', title: 'Hosting', description: ''};
+    const {page, visits} = searchFixture([deceptive], [deceptive, official]);
+    assert.deepEqual(await search(page, 'site:lngzl.nl hosting'), {results: [official]});
+    assert.deepEqual(visits, ['www.bing.com', 'www.google.com']);
+    const noMatch = searchFixture([deceptive]);
+    await assert.rejects(search(noMatch.page, 'site:lngzl.nl'), /did not return a result for this domain/);
+    const generic = searchFixture([deceptive], [official]);
+    assert.deepEqual(await search(generic.page, 'digital studios'), {results: [deceptive]});
+    assert.deepEqual(generic.visits, ['www.bing.com']);
 });
 
 test('a native form can be inspected and filled and a changed target invalidates the approval', async () => {

@@ -57,8 +57,29 @@ export function indexedUrl(raw, host) {
     return url.href;
 }
 
-async function search(page, query) {
+function domainName(value) {
+    if (!value.includes('.') || !/^[\p{L}\p{N}.-]+$/u.test(value)) return null;
+    try {
+        const domain = new URL('https://' + value).hostname.replace(/\.$/, '');
+        const labels = domain.split('.');
+        return labels.length > 1 && /[a-z]/.test(labels.at(-1)) &&
+            labels.every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label)) ? domain : null;
+    } catch { return null; }
+}
+
+function withinDomain(host, domain) {
+    return host === domain || Boolean(host?.endsWith('.' + domain));
+}
+
+export async function search(page, query) {
     requireInput(typeof query === 'string' && query.trim() && query.length <= 240, 'Invalid search query.');
+    const siteOperators = [...query.matchAll(/(?:^|\s)site:([^\s]+)/gi)];
+    const sites = siteOperators.map(([, value]) =>
+        domainName(value.replace(/^https?:\/\//i, '').split('/')[0])).filter(Boolean);
+    requireInput(!siteOperators.length || sites.length, 'Choose a valid domain for the site: search.');
+    const literalDomain = sites.length ? null : domainName(query.trim());
+    const domains = literalDomain ? [literalDomain] : sites;
+    const mentions = new Map();
     const providers = [
         ['www.bing.com', 'li.b_algo h2 a'],
         ['www.google.com', 'a h3'],
@@ -78,13 +99,28 @@ async function search(page, query) {
             const results = candidates.flatMap(candidate => {
                 try { return [{...candidate, url: indexedUrl(candidate.url, host)}]; }
                 catch { return []; }
-            }).slice(0, 8);
-            if (results.length) return {results};
+            });
+            const matching = results.filter(result => {
+                const host = new URL(result.url).hostname.replace(/\.$/, '');
+                return !domains.length || domains.some(domain => withinDomain(host, domain));
+            });
+            if (matching.length) return {results: matching.slice(0, 8)};
+            if (literalDomain) {
+                for (const result of results) {
+                    const words = (result.title + ' ' + result.description).match(/[\p{L}\p{N}.-]+/gu) || [];
+                    if (words.some(word => withinDomain(domainName(word), literalDomain))) {
+                        mentions.set(result.url, result);
+                    }
+                }
+            }
         } catch {
             // Search providers can redirect or challenge automated browsers.
         }
     }
-    throw new InputError('The search providers did not return public results.');
+    if (mentions.size) return {results: [...mentions.values()].slice(0, 8)};
+    throw new InputError(domains.length ?
+        'The search providers did not return a result for this domain.' :
+        'The search providers did not return public results.');
 }
 
 async function operate(browser, route, data) {
