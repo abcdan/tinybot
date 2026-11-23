@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use tokio::sync::Notify;
 
 mod agent_memory;
+mod anything_mcp;
 mod attachments;
 mod audit_log;
 mod browser_settings;

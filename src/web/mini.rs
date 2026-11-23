@@ -133,6 +133,8 @@ async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<
         "revoke-connector" => connectors::revoke(app, user, data).await?,
         "search-mcp" => return connectors::search_mcp(app, data).await,
         "add-mcp" => return connectors::add_mcp(app, user, data).await,
+        "add-anything-mcp" => return connectors::add_anything_mcp(app, user, data).await,
+        "mcp-tools" => return connectors::list_tools(app, user, data).await,
         "mcp-oauth" => return connectors::oauth_start(app, user, data).await,
         "mcp-token" => connectors::save_token(app, user, data).await?,
         "mcp-public" => connectors::save_public(app, user, data).await?,

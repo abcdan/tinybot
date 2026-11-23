@@ -194,11 +194,12 @@ async fn oauth(
 ) -> Html<&'static str> {
     let state = query.get("state").filter(|state| state.len() == 43);
     let code = query.get("code").filter(|code| code.len() < 8192);
+    let issuer = query.get("iss").filter(|issuer| issuer.len() <= 2048);
     match state {
         Some(state)
             if app
                 .mcp
-                .oauth_finish(state, code.map(String::as_str))
+                .oauth_finish(state, code.map(String::as_str), issuer.map(String::as_str))
                 .await
                 .is_ok()
                 && code.is_some() =>
