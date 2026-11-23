@@ -1,6 +1,6 @@
 use super::{Api, ApiError, agents, forbidden, invalid, origin, state};
 use crate::{
-    App,
+    App, audit,
     mcp::Candidate,
     model::OpenRouterSettingsError,
     security::{hash, id, now, telegram_user, token},
@@ -49,6 +49,8 @@ pub(super) async fn mini(
                     StatusCode::NOT_FOUND,
                     "This form is no longer available. Open a fresh form from TinyBot in Telegram.",
                 )
+            } else if action == "audit-session" {
+                ApiError(StatusCode::NOT_FOUND, "This audit session is no longer available.")
             } else if let Some(error) = error.downcast_ref::<OpenRouterSettingsError>() {
                 match error {
                     OpenRouterSettingsError::MissingKey => ApiError(StatusCode::BAD_REQUEST, "Connect your OpenRouter key first."),
@@ -75,6 +77,19 @@ async fn operation(app: &App, user: &str, action: &str, data: Value) -> Result<V
     let mut result = json!({"ok":true});
     match action {
         "status" => return state::status(app, user).await,
+        "audit-sessions" => {
+            return audit::sessions(&app.db, user, audit_cursor(&data, "before")?).await;
+        }
+        "audit-session" => {
+            let session = audit_cursor(&data, "id")?.context("audit session ID required")?;
+            return audit::session(
+                &app.db,
+                user,
+                session,
+                audit_cursor(&data, "after")?.unwrap_or(0),
+            )
+            .await;
+        }
         "get-form" => {
             let request = text(&data, "id", 36)?;
             return crate::forms::input_request(&app.db, user, request).await;
@@ -280,4 +295,16 @@ async fn operation(app: &App, user: &str, action: &str, data: Value) -> Result<V
         _ => return Err(anyhow!("unknown Mini App action")),
     }
     Ok(result)
+}
+
+fn audit_cursor(data: &Value, field: &str) -> Result<Option<i64>> {
+    data.get(field)
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            value
+                .as_i64()
+                .filter(|id| *id > 0)
+                .context("invalid audit cursor")
+        })
+        .transpose()
 }

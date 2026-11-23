@@ -1,6 +1,6 @@
-use super::{WidgetChief, app_with_model, fixture, message};
-use crate::{audit, runtime, security::now, store};
-use serde_json::json;
+use super::{WidgetChief, app_with_model, fixture, message, signed_mini_init};
+use crate::{audit, runtime, security::now, store, web};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 #[tokio::test]
@@ -118,4 +118,47 @@ async fn queued_audit_previews_hide_credentials_and_record_supersession() {
     assert_eq!(recent["sessions"][0]["message"], "Give me the menu");
     assert_eq!(recent["sessions"][1]["id"], id);
     assert_eq!(recent["sessions"][1]["status"], "superseded");
+}
+
+#[tokio::test]
+async fn the_signed_mini_app_restricts_audit_details_to_the_message_owner() {
+    let db = fixture().await;
+    let app = Arc::new(app_with_model(&db, Arc::new(WidgetChief)));
+    message(&db, 1, "1", "Give me the menu").await;
+    let owner = signed_mini_init(&app, 1);
+    let other = signed_mini_init(&app, 2);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/api/mini", listener.local_addr().unwrap());
+    let origin = app.origin.clone();
+    let server =
+        tokio::spawn(async move { axum::serve(listener, web::router(app)).await.unwrap() });
+    let client = reqwest::Client::new();
+    let post = |init: &str, action: &str, data: Value| {
+        client
+            .post(&endpoint)
+            .header("origin", &origin)
+            .json(&json!({"init":init,"action":action,"data":data}))
+            .send()
+    };
+    let rows: Value = post(&owner, "audit-sessions", json!({}))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = rows["sessions"][0]["id"].as_i64().unwrap();
+    for (user, status) in [
+        (owner.as_str(), 200),
+        (other.as_str(), 404),
+        ("invalid", 403),
+    ] {
+        assert_eq!(
+            post(user, "audit-session", json!({"id":id}))
+                .await
+                .unwrap()
+                .status(),
+            status
+        );
+    }
+    server.abort();
 }
