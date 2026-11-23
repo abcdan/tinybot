@@ -1,4 +1,7 @@
-use crate::security::{clip, hash, id, now, token};
+use crate::{
+    audit::{self, ModelCall},
+    security::{clip, hash, id, now, token},
+};
 use anyhow::Result;
 use serde::Serialize;
 use sqlx::{Sqlite, SqlitePool, Transaction};
@@ -14,11 +17,12 @@ pub struct ReplyContext {
 }
 
 #[derive(Default)]
-struct TelegramInput {
+struct TelegramInput<'a> {
     message_id: Option<i64>,
     reply: Option<ReplyContext>,
     literal: bool,
     reaction: bool,
+    transcription: Option<(&'a ModelCall, u64)>,
 }
 
 pub async fn latest_reply_context(db: &SqlitePool, task: &str) -> Result<Option<ReplyContext>> {
@@ -97,6 +101,7 @@ pub async fn ingest_telegram_voice(
     text: &str,
     message_id: i64,
     reply: Option<ReplyContext>,
+    transcription: Option<(&ModelCall, u64)>,
 ) -> Result<()> {
     ingest_message(
         db,
@@ -109,7 +114,8 @@ pub async fn ingest_telegram_voice(
             message_id: (message_id > 0).then_some(message_id),
             reply,
             literal: true,
-            reaction: false,
+            transcription,
+            ..TelegramInput::default()
         },
     )
     .await
@@ -139,6 +145,7 @@ pub async fn ingest_telegram_reaction(
             }),
             literal: true,
             reaction: true,
+            ..TelegramInput::default()
         },
     )
     .await
@@ -151,7 +158,7 @@ async fn ingest_message(
     external_id: i64,
     user: &str,
     text: &str,
-    mut telegram: TelegramInput,
+    mut telegram: TelegramInput<'_>,
 ) -> Result<()> {
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     let inserted = sqlx::query("INSERT OR IGNORE INTO updates VALUES (?,?)")
@@ -363,6 +370,9 @@ async fn ingest_message(
                 .bind("This task is unavailable. Use /new to start another task.")
                 .execute(&mut *tx)
                 .await?;
+        } else if let Some((usage, duration_ms)) = telegram.transcription {
+            audit::ingress_model_call(&mut tx, &task, "voice_transcription", usage, duration_ms)
+                .await?;
         }
     }
     tx.commit().await?;
@@ -415,7 +425,7 @@ pub(super) async fn enqueue_input(
         .bind(reply.map(|reply| reply.from_bot))
         .execute(&mut **tx)
         .await?;
-    crate::audit::open(tx, task, input).await?;
+    audit::open(tx, task, input).await?;
     if state == "uncertain" {
         sqlx::query("INSERT INTO outbox(user,body) VALUES(?,?)")
             .bind(user)

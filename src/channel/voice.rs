@@ -1,5 +1,5 @@
 use super::{ChannelAdapter, Telegram};
-use crate::{App, model::MAX_VOICE_BYTES, net, store};
+use crate::{App, audit::ModelCall, model::MAX_VOICE_BYTES, net, store};
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use serde_json::json;
@@ -89,7 +89,16 @@ pub(super) async fn handle(
     })
     .await;
     match result {
-        Ok(Ok(text)) => enqueue_transcript(&app.db, operator, received, &text).await,
+        Ok(Ok(transcript)) => {
+            enqueue_transcript(
+                &app.db,
+                operator,
+                received,
+                &transcript.text,
+                (&transcript.usage, transcript.duration_ms),
+            )
+            .await
+        }
         _ => notify(
             &app.db, adapter.name(), received,
             "I couldn't transcribe that voice note. Try recording it again or send your message as text.",
@@ -118,6 +127,7 @@ async fn enqueue_transcript(
     operator: &str,
     received: &Received,
     transcript: &str,
+    usage: (&ModelCall, u64),
 ) -> Result<()> {
     store::ingest_telegram_voice(
         db,
@@ -127,6 +137,7 @@ async fn enqueue_transcript(
         &format!("Voice message:\n{transcript}"),
         received.telegram_message_id,
         received.reply.clone(),
+        Some(usage),
     )
     .await
 }
@@ -311,8 +322,14 @@ mod tests {
                 .await
                 .unwrap()
         );
+        let mut usage = ModelCall::new("openrouter", "openai/whisper-large-v3");
+        usage.openrouter(&json!({
+            "text": "Private transcript marker",
+            "input_audio": {"data":"Private audio marker"},
+            "usage": {"input_tokens": 15, "output_tokens": 5, "total_tokens": 20, "cost": 0.001}
+        }));
         for _ in 0..2 {
-            enqueue_transcript(&db, "42", &note, "/cancel")
+            enqueue_transcript(&db, "42", &note, "/cancel", (&usage, 120))
                 .await
                 .unwrap();
         }
@@ -334,6 +351,31 @@ mod tests {
             .unwrap();
         assert_eq!(reply.message_id, 50);
         assert_eq!(reply.excerpt.as_deref(), Some("A spoken reply's context"));
+        let usage_events: Vec<(i64, String, String, String)> = sqlx::query_as(
+            "SELECT e.attempt,e.name,e.status,e.detail FROM audit_entries e
+             JOIN tasks t ON t.audit_session_id=e.session WHERE t.id=? AND e.kind='model_call'",
+        )
+        .bind(&task.id)
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        let [(attempt, name, status, detail)] = usage_events.as_slice() else {
+            panic!("expected one usage entry in the voice note session");
+        };
+        assert_eq!(
+            (*attempt, name.as_str(), status.as_str()),
+            (0, "voice_transcription", "completed")
+        );
+        let detail: serde_json::Value = serde_json::from_str(detail).unwrap();
+        assert_eq!(
+            detail,
+            json!({
+                "provider":"openrouter",
+                "model":"openai/whisper-large-v3",
+                "duration_ms":120,
+                "usage":{"input_tokens":15,"output_tokens":5,"total_tokens":20,"cost_usd":0.001}
+            })
+        );
 
         let failed = received(11, "42");
         for _ in 0..2 {
@@ -346,6 +388,11 @@ mod tests {
         assert_eq!(item.button.as_deref(), Some("mini"));
         assert!(store::claim_outbox(&db).await.unwrap().is_none());
         assert!(!eligible(&db, "telegram", &failed).await.unwrap());
+        let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_sessions")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(sessions, 1);
     }
 
     #[test]

@@ -108,7 +108,7 @@ async fn replies_resume_the_referenced_task_and_thread_the_response() {
         Some(22)
     );
 
-    store::ingest_telegram_voice(&db, "1", 6, "2", "/cancel", 25, None)
+    store::ingest_telegram_voice(&db, "1", 6, "2", "/cancel", 25, None, None)
         .await
         .unwrap();
     let voice = store::claim(&db).await.unwrap().unwrap();
