@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {chromium} from 'playwright';
+import {chromium, errors} from 'playwright';
 import {describe,populate,publicUrl} from './forms.mjs';
-import {allowsRead, indexedUrl, visit} from './server.mjs';
+import {allowsRead, indexedUrl, readableUrl, visit} from './server.mjs';
 
 test('public URL parsing accepts HTTPS and rejects credentials, fragments and alternate ports', () => {
     assert.equal(publicUrl('https://example.org/form').href, 'https://example.org/form');
@@ -20,6 +20,30 @@ test('a website response explains challenge pages and other HTTP failures', asyn
     assert.equal((await visit(pageWith(200), url)).href, url.href);
     await assert.rejects(visit(pageWith(403, {'cf-mitigated': 'challenge'}), url), /Cloudflare requires verification/);
     await assert.rejects(visit(pageWith(404), url), /returned HTTP 404/);
+    const failed = error => ({goto: async () => { throw error; }});
+    await assert.rejects(visit(failed(new errors.TimeoutError()), url), /took too long/);
+    await assert.rejects(
+        visit(failed(new Error('page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://fixture.example/')), url),
+        {message: 'The browser could not establish an HTTPS connection to the website.'}
+    );
+});
+
+test('reading a website preserves its client-side route', async () => {
+    const url = readableUrl('https://fixture.example/#/documentation');
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const page = await browser.newPage();
+        await page.route('https://fixture.example/**', route => route.fulfill({
+            contentType: 'text/html',
+            body: '<p></p><script>document.querySelector("p").textContent = location.hash</script>',
+        }));
+        assert.equal((await visit(page, url, {validate: readableUrl})).href, url.href);
+        assert.equal(await page.locator('p').innerText(), '#/documentation');
+        assert.throws(() => publicUrl(url.href));
+        assert.throws(() => readableUrl('https://user@fixture.example/#/documentation'));
+    } finally {
+        await browser.close();
+    }
 });
 
 test('rendering allows page resources while rejecting write methods', () => {

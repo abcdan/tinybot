@@ -60,14 +60,17 @@ pub async fn resolve(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
 }
 
 pub fn https(raw: &str) -> Result<Url> {
-    let url = Url::parse(raw)?;
+    https_url(Url::parse(raw)?, false)
+}
+
+fn https_url(url: Url, allow_fragment: bool) -> Result<Url> {
     ensure!(
         url.scheme() == "https"
             && url.port_or_known_default() == Some(443)
             && url.host().is_some()
             && url.username().is_empty()
             && url.password().is_none()
-            && url.fragment().is_none(),
+            && (allow_fragment || url.fragment().is_none()),
         "expected a public HTTPS URL on port 443"
     );
     Ok(url)
@@ -91,8 +94,7 @@ pub fn website(raw: &str) -> Result<Url> {
         url.set_scheme("https")
             .map_err(|()| anyhow::anyhow!("expected a public HTTPS website"))?;
     }
-    url.set_fragment(None);
-    https(url.as_str())
+    https_url(url, true)
 }
 
 pub async fn request(method: reqwest::Method, url: &Url) -> Result<RequestBuilder> {
@@ -131,7 +133,8 @@ mod tests {
     fn website_normalizes_user_links_without_expanding_https_access() {
         for (input, expected) in [
             (" example.org/docs ", "https://example.org/docs"),
-            ("http://example.org/#about", "https://example.org/"),
+            ("http://example.org/#about", "https://example.org/#about"),
+            ("example.org/#/docs", "https://example.org/#/docs"),
             (
                 "https://example.org?q=public",
                 "https://example.org/?q=public",
@@ -148,6 +151,7 @@ mod tests {
         ] {
             assert!(website(input).is_err(), "{input}");
         }
+        assert!(https("https://example.org/#about").is_err());
     }
 
     #[test]

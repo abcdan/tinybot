@@ -78,7 +78,13 @@ pub(crate) async fn call(socket: &str, route: &str, body: &Value) -> Result<Valu
         .json(body)
         .send()
         .await
-        .map_err(|_| anyhow!("worker unavailable"))?;
+        .map_err(|error| {
+            if error.is_timeout() {
+                anyhow!("worker request timed out")
+            } else {
+                anyhow!("worker unavailable")
+            }
+        })?;
     let status = response.status();
     let result: Value = serde_json::from_slice(&crate::net::body(response, 900_000).await?)?;
     ensure!(
