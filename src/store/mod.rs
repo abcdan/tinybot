@@ -1,4 +1,5 @@
 mod ingress;
+pub mod memory;
 mod queue;
 mod reactions;
 mod replies;
