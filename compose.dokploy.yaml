@@ -49,5 +49,6 @@ networks:
 volumes:
   app_data:
   browser_socket:
+  browser_proxy:
   sandbox_socket:
   stdio_socket:

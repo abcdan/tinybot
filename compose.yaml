@@ -68,5 +68,6 @@ volumes:
   caddy_data:
   caddy_config:
   browser_socket:
+  browser_proxy:
   sandbox_socket:
   stdio_socket:

@@ -14,13 +14,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && rm -rf /var/lib/apt/lists/* \
     && npm install --global --omit=dev "@openai/codex@${CODEX_VERSION}" \
     && mkdir -p /data /browser /sandbox /mcp-stdio \
-    && chown node:node /data /browser /sandbox /mcp-stdio
+    && chown node:node /data /browser /sandbox /mcp-stdio \
+    && install -d -m 0700 -o 1000 -g 1000 /browser-proxy
 COPY --from=build /usr/local/bin/tinybot /usr/local/bin/tinybot
 USER node
 ENTRYPOINT ["tinybot"]
 CMD ["serve"]
 
 FROM debian:bookworm-slim AS egress
+RUN install -d -m 0700 -o 1000 -g 1000 /browser-proxy
 COPY --from=build /usr/local/bin/tinybot /usr/local/bin/tinybot
 USER 1000:1000
 ENTRYPOINT ["tinybot", "egress"]
