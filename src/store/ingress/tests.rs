@@ -33,6 +33,125 @@ async fn send(db: &SqlitePool, update: i64, user: &str, text: &str) {
 }
 
 #[tokio::test]
+async fn attachment_reads_are_encrypted_and_limited_to_current_authorized_task_context() {
+    let db = fixture().await;
+    let vault = crate::security::Vault::new(&"9e".repeat(32)).unwrap();
+    let payload = b"This is a private CSV attachment";
+    let attachment =
+        attachments::seal(&vault, "2", 51, "notes.csv".into(), "text/plain", payload).unwrap();
+    ingest_telegram_attachment(&db, "1", 1, "2", "/cancel", 51, None, attachment)
+        .await
+        .unwrap();
+    let upload = store::claim(&db).await.unwrap().unwrap();
+    let media = attachments::latest(&db, &vault, &upload)
+        .await
+        .unwrap()
+        .unwrap();
+    let event_id = media.event_id;
+    assert_eq!(media.bytes, payload);
+    let ciphertext: String =
+        sqlx::query_scalar("SELECT ciphertext FROM telegram_attachments WHERE event=?")
+            .bind(event_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert!(!ciphertext.contains(std::str::from_utf8(payload).unwrap()));
+    assert_eq!(
+        store::history(&db, &upload.id)
+            .await
+            .unwrap()
+            .last()
+            .unwrap()
+            .2,
+        "/cancel"
+    );
+    assert!(
+        attachments::latest(
+            &db,
+            &vault,
+            &store::Task {
+                user: "1".into(),
+                ..upload.clone()
+            }
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    store::settle(&db, &upload, "idle", None).await.unwrap();
+
+    let quote = ReplyContext {
+        message_id: 51,
+        excerpt: None,
+        from_bot: false,
+    };
+    ingest_telegram_reply(
+        &db,
+        "1",
+        2,
+        "2",
+        "Check those totals again",
+        52,
+        Some(quote.clone()),
+    )
+    .await
+    .unwrap();
+    let followup = store::claim(&db).await.unwrap().unwrap();
+    assert!(
+        attachments::latest(&db, &vault, &upload)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let media = attachments::latest(&db, &vault, &followup)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(media.event_id, event_id);
+    assert_eq!(media.bytes, payload);
+    store::settle(&db, &followup, "idle", None).await.unwrap();
+
+    ingest_telegram_reply(&db, "1", 3, "2", "Other question", 53, None)
+        .await
+        .unwrap();
+    let unrelated = store::claim(&db).await.unwrap().unwrap();
+    assert!(
+        attachments::latest(&db, &vault, &unrelated)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    store::settle(&db, &unrelated, "idle", None).await.unwrap();
+
+    ingest_telegram_reply(&db, "1", 4, "2", "Resume the upload", 54, Some(quote))
+        .await
+        .unwrap();
+    let mut scoped = store::claim(&db).await.unwrap().unwrap();
+    sqlx::query("UPDATE tasks SET agent='helper' WHERE id=?")
+        .bind(&scoped.id)
+        .execute(&db)
+        .await
+        .unwrap();
+    scoped.agent = Some("helper".into());
+    assert!(
+        attachments::latest(&db, &vault, &scoped)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    sqlx::query("DELETE FROM grants WHERE agent='helper' AND member='2'")
+        .execute(&db)
+        .await
+        .unwrap();
+    assert!(
+        attachments::latest(&db, &vault, &scoped)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn replies_resume_the_referenced_task_and_thread_the_response() {
     let db = fixture().await;
     ingest_telegram(&db, "1", 1, "2", "First discussion", 21)

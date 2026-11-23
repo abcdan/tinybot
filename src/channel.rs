@@ -1,7 +1,9 @@
+mod attachment;
 mod callback;
 mod card;
 mod dispatch;
 mod formatting;
+mod media;
 mod telegram;
 mod voice;
 mod widget;
@@ -30,6 +32,7 @@ pub enum Inbound {
         message_id: i64,
         emoji: String,
     },
+    Attachment(attachment::Received),
     Voice(voice::Received),
     Widget(widget::Query),
     Callback(callback::Query),
@@ -52,8 +55,8 @@ pub trait ChannelAdapter: Send + Sync {
         button: Option<&str>,
         reply_to: Option<i64>,
     ) -> Result<MessageDelivery>;
-    async fn download_voice(&self, _file_id: &str) -> Result<Vec<u8>> {
-        anyhow::bail!("channel does not support voice downloads")
+    async fn download_file(&self, _file_id: &str, _limit: usize) -> Result<Vec<u8>> {
+        anyhow::bail!("channel does not support file downloads")
     }
 
     async fn answer_widget(&self, _query: &str, _data: &str) -> Result<()> {
