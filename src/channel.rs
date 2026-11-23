@@ -178,7 +178,9 @@ fn widget_rejection(response: &Value) -> &'static str {
         .as_str()
         .unwrap_or("")
         .to_ascii_lowercase();
-    if description.contains("widget_html") || description.contains("widget_too_large") {
+    if description.contains("input_media_widget_not_allowed") {
+        "widget_access_restricted"
+    } else if description.contains("widget_html") || description.contains("widget_too_large") {
         "invalid_widget_html"
     } else if description.contains("widget_data") {
         "invalid_widget_data"
@@ -299,7 +301,8 @@ impl ChannelAdapter for Telegram {
                     WidgetDelivery::Sent => return Ok(None),
                     WidgetDelivery::Retry(delay) => return Ok(Some(delay)),
                     WidgetDelivery::Rejected => {
-                        data["text"] = json!("Telegram couldn’t display the TinyBot panel. Use /tasks to list tasks or /settings to open Settings & forms.");
+                        data["text"] = json!("Use /tasks to list or switch tasks. Open Settings & forms to manage requests, schedules, and your account.");
+                        data["reply_markup"] = self.settings_keyboard();
                     }
                 }
             }
@@ -346,8 +349,12 @@ impl ChannelAdapter for Telegram {
     ) -> Result<Option<i64>> {
         let user = user.parse::<i64>().context("invalid Telegram recipient")?;
         let mut data = json!({"chat_id":user,"html":card.html()});
-        let mut fallback = json!({"chat_id":user,"text":format!("{}\n\nTelegram couldn’t display the widget.", card.plain_text()),
+        let mut fallback = json!({"chat_id":user,"text":card.plain_text(),
             "link_preview_options":{"is_disabled":true}});
+        let title_length = card.title_utf16_len();
+        if title_length > 0 {
+            fallback["entities"] = json!([{"type":"bold","offset":0,"length":title_length}]);
+        }
         if !replies.is_empty() {
             let keyboard = suggested_keyboard(replies);
             data["reply_markup"] = keyboard.clone();
@@ -526,7 +533,8 @@ mod tests {
     #[tokio::test]
     async fn sends_native_cards_and_direct_choices_with_honest_delivery_fallbacks() {
         let accepted = json!({"ok":true,"result":{"widget":{}}});
-        let rejected = json!({"ok":false,"error_code":400,"description":"Bad Request: INPUT_MEDIA_WIDGET_HTML_INVALID"});
+        let rejected = json!({"ok":false,"error_code":400,"description":"Bad Request: INPUT_MEDIA_WIDGET_NOT_ALLOWED"});
+        assert_eq!(widget_rejection(&rejected), "widget_access_restricted");
         let rate_limit = json!({"ok":false,"error_code":429,"parameters":{"retry_after":12}});
         let mock: Mock = Arc::new(Mutex::new((
             Vec::new(),
@@ -536,6 +544,8 @@ mod tests {
                 rejected.clone(),
                 json!({"ok":true}),
                 accepted,
+                rejected.clone(),
+                json!({"ok":true}),
                 rejected,
                 json!({"ok":true}),
                 json!({"ok":true}),
@@ -555,7 +565,7 @@ mod tests {
             origin: "https://example.test".into(),
         };
 
-        let card = Card::new("Greeting", "</p><script>&", &["A short item".into()]).unwrap();
+        let card = Card::new("Hi 👋", "</p><script>&", &["A short item".into()]).unwrap();
         let replies = [store::SuggestedReply {
             token: "12345678-1234-4234-8234-123456789abc".into(),
             body: "Say it in Dutch".into(),
@@ -576,6 +586,13 @@ mod tests {
         };
         assert_eq!(telegram.send_choice("42", &choice).await.unwrap(), None);
         assert_eq!(telegram.send_choice("42", &choice).await.unwrap(), None);
+        assert_eq!(
+            telegram
+                .send("42", "Manage TinyBot", Some("panel"))
+                .await
+                .unwrap(),
+            None
+        );
         assert_eq!(
             telegram
                 .send("42", "Open settings", Some("mini"))
@@ -599,20 +616,24 @@ mod tests {
                 "sendWidget",
                 "sendWidget",
                 "sendMessage",
+                "sendWidget",
+                "sendMessage",
                 "sendMessage"
             ]
         );
         let html = calls[0].1["html"].as_str().unwrap();
         assert!(!html.contains("<script>"));
-        assert!(html.contains("<h4>Greeting</h4>"));
+        assert!(html.contains("<h4>Hi 👋</h4>"));
         assert!(html.contains("&lt;/p&gt;&lt;script&gt;&amp;"));
         assert!(html.contains("<li>A short item</li>"));
         assert!(calls[0].1.get("reply_markup").is_none());
-        assert!(
-            calls[3].1["text"]
-                .as_str()
-                .unwrap()
-                .contains("couldn’t display the widget")
+        assert_eq!(
+            calls[3].1["text"],
+            "Hi 👋\n\n</p><script>&\n\n• A short item"
+        );
+        assert_eq!(
+            calls[3].1["entities"],
+            json!([{"type":"bold","offset":0,"length":5}])
         );
         assert_eq!(calls[2].1["reply_markup"], calls[3].1["reply_markup"]);
         assert_eq!(
@@ -627,7 +648,11 @@ mod tests {
             format!("choice/{}/1", choice.id)
         );
         assert_eq!(
-            calls[7].1["reply_markup"]["inline_keyboard"][0][0]["web_app"]["url"],
+            calls[8].1["reply_markup"]["inline_keyboard"][0][0]["web_app"]["url"],
+            "https://example.test/mini"
+        );
+        assert_eq!(
+            calls[9].1["reply_markup"]["inline_keyboard"][0][0]["web_app"]["url"],
             "https://example.test/mini"
         );
         server.abort();

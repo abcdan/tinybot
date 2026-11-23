@@ -38,6 +38,10 @@ impl Card {
             .join("\n\n")
     }
 
+    pub fn title_utf16_len(&self) -> usize {
+        self.title.encode_utf16().count()
+    }
+
     pub fn html(&self) -> String {
         let mut html = String::from(
             r#"<style>
