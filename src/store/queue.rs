@@ -147,7 +147,7 @@ pub async fn settle(
     state: &str,
     message: Option<&str>,
 ) -> Result<()> {
-    settle_task(db, task, state, message, &[]).await
+    settle_task(db, task, state, message, &[], None).await
 }
 
 pub async fn settle_reply(
@@ -156,7 +156,18 @@ pub async fn settle_reply(
     message: &str,
     suggestions: &[&str],
 ) -> Result<()> {
-    settle_task(db, task, "idle", Some(message), suggestions).await
+    settle_task(db, task, "idle", Some(message), suggestions, None).await
+}
+
+pub async fn settle_widget(
+    db: &SqlitePool,
+    task: &Task,
+    card: &crate::channel::Card,
+    suggestions: &[&str],
+) -> Result<()> {
+    let widget = serde_json::to_string(card)?;
+    let message = card.plain_text();
+    settle_task(db, task, "idle", Some(&message), suggestions, Some(&widget)).await
 }
 
 async fn settle_task(
@@ -165,6 +176,7 @@ async fn settle_task(
     state: &str,
     message: Option<&str>,
     suggestions: &[&str],
+    widget: Option<&str>,
 ) -> Result<()> {
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     let affected = sqlx::query(
@@ -185,14 +197,16 @@ async fn settle_task(
                 .bind(message)
                 .execute(&mut *tx)
                 .await?;
-            let outbox = sqlx::query("INSERT INTO outbox(user,task,agent,body) VALUES(?,?,?,?)")
-                .bind(&task.user)
-                .bind(&task.id)
-                .bind(&task.agent)
-                .bind(message)
-                .execute(&mut *tx)
-                .await?
-                .last_insert_rowid();
+            let outbox =
+                sqlx::query("INSERT INTO outbox(user,task,agent,body,widget) VALUES(?,?,?,?,?)")
+                    .bind(&task.user)
+                    .bind(&task.id)
+                    .bind(&task.agent)
+                    .bind(message)
+                    .bind(widget)
+                    .execute(&mut *tx)
+                    .await?
+                    .last_insert_rowid();
             replies::insert(&mut tx, outbox, task.revision, suggestions).await?;
         }
     }

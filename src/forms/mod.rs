@@ -175,14 +175,25 @@ pub async fn answer(
     submit_answer(db, user, request, |_| Ok(values)).await
 }
 
-pub async fn widget_choice(db: &SqlitePool, user: &str, request: &str) -> Result<Value> {
+#[derive(serde::Serialize)]
+pub struct WidgetChoice {
+    pub id: String,
+    pub label: String,
+    pub options: Vec<String>,
+}
+
+pub async fn widget_choice(db: &SqlitePool, user: &str, request: &str) -> Result<WidgetChoice> {
     let pending = waiting_input(db, user, request).await?;
     let spec: FormSpec = serde_json::from_str(&pending.payload)?;
     spec.validate()?;
     let field = spec
         .widget_choice()
         .context("answer this form in Settings & forms")?;
-    Ok(json!({"id":pending.id,"label":field.label,"options":field.options}))
+    Ok(WidgetChoice {
+        id: pending.id,
+        label: field.label.clone(),
+        options: field.options.clone(),
+    })
 }
 
 pub async fn answer_choice(

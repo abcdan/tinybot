@@ -174,19 +174,21 @@ pub(super) async fn execute(tool: Builtin, ctx: &ToolContext<'_>, args: Value) -
                         })),
                 "unsupported task input"
             );
+            let request = id();
+            let choice_button = format!("choice/{request}");
+            let (notification, button) = match spec.widget_choice() {
+                Some(field) => (field.label.as_str(), choice_button.as_str()),
+                None => ("Open Settings & forms to answer so I can continue.", "mini"),
+            };
             store::pause(
                 &app.db,
                 task,
                 "elicitation",
                 &serde_json::to_value(&spec)?,
-                if spec.widget_choice().is_some() {
-                    "Tap Answer in Requests to pick an option, or open Settings & forms."
-                } else {
-                    "Open Settings & forms to answer so I can continue."
-                },
-                Some("mini"),
+                notification,
+                Some(button),
                 900,
-                &id(),
+                &request,
             )
             .await?;
             return Ok(Outcome::Pause);

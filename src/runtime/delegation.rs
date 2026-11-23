@@ -63,7 +63,9 @@ pub(super) async fn delegate(ctx: &ToolContext<'_>, args: &Value) -> Result<Valu
             "task was updated during delegation"
         );
         match step {
-            Step::Reply { text, .. } => return Ok(json!({"helper_reply":clip(&text,6000)})),
+            Step::Reply { text, .. } | Step::Widget { text, .. } => {
+                return Ok(json!({"helper_reply":clip(&text,6000)}));
+            }
             Step::Tool { name, args } => {
                 let Some(tool) = allowed.iter().find(|tool| tool.name() == name) else {
                     history.push(json!({"error":"Tool unavailable to this helper"}));

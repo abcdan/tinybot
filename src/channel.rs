@@ -1,7 +1,11 @@
 mod callback;
+mod card;
 mod widget;
 
+pub use card::Card;
+
 use crate::{
+    forms::{self, WidgetChoice},
     net,
     security::{clip, now},
     store,
@@ -14,6 +18,7 @@ use sqlx::SqlitePool;
 use std::time::Duration;
 
 const PANEL_HTML: &str = include_str!("../web/telegram-widget.html");
+const CHOICE_HTML: &str = include_str!("../web/telegram-choice.html");
 
 pub enum Inbound {
     Message {
@@ -29,6 +34,12 @@ enum Dispatch {
     Sent,
     Retry(i64),
     Failed,
+}
+
+enum WidgetDelivery {
+    Sent,
+    Retry(i64),
+    Rejected,
 }
 
 #[async_trait]
@@ -53,6 +64,20 @@ pub trait ChannelAdapter: Send + Sync {
         Ok(())
     }
 
+    async fn send_card(
+        &self,
+        user: &str,
+        card: &Card,
+        replies: &[store::SuggestedReply],
+    ) -> Result<Option<i64>> {
+        self.send_suggested_replies(user, &card.plain_text(), replies)
+            .await
+    }
+
+    async fn send_choice(&self, user: &str, choice: &WidgetChoice) -> Result<Option<i64>> {
+        self.send(user, &choice.label, Some("mini")).await
+    }
+
     async fn typing(&self, _user: &str) -> Result<Option<Duration>> {
         Ok(None)
     }
@@ -64,7 +89,7 @@ pub trait ChannelAdapter: Send + Sync {
 
 pub struct Telegram {
     client: reqwest::Client,
-    token: String,
+    api: String,
     origin: String,
 }
 
@@ -76,7 +101,7 @@ impl Telegram {
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(45))
                 .build()?,
-            token,
+            api: format!("https://api.telegram.org/bot{token}"),
             origin,
         })
     }
@@ -93,24 +118,10 @@ impl Telegram {
         anyhow::bail!("Telegram rejected the chat feedback")
     }
 
-    async fn send_message(&self, data: Value) -> Result<Option<i64>> {
-        let output = self.call("sendMessage", data).await?;
-        if output["ok"] == true {
-            return Ok(None);
-        }
-        if let Some(delay) = output["parameters"]["retry_after"].as_i64() {
-            return Ok(Some(delay.clamp(1, 600)));
-        }
-        anyhow::bail!("Telegram rejected the reply")
-    }
-
     async fn call(&self, method: &str, data: Value) -> Result<Value> {
         let response = self
             .client
-            .post(format!(
-                "https://api.telegram.org/bot{}/{method}",
-                self.token
-            ))
+            .post(format!("{}/{method}", self.api))
             .json(&data)
             .send()
             .await
@@ -119,6 +130,73 @@ impl Telegram {
             &net::body(response, 2_000_000).await?,
         )?)
     }
+
+    async fn send_widget(&self, kind: &str, data: Value) -> Result<WidgetDelivery> {
+        let response = self.call("sendWidget", data).await?;
+        if response["ok"] == true {
+            tracing::debug!(
+                widget_kind = kind,
+                has_widget = response["result"]["widget"].is_object(),
+                "Telegram accepted widget message"
+            );
+            return Ok(WidgetDelivery::Sent);
+        }
+        if let Some(delay) = retry_after(&response) {
+            return Ok(WidgetDelivery::Retry(delay));
+        }
+        let error_code = response["error_code"].as_i64();
+        let category = widget_rejection(&response);
+        tracing::warn!(
+            widget_kind = kind,
+            ?error_code,
+            category,
+            "Telegram rejected sendWidget"
+        );
+        Ok(WidgetDelivery::Rejected)
+    }
+
+    async fn send_message(&self, data: Value) -> Result<Option<i64>> {
+        let response = self.call("sendMessage", data).await?;
+        if response["ok"] == true {
+            return Ok(None);
+        }
+        if let Some(delay) = retry_after(&response) {
+            return Ok(Some(delay));
+        }
+        anyhow::bail!("Telegram rejected the reply")
+    }
+}
+
+fn retry_after(response: &Value) -> Option<i64> {
+    response["parameters"]["retry_after"]
+        .as_i64()
+        .map(|delay| delay.clamp(1, 600))
+}
+
+fn widget_rejection(response: &Value) -> &'static str {
+    let description = response["description"]
+        .as_str()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if description.contains("widget_html") || description.contains("widget_too_large") {
+        "invalid_widget_html"
+    } else if description.contains("widget_data") {
+        "invalid_widget_data"
+    } else if description.contains("button") || description.contains("reply markup") {
+        "invalid_widget_keyboard"
+    } else if response["error_code"] == 404 {
+        "method_unavailable"
+    } else {
+        "other"
+    }
+}
+
+fn suggested_keyboard(replies: &[store::SuggestedReply]) -> Value {
+    let buttons: Vec<_> = replies
+        .iter()
+        .map(|reply| [json!({"text":reply.body,"callback_data":format!("reply/{}",reply.token)})])
+        .collect();
+    json!({"inline_keyboard":buttons})
 }
 
 #[derive(Deserialize)]
@@ -213,25 +291,21 @@ impl ChannelAdapter for Telegram {
     async fn send(&self, user: &str, body: &str, button: Option<&str>) -> Result<Option<i64>> {
         let user = user.parse::<i64>().context("invalid Telegram recipient")?;
         let mut data = json!({"chat_id":user,"text":clip(body,3900),"link_preview_options":{"is_disabled":true}});
-        if let Some(button) = button {
-            ensure!(button == "mini", "unknown channel button");
-            let keyboard = json!({"inline_keyboard":[[{
-                "text":"Settings & forms","web_app":{"url":format!("{}/mini",self.origin)}
-            }]]});
-            if body.chars().count() <= 900 {
-                let widget = self.call("sendWidget", json!({
-                    "chat_id":user,"html":PANEL_HTML,"caption":body,
-                    "show_caption_above_media":true,"allow_queries":true,"protect_content":true,"reply_markup":keyboard
-                })).await?;
-                if widget["ok"] == true {
-                    return Ok(None);
+        match button {
+            Some("panel") => {
+                match self.send_widget("panel", json!({
+                    "chat_id":user,"html":PANEL_HTML,"caption":clip(body,900),"allow_queries":true
+                })).await? {
+                    WidgetDelivery::Sent => return Ok(None),
+                    WidgetDelivery::Retry(delay) => return Ok(Some(delay)),
+                    WidgetDelivery::Rejected => {
+                        data["text"] = json!("Telegram couldn’t display the TinyBot panel. Use /tasks to list tasks or /settings to open Settings & forms.");
+                    }
                 }
-                if let Some(delay) = widget["parameters"]["retry_after"].as_i64() {
-                    return Ok(Some(delay.clamp(1, 600)));
-                }
-                // Older Bot API servers can reject sendWidget. Keep the notice accessible.
             }
-            data["reply_markup"] = keyboard;
+            Some("mini") => data["reply_markup"] = self.settings_keyboard(),
+            None => {}
+            _ => anyhow::bail!("unknown channel button"),
         }
         self.send_message(data).await
     }
@@ -243,15 +317,9 @@ impl ChannelAdapter for Telegram {
         replies: &[store::SuggestedReply],
     ) -> Result<Option<i64>> {
         let user = user.parse::<i64>().context("invalid Telegram recipient")?;
-        let keyboard: Vec<_> = replies
-            .iter()
-            .map(|reply| {
-                [json!({"text":reply.body,"callback_data":format!("reply/{}",reply.token)})]
-            })
-            .collect();
         self.send_message(json!({
             "chat_id":user,"text":clip(body,3900),"link_preview_options":{"is_disabled":true},
-            "reply_markup":{"inline_keyboard":keyboard}
+            "reply_markup":suggested_keyboard(replies)
         }))
         .await
     }
@@ -270,6 +338,49 @@ impl ChannelAdapter for Telegram {
         Ok(())
     }
 
+    async fn send_card(
+        &self,
+        user: &str,
+        card: &Card,
+        replies: &[store::SuggestedReply],
+    ) -> Result<Option<i64>> {
+        let user = user.parse::<i64>().context("invalid Telegram recipient")?;
+        let mut data = json!({"chat_id":user,"html":card.html()});
+        let mut fallback = json!({"chat_id":user,"text":format!("{}\n\nTelegram couldn’t display the widget.", card.plain_text()),
+            "link_preview_options":{"is_disabled":true}});
+        if !replies.is_empty() {
+            let keyboard = suggested_keyboard(replies);
+            data["reply_markup"] = keyboard.clone();
+            fallback["reply_markup"] = keyboard;
+        }
+        match self.send_widget("card", data).await? {
+            WidgetDelivery::Sent => Ok(None),
+            WidgetDelivery::Retry(delay) => Ok(Some(delay)),
+            WidgetDelivery::Rejected => self.send_message(fallback).await,
+        }
+    }
+
+    async fn send_choice(&self, user: &str, choice: &WidgetChoice) -> Result<Option<i64>> {
+        let user_id = user.parse::<i64>().context("invalid Telegram recipient")?;
+        let data = json!({
+            "chat_id":user_id,"html":CHOICE_HTML,"caption":choice.label,
+            "chat_data":serde_json::to_string(choice)?,"allow_queries":true
+        });
+        match self.send_widget("choice", data).await? {
+            WidgetDelivery::Sent => Ok(None),
+            WidgetDelivery::Retry(delay) => Ok(Some(delay)),
+            WidgetDelivery::Rejected => {
+                let buttons: Vec<_> = choice.options.iter().enumerate().map(|(index, label)| {
+                    json!([{"text":label,"callback_data":format!("choice/{}/{index}",choice.id)}])
+                }).collect();
+                self.send_message(json!({
+                    "chat_id":user_id,"text":choice.label,"reply_markup":{"inline_keyboard":buttons}
+                }))
+                .await
+            }
+        }
+    }
+
     async fn answer_widget(&self, query: &str, data: &str) -> Result<()> {
         let response = tokio::time::timeout(
             Duration::from_secs(5),
@@ -284,6 +395,14 @@ impl ChannelAdapter for Telegram {
             "Telegram rejected the widget answer"
         );
         Ok(())
+    }
+}
+
+impl Telegram {
+    fn settings_keyboard(&self) -> Value {
+        json!({"inline_keyboard":[[{
+            "text":"Settings & forms","web_app":{"url":format!("{}/mini",self.origin)}
+        }]]})
     }
 }
 
@@ -336,13 +455,7 @@ pub async fn outbox(db: SqlitePool, adapter: std::sync::Arc<dyn ChannelAdapter>)
             let dispatch=if !store::can_deliver(&db,&item).await? {
                 Dispatch::Failed
             } else {
-                let sent = match store::suggested_replies(&db, item.id).await {
-                    Ok(replies) if replies.is_empty() => {
-                        adapter.send(&item.user, &item.body, item.button.as_deref()).await
-                    }
-                    Ok(replies) => adapter.send_suggested_replies(&item.user, &item.body, &replies).await,
-                    Err(_) => Ok(Some(2)),
-                };
+                let sent = send_outbound(&db, &*adapter, &item).await;
                 match sent {
                     Ok(None)=>Dispatch::Sent,
                     Ok(Some(delay))=>Dispatch::Retry(now()+delay),
@@ -351,12 +464,172 @@ pub async fn outbox(db: SqlitePool, adapter: std::sync::Arc<dyn ChannelAdapter>)
             };
             let (state,retry)=match dispatch {Dispatch::Sent=>("sent",0), Dispatch::Retry(retry)=>("queued",retry), Dispatch::Failed=>("failed",0)};
             sqlx::query("UPDATE outbox SET state=?,retry_at=?,body=CASE WHEN ?='queued' THEN body ELSE '' END,
-                button=CASE WHEN ?='queued' THEN button ELSE NULL END WHERE id=?")
-                .bind(state).bind(retry).bind(state).bind(state).bind(item.id).execute(&db).await?;
+                button=CASE WHEN ?='queued' THEN button ELSE NULL END,
+                widget=CASE WHEN ?='queued' THEN widget ELSE NULL END WHERE id=?")
+                .bind(state).bind(retry).bind(state).bind(state).bind(state).bind(item.id).execute(&db).await?;
             Ok::<_,anyhow::Error>(true)
         }.await;
         if !matches!(result, Ok(true)) {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
+    }
+}
+
+async fn send_outbound(
+    db: &SqlitePool,
+    adapter: &dyn ChannelAdapter,
+    item: &store::Outbound,
+) -> Result<Option<i64>> {
+    let button = item.button.as_deref();
+    if let Some(request) = button.and_then(|button| button.strip_prefix("choice/")) {
+        let choice = forms::widget_choice(db, &item.user, request).await?;
+        return adapter.send_choice(&item.user, &choice).await;
+    }
+    let Ok(replies) = store::suggested_replies(db, item.id).await else {
+        return Ok(Some(2));
+    };
+    if let Some(widget) = &item.widget {
+        let card: Card = serde_json::from_str(widget)?;
+        adapter.send_card(&item.user, &card, &replies).await
+    } else if replies.is_empty() {
+        adapter.send(&item.user, &item.body, button).await
+    } else {
+        adapter
+            .send_suggested_replies(&item.user, &item.body, &replies)
+            .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        Json, Router,
+        extract::{Path, State},
+        routing::post,
+    };
+    use std::{collections::VecDeque, sync::Arc};
+    use tokio::{net::TcpListener, sync::Mutex};
+
+    type Mock = Arc<Mutex<(Vec<(String, Value)>, VecDeque<Value>)>>;
+
+    async fn record(
+        State(mock): State<Mock>,
+        Path(method): Path<String>,
+        Json(data): Json<Value>,
+    ) -> Json<Value> {
+        let mut mock = mock.lock().await;
+        mock.0.push((method, data));
+        Json(mock.1.pop_front().expect("unexpected Telegram request"))
+    }
+
+    #[tokio::test]
+    async fn sends_native_cards_and_direct_choices_with_honest_delivery_fallbacks() {
+        let accepted = json!({"ok":true,"result":{"widget":{}}});
+        let rejected = json!({"ok":false,"error_code":400,"description":"Bad Request: INPUT_MEDIA_WIDGET_HTML_INVALID"});
+        let rate_limit = json!({"ok":false,"error_code":429,"parameters":{"retry_after":12}});
+        let mock: Mock = Arc::new(Mutex::new((
+            Vec::new(),
+            VecDeque::from([
+                accepted.clone(),
+                rate_limit,
+                rejected.clone(),
+                json!({"ok":true}),
+                accepted,
+                rejected,
+                json!({"ok":true}),
+                json!({"ok":true}),
+            ]),
+        )));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = format!("http://{}/botTEST", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route("/botTEST/{method}", post(record))
+            .with_state(mock.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let telegram = Telegram {
+            client: reqwest::Client::new(),
+            api,
+            origin: "https://example.test".into(),
+        };
+
+        let card = Card::new("Greeting", "</p><script>&", &["A short item".into()]).unwrap();
+        let replies = [store::SuggestedReply {
+            token: "12345678-1234-4234-8234-123456789abc".into(),
+            body: "Say it in Dutch".into(),
+        }];
+        assert_eq!(telegram.send_card("42", &card, &[]).await.unwrap(), None);
+        assert_eq!(
+            telegram.send_card("42", &card, &[]).await.unwrap(),
+            Some(12)
+        );
+        assert_eq!(
+            telegram.send_card("42", &card, &replies).await.unwrap(),
+            None
+        );
+        let choice = WidgetChoice {
+            id: "12345678-1234-4234-8234-123456789abc".into(),
+            label: "Pick a topic".into(),
+            options: vec!["Travel".into(), "Cooking".into()],
+        };
+        assert_eq!(telegram.send_choice("42", &choice).await.unwrap(), None);
+        assert_eq!(telegram.send_choice("42", &choice).await.unwrap(), None);
+        assert_eq!(
+            telegram
+                .send("42", "Open settings", Some("mini"))
+                .await
+                .unwrap(),
+            None
+        );
+
+        let mock = mock.lock().await;
+        let calls = &mock.0;
+        assert_eq!(
+            calls
+                .iter()
+                .map(|(method, _)| method.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "sendWidget",
+                "sendWidget",
+                "sendWidget",
+                "sendMessage",
+                "sendWidget",
+                "sendWidget",
+                "sendMessage",
+                "sendMessage"
+            ]
+        );
+        let html = calls[0].1["html"].as_str().unwrap();
+        assert!(!html.contains("<script>"));
+        assert!(html.contains("<h4>Greeting</h4>"));
+        assert!(html.contains("&lt;/p&gt;&lt;script&gt;&amp;"));
+        assert!(html.contains("<li>A short item</li>"));
+        assert!(calls[0].1.get("reply_markup").is_none());
+        assert!(
+            calls[3].1["text"]
+                .as_str()
+                .unwrap()
+                .contains("couldn’t display the widget")
+        );
+        assert_eq!(calls[2].1["reply_markup"], calls[3].1["reply_markup"]);
+        assert_eq!(
+            calls[3].1["reply_markup"]["inline_keyboard"][0][0]["text"],
+            "Say it in Dutch"
+        );
+        let state: Value = serde_json::from_str(calls[4].1["chat_data"].as_str().unwrap()).unwrap();
+        assert_eq!(state["options"], json!(["Travel", "Cooking"]));
+        assert_eq!(calls[4].1["allow_queries"], true);
+        assert_eq!(
+            calls[6].1["reply_markup"]["inline_keyboard"][1][0]["callback_data"],
+            format!("choice/{}/1", choice.id)
+        );
+        assert_eq!(
+            calls[7].1["reply_markup"]["inline_keyboard"][0][0]["web_app"]["url"],
+            "https://example.test/mini"
+        );
+        server.abort();
     }
 }

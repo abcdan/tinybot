@@ -65,8 +65,9 @@ pub async fn ingest(
     let mut active = active_task;
     if response.is_none() {
         match command {
-            "/start" | "/help" => response = Some("Use the panel for requests, tasks, and schedules. Set up your model under Settings & forms. Use /new to start a task, /panel to reopen the panel, /cancel to stop, or /reconcile after checking an uncertain action.".into()),
+            "/start" | "/help" => response = Some("Use /panel for tasks, requests, and schedules, and /settings for account setup and forms. Use /new to start a task, /cancel to stop, or /reconcile after checking an uncertain action.".into()),
             "/panel" => response = Some("Manage TinyBot from this chat.".into()),
+            "/settings" => response = Some("Open Settings & forms to manage your account and complete forms.".into()),
             "/invite" if user == operator => {
                 let raw = token();
                 sqlx::query("INSERT INTO invitations VALUES (?,?,NULL,?)").bind(hash(&raw)).bind(user)
@@ -135,9 +136,15 @@ pub async fn ingest(
         }
     }
     if let Some(response) = response {
-        sqlx::query("INSERT INTO outbox(user,body,button) VALUES(?,?,'mini')")
+        let button = match command {
+            "/start" | "/help" | "/panel" => Some("panel"),
+            "/settings" => Some("mini"),
+            _ => None,
+        };
+        sqlx::query("INSERT INTO outbox(user,body,button) VALUES(?,?,?)")
             .bind(user)
             .bind(response)
+            .bind(button)
             .execute(&mut *tx)
             .await?;
     } else {

@@ -237,6 +237,20 @@ async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> Resul
                 )
                 .await;
             }
+            Step::Widget {
+                title,
+                text,
+                items,
+                suggested_replies,
+            } => {
+                let Some(card) = crate::channel::Card::new(&title, &text, &items) else {
+                    store::append(&app.db, &task.id, "tool", "A widget needs visible text.")
+                        .await?;
+                    continue;
+                };
+                let suggestions = valid_suggestions(&suggested_replies);
+                return store::settle_widget(&app.db, task, &card, &suggestions).await;
+            }
             Step::Tool { name, args } => {
                 let Some(tool) = tools.iter().find(|tool| tool.name() == name) else {
                     store::append(&app.db, &task.id, "tool", "Requested tool is unavailable.")
