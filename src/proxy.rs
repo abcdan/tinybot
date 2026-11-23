@@ -1,17 +1,21 @@
+mod settings;
 mod upstream;
 
 use crate::net;
 use anyhow::{Context, Result, ensure};
+use settings::Routes;
+pub use settings::{
+    browser_proxy_status, clear_browser_proxy, set_browser_proxy, validate_browser_proxy,
+};
 use std::{sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional},
     net::{TcpListener, TcpStream},
     sync::Semaphore,
 };
-use upstream::Upstream;
 
 pub async fn serve() -> Result<()> {
-    let upstream = Arc::new(Upstream::configured()?);
+    let routes = Arc::new(Routes::configured());
     let listener = TcpListener::bind("0.0.0.0:3128").await?;
     let slots = Arc::new(Semaphore::new(96));
     loop {
@@ -19,14 +23,10 @@ pub async fn serve() -> Result<()> {
         let Ok(slot) = slots.clone().try_acquire_owned() else {
             continue;
         };
-        let upstream = upstream.clone();
+        let routes = routes.clone();
         tokio::spawn(async move {
             let _slot = slot;
-            let _ = tokio::time::timeout(
-                Duration::from_secs(50),
-                handle(client, upstream.as_ref().as_ref()),
-            )
-            .await;
+            let _ = tokio::time::timeout(Duration::from_secs(50), handle(client, &routes)).await;
         });
     }
 }
@@ -57,7 +57,7 @@ fn destination(header: &str) -> Result<String> {
         .into())
 }
 
-async fn handle(mut client: TcpStream, proxy: Option<&Upstream>) -> Result<()> {
+async fn handle(mut client: TcpStream, routes: &Routes) -> Result<()> {
     let mut buffer = Vec::with_capacity(2048);
     let mut chunk = [0; 1024];
     let header_end = tokio::time::timeout(Duration::from_secs(5), async {
@@ -83,13 +83,7 @@ async fn handle(mut client: TcpStream, proxy: Option<&Upstream>) -> Result<()> {
             .await?;
         return Ok(());
     };
-    let upstream = tokio::time::timeout(Duration::from_secs(6), async {
-        match proxy {
-            Some(proxy) => proxy.connect(&addresses).await,
-            None => Ok(TcpStream::connect(addresses.as_slice()).await?),
-        }
-    })
-    .await;
+    let upstream = tokio::time::timeout(Duration::from_secs(6), routes.connect(&addresses)).await;
     match upstream {
         Ok(Ok(mut upstream)) => {
             client
@@ -113,13 +107,21 @@ async fn handle(mut client: TcpStream, proxy: Option<&Upstream>) -> Result<()> {
 mod tests {
     use super::*;
     use tokio::task::JoinHandle;
+    use upstream::Upstream;
+
+    fn fixture(proxy: Option<Upstream>) -> Routes {
+        Routes::fixture(
+            std::env::temp_dir().join(format!("browser-proxy-{}", uuid::Uuid::new_v4())),
+            proxy,
+        )
+    }
 
     async fn relay(upstream: Upstream) -> (TcpStream, JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
-            handle(socket, Some(&upstream)).await.unwrap();
+            handle(socket, &fixture(Some(upstream))).await.unwrap();
         });
         (TcpStream::connect(address).await.unwrap(), server)
     }
@@ -302,7 +304,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            handle(listener.accept().await.unwrap().0, None)
+            handle(listener.accept().await.unwrap().0, &fixture(None))
                 .await
                 .unwrap()
         });
