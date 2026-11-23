@@ -313,7 +313,13 @@ mod tests {
             unreachable!()
         }
 
-        async fn send(&self, _: &str, _: &str, _: Option<&str>) -> Result<Option<i64>> {
+        async fn send(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> Result<crate::channel::MessageDelivery> {
             unreachable!()
         }
 

@@ -28,6 +28,13 @@ pub enum Inbound {
         user: String,
         text: String,
         telegram_message_id: Option<i64>,
+        reply: Option<store::ReplyContext>,
+    },
+    Reaction {
+        external_id: i64,
+        user: String,
+        message_id: i64,
+        emoji: String,
     },
     Voice(voice::Received),
     Widget(widget::Query),
@@ -35,22 +42,34 @@ pub enum Inbound {
 }
 
 enum Dispatch {
-    Sent,
+    Sent(Option<i64>),
     Retry(i64),
     Failed,
 }
 
 enum WidgetDelivery {
-    Sent,
+    Sent(Option<i64>),
     Retry(i64),
     Rejected,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum MessageDelivery {
+    Sent(Option<i64>),
+    Retry(i64),
 }
 
 #[async_trait]
 pub trait ChannelAdapter: Send + Sync {
     fn name(&self) -> &'static str;
     async fn receive(&self, offset: i64) -> Result<(Vec<Inbound>, i64)>;
-    async fn send(&self, user: &str, body: &str, button: Option<&str>) -> Result<Option<i64>>;
+    async fn send(
+        &self,
+        user: &str,
+        body: &str,
+        button: Option<&str>,
+        reply_to: Option<i64>,
+    ) -> Result<MessageDelivery>;
     async fn download_voice(&self, _file_id: &str) -> Result<Vec<u8>> {
         anyhow::bail!("channel does not support voice downloads")
     }
@@ -64,8 +83,9 @@ pub trait ChannelAdapter: Send + Sync {
         user: &str,
         body: &str,
         _replies: &[store::SuggestedReply],
-    ) -> Result<Option<i64>> {
-        self.send(user, body, None).await
+        reply_to: Option<i64>,
+    ) -> Result<MessageDelivery> {
+        self.send(user, body, None, reply_to).await
     }
 
     async fn answer_callback(&self, _query: &str, _text: &str) -> Result<()> {
@@ -77,13 +97,14 @@ pub trait ChannelAdapter: Send + Sync {
         user: &str,
         card: &Card,
         replies: &[store::SuggestedReply],
-    ) -> Result<Option<i64>> {
-        self.send_suggested_replies(user, &card.plain_text(), replies)
+        reply_to: Option<i64>,
+    ) -> Result<MessageDelivery> {
+        self.send_suggested_replies(user, &card.plain_text(), replies, reply_to)
             .await
     }
 
-    async fn send_choice(&self, user: &str, choice: &WidgetChoice) -> Result<Option<i64>> {
-        self.send(user, &choice.label, Some("mini")).await
+    async fn send_choice(&self, user: &str, choice: &WidgetChoice) -> Result<MessageDelivery> {
+        self.send(user, &choice.label, Some("mini"), None).await
     }
 
     async fn typing(&self, _user: &str) -> Result<Option<Duration>> {
@@ -163,7 +184,7 @@ impl Telegram {
                 has_widget = response["result"]["widget"].is_object(),
                 "Telegram accepted widget message"
             );
-            return Ok(WidgetDelivery::Sent);
+            return Ok(WidgetDelivery::Sent(accepted_message_id(&response)));
         }
         if let Some(delay) = retry_after(&response) {
             return Ok(WidgetDelivery::Retry(delay));
@@ -179,7 +200,7 @@ impl Telegram {
         Ok(WidgetDelivery::Rejected)
     }
 
-    async fn send_message(&self, data: Value) -> Result<Option<i64>> {
+    async fn send_message(&self, data: Value) -> Result<MessageDelivery> {
         message_result(&self.call("sendMessage", data).await?)
     }
 
@@ -188,10 +209,12 @@ impl Telegram {
         user: i64,
         body: &str,
         keyboard: Option<Value>,
-    ) -> Result<Option<i64>> {
+        reply_to: Option<i64>,
+    ) -> Result<MessageDelivery> {
         let reply = formatting::render(body);
         let mut data =
             json!({"chat_id":user,"text":reply.text,"link_preview_options":{"is_disabled":true}});
+        add_reply_anchor(&mut data, reply_to);
         if let Some(keyboard) = &keyboard {
             data["reply_markup"] = keyboard.clone();
         }
@@ -235,12 +258,25 @@ impl Telegram {
     }
 }
 
-fn message_result(response: &Value) -> Result<Option<i64>> {
+fn accepted_message_id(response: &Value) -> Option<i64> {
+    response["result"]["message_id"]
+        .as_i64()
+        .filter(|id| *id > 0)
+}
+
+fn add_reply_anchor(data: &mut Value, reply_to: Option<i64>) {
+    if let Some(message_id) = reply_to.filter(|id| *id > 0) {
+        data["reply_parameters"] =
+            json!({"message_id":message_id,"allow_sending_without_reply":true});
+    }
+}
+
+fn message_result(response: &Value) -> Result<MessageDelivery> {
     if response["ok"] == true {
-        return Ok(None);
+        return Ok(MessageDelivery::Sent(accepted_message_id(response)));
     }
     if let Some(delay) = retry_after(response) {
-        return Ok(Some(delay));
+        return Ok(MessageDelivery::Retry(delay));
     }
     anyhow::bail!("Telegram rejected the reply")
 }
@@ -297,8 +333,50 @@ fn suggested_keyboard(replies: &[store::SuggestedReply]) -> Value {
 struct Update {
     update_id: i64,
     message: Option<Message>,
+    message_reaction: Option<ReactionUpdate>,
     widget_query: Option<widget::Query>,
     callback_query: Option<callback::Query>,
+}
+#[derive(Deserialize)]
+struct ReactionUpdate {
+    chat: Chat,
+    message_id: i64,
+    user: Option<User>,
+    old_reaction: Vec<Reaction>,
+    new_reaction: Vec<Reaction>,
+}
+
+#[derive(Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum Reaction {
+    Emoji {
+        emoji: String,
+    },
+    #[serde(other)]
+    Other,
+}
+
+impl ReactionUpdate {
+    fn receive(self, external_id: i64) -> Option<Inbound> {
+        let user = self.user?;
+        if !self.chat.is_private_with(&user) || self.message_id <= 0 {
+            return None;
+        }
+        let emoji = self
+            .new_reaction
+            .into_iter()
+            .filter(|reaction| !self.old_reaction.contains(reaction))
+            .find_map(|reaction| match reaction {
+                Reaction::Emoji { emoji } if !emoji.is_empty() && emoji.len() <= 32 => Some(emoji),
+                _ => None,
+            })?;
+        Some(Inbound::Reaction {
+            external_id,
+            user: user.id.to_string(),
+            message_id: self.message_id,
+            emoji,
+        })
+    }
 }
 #[derive(Deserialize)]
 struct Message {
@@ -307,6 +385,49 @@ struct Message {
     from: Option<User>,
     text: Option<String>,
     voice: Option<voice::Note>,
+    reply_to_message: Option<RepliedMessage>,
+    quote: Option<TextQuote>,
+}
+
+#[derive(Deserialize)]
+struct RepliedMessage {
+    chat: Chat,
+    message_id: i64,
+    from: Option<User>,
+    text: Option<String>,
+    caption: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TextQuote {
+    text: String,
+}
+
+impl Message {
+    fn reply_context(&self) -> Option<store::ReplyContext> {
+        let reply = self.reply_to_message.as_ref()?;
+        if self.chat.kind != "private"
+            || reply.chat.kind != "private"
+            || reply.chat.id != self.chat.id
+            || reply.message_id <= 0
+            || reply.message_id == self.message_id
+        {
+            return None;
+        }
+        let excerpt = self
+            .quote
+            .as_ref()
+            .map(|quote| quote.text.as_str())
+            .filter(|text| !text.trim().is_empty())
+            .or(reply.text.as_deref())
+            .or(reply.caption.as_deref())
+            .map(|text| clip(text.trim(), 1600).to_owned());
+        Some(store::ReplyContext {
+            message_id: reply.message_id,
+            excerpt,
+            from_bot: reply.from.as_ref().is_some_and(|user| user.is_bot),
+        })
+    }
 }
 #[derive(Deserialize)]
 struct Chat {
@@ -367,7 +488,7 @@ impl ChannelAdapter for Telegram {
         let output = self
             .call(
                 "getUpdates",
-                json!({"offset":offset,"timeout":25,"allowed_updates":["message","widget_query","callback_query"]}),
+                json!({"offset":offset,"timeout":25,"allowed_updates":["message","message_reaction","widget_query","callback_query"]}),
             )
             .await?;
         ensure!(
@@ -385,17 +506,22 @@ impl ChannelAdapter for Telegram {
                 if let Some(query) = update.callback_query {
                     return query.is_private().then_some(Inbound::Callback(query));
                 }
+                if let Some(reaction) = update.message_reaction {
+                    return reaction.receive(update.update_id);
+                }
                 let message = update.message?;
-                let user = message.from?;
-                if !message.chat.is_private_with(&user) {
+                let user = message.from.as_ref()?;
+                if !message.chat.is_private_with(user) {
                     return None;
                 }
+                let reply = message.reply_context();
                 if let Some(note) = message.voice {
                     return Some(Inbound::Voice(voice::Received::new(
                         update.update_id,
                         user.id.to_string(),
                         message.message_id,
                         note,
+                        reply,
                     )));
                 }
                 Some(Inbound::Message {
@@ -403,25 +529,33 @@ impl ChannelAdapter for Telegram {
                     user: user.id.to_string(),
                     text: message.text.unwrap_or_default(),
                     telegram_message_id: Some(message.message_id),
+                    reply,
                 })
             })
             .collect();
         Ok((messages, offset))
     }
 
-    async fn send(&self, user: &str, body: &str, button: Option<&str>) -> Result<Option<i64>> {
+    async fn send(
+        &self,
+        user: &str,
+        body: &str,
+        button: Option<&str>,
+        reply_to: Option<i64>,
+    ) -> Result<MessageDelivery> {
         let user = user.parse::<i64>().context("invalid Telegram recipient")?;
         if button.is_none() {
-            return self.send_reply(user, body, None).await;
+            return self.send_reply(user, body, None, reply_to).await;
         }
         let mut data = json!({"chat_id":user,"text":clip(body,3900),"link_preview_options":{"is_disabled":true}});
+        add_reply_anchor(&mut data, reply_to);
         match button {
             Some("panel") => {
                 match self.send_widget("panel", json!({
                     "chat_id":user,"html":PANEL_HTML,"caption":clip(body,900),"allow_queries":true
                 })).await? {
-                    WidgetDelivery::Sent => return Ok(None),
-                    WidgetDelivery::Retry(delay) => return Ok(Some(delay)),
+                    WidgetDelivery::Sent(id) => return Ok(MessageDelivery::Sent(id)),
+                    WidgetDelivery::Retry(delay) => return Ok(MessageDelivery::Retry(delay)),
                     WidgetDelivery::Rejected => {
                         data["text"] = json!("Use /tasks to list or switch tasks. Open Settings & forms to manage requests, schedules, and your account.");
                         data["reply_markup"] = self.settings_keyboard();
@@ -446,9 +580,10 @@ impl ChannelAdapter for Telegram {
         user: &str,
         body: &str,
         replies: &[store::SuggestedReply],
-    ) -> Result<Option<i64>> {
+        reply_to: Option<i64>,
+    ) -> Result<MessageDelivery> {
         let user = user.parse::<i64>().context("invalid Telegram recipient")?;
-        self.send_reply(user, body, Some(suggested_keyboard(replies)))
+        self.send_reply(user, body, Some(suggested_keyboard(replies)), reply_to)
             .await
     }
 
@@ -471,11 +606,14 @@ impl ChannelAdapter for Telegram {
         user: &str,
         card: &Card,
         replies: &[store::SuggestedReply],
-    ) -> Result<Option<i64>> {
+        reply_to: Option<i64>,
+    ) -> Result<MessageDelivery> {
         let user = user.parse::<i64>().context("invalid Telegram recipient")?;
         let mut data = json!({"chat_id":user,"html":card.html()});
         let mut fallback = json!({"chat_id":user,"text":card.plain_text(),
             "link_preview_options":{"is_disabled":true}});
+        add_reply_anchor(&mut data, reply_to);
+        add_reply_anchor(&mut fallback, reply_to);
         let title_length = card.title_utf16_len();
         if title_length > 0 {
             fallback["entities"] = json!([{"type":"bold","offset":0,"length":title_length}]);
@@ -486,21 +624,21 @@ impl ChannelAdapter for Telegram {
             fallback["reply_markup"] = keyboard;
         }
         match self.send_widget("card", data).await? {
-            WidgetDelivery::Sent => Ok(None),
-            WidgetDelivery::Retry(delay) => Ok(Some(delay)),
+            WidgetDelivery::Sent(id) => Ok(MessageDelivery::Sent(id)),
+            WidgetDelivery::Retry(delay) => Ok(MessageDelivery::Retry(delay)),
             WidgetDelivery::Rejected => self.send_message(fallback).await,
         }
     }
 
-    async fn send_choice(&self, user: &str, choice: &WidgetChoice) -> Result<Option<i64>> {
+    async fn send_choice(&self, user: &str, choice: &WidgetChoice) -> Result<MessageDelivery> {
         let user_id = user.parse::<i64>().context("invalid Telegram recipient")?;
         let data = json!({
             "chat_id":user_id,"html":CHOICE_HTML,"caption":choice.label,
             "chat_data":serde_json::to_string(choice)?,"allow_queries":true
         });
         match self.send_widget("choice", data).await? {
-            WidgetDelivery::Sent => Ok(None),
-            WidgetDelivery::Retry(delay) => Ok(Some(delay)),
+            WidgetDelivery::Sent(id) => Ok(MessageDelivery::Sent(id)),
+            WidgetDelivery::Retry(delay) => Ok(MessageDelivery::Retry(delay)),
             WidgetDelivery::Rejected => {
                 let buttons: Vec<_> = choice.options.iter().enumerate().map(|(index, label)| {
                     json!([{"text":label,"callback_data":format!("choice/{}/{index}",choice.id)}])
@@ -555,15 +693,17 @@ pub async fn listen(
                         user,
                         text,
                         telegram_message_id,
+                        reply,
                     } => {
                         if let Some(message_id) = telegram_message_id {
-                            store::ingest_telegram(
+                            store::ingest_telegram_reply(
                                 db,
                                 &operator,
                                 external_id,
                                 &user,
                                 &text,
                                 message_id,
+                                reply,
                             )
                             .await?;
                         } else {
@@ -585,6 +725,22 @@ pub async fn listen(
                         if adapter.answer_callback(&query.id, text).await.is_err() {
                             tracing::debug!("callback answer expired or could not be delivered");
                         }
+                    }
+                    Inbound::Reaction {
+                        external_id,
+                        user,
+                        message_id,
+                        emoji,
+                    } => {
+                        store::ingest_telegram_reaction(
+                            db,
+                            &operator,
+                            external_id,
+                            &user,
+                            message_id,
+                            &emoji,
+                        )
+                        .await?;
                     }
                 }
             }
@@ -610,16 +766,16 @@ pub async fn outbox(db: SqlitePool, adapter: std::sync::Arc<dyn ChannelAdapter>)
             } else {
                 let sent = send_outbound(&db, &*adapter, &item).await;
                 match sent {
-                    Ok(None)=>Dispatch::Sent,
-                    Ok(Some(delay))=>Dispatch::Retry(now()+delay),
+                    Ok(MessageDelivery::Sent(id))=>Dispatch::Sent(id),
+                    Ok(MessageDelivery::Retry(delay))=>Dispatch::Retry(now()+delay),
                     Err(_)=>Dispatch::Failed
                 }
             };
-            let (state,retry)=match dispatch {Dispatch::Sent=>("sent",0), Dispatch::Retry(retry)=>("queued",retry), Dispatch::Failed=>("failed",0)};
+            let (state,retry,message_id)=match dispatch {Dispatch::Sent(message_id)=>("sent",0,message_id), Dispatch::Retry(retry)=>("queued",retry,None), Dispatch::Failed=>("failed",0,None)};
             sqlx::query("UPDATE outbox SET state=?,retry_at=?,body=CASE WHEN ?='queued' THEN body ELSE '' END,
                 button=CASE WHEN ?='queued' THEN button ELSE NULL END,
-                widget=CASE WHEN ?='queued' THEN widget ELSE NULL END WHERE id=?")
-                .bind(state).bind(retry).bind(state).bind(state).bind(state).bind(item.id).execute(&db).await?;
+                widget=CASE WHEN ?='queued' THEN widget ELSE NULL END,telegram_message_id=? WHERE id=?")
+                .bind(state).bind(retry).bind(state).bind(state).bind(state).bind(message_id).bind(item.id).execute(&db).await?;
             Ok::<_,anyhow::Error>(true)
         }.await;
         if !matches!(result, Ok(true)) {
@@ -632,11 +788,14 @@ async fn send_outbound(
     db: &SqlitePool,
     adapter: &dyn ChannelAdapter,
     item: &store::Outbound,
-) -> Result<Option<i64>> {
+) -> Result<MessageDelivery> {
     if item.reaction_event.is_some() {
         return match store::reaction_target(db, item).await? {
-            Some(message_id) => adapter.react(&item.user, message_id, &item.body).await,
-            None => Ok(None),
+            Some(message_id) => Ok(adapter
+                .react(&item.user, message_id, &item.body)
+                .await?
+                .map_or(MessageDelivery::Sent(None), MessageDelivery::Retry)),
+            None => Ok(MessageDelivery::Sent(None)),
         };
     }
     let button = item.button.as_deref();
@@ -645,16 +804,20 @@ async fn send_outbound(
         return adapter.send_choice(&item.user, &choice).await;
     }
     let Ok(replies) = store::suggested_replies(db, item.id).await else {
-        return Ok(Some(2));
+        return Ok(MessageDelivery::Retry(2));
     };
     if let Some(widget) = &item.widget {
         let card: Card = serde_json::from_str(widget)?;
-        adapter.send_card(&item.user, &card, &replies).await
+        adapter
+            .send_card(&item.user, &card, &replies, item.reply_to_message_id)
+            .await
     } else if replies.is_empty() {
-        adapter.send(&item.user, &item.body, button).await
+        adapter
+            .send(&item.user, &item.body, button, item.reply_to_message_id)
+            .await
     } else {
         adapter
-            .send_suggested_replies(&item.user, &item.body, &replies)
+            .send_suggested_replies(&item.user, &item.body, &replies, item.reply_to_message_id)
             .await
     }
 }
@@ -680,6 +843,69 @@ mod tests {
         let mut mock = mock.lock().await;
         mock.0.push((method, data));
         Json(mock.1.pop_front().expect("unexpected Telegram request"))
+    }
+
+    #[tokio::test]
+    async fn polling_extracts_private_quotes_and_only_new_user_emoji() {
+        let user = json!({"id":42,"is_bot":false});
+        let chat = json!({"id":42,"type":"private"});
+        let bot = json!({"id":99,"is_bot":true});
+        let updates = json!({"ok":true,"result":[
+            {"update_id":1,"message":{"message_id":30,"chat":chat,"from":user,"text":"👍",
+                "reply_to_message":{"message_id":29,"chat":chat,"from":bot,"text":"A whole earlier reply"},
+                "quote":{"text":"earlier reply","position":8}}},
+            {"update_id":2,"message":{"message_id":31,"chat":chat,"from":user,"text":"Hi",
+                "reply_to_message":{"message_id":18,"chat":{"id":100,"type":"private"},"from":bot,"text":"Other chat"}}},
+            {"update_id":3,"message_reaction":{"chat":chat,"message_id":29,"user":user,
+                "old_reaction":[],"new_reaction":[{"type":"emoji","emoji":"👍"}],"date":1}},
+            {"update_id":4,"message_reaction":{"chat":chat,"message_id":29,"user":user,
+                "old_reaction":[{"type":"emoji","emoji":"👍"}],"new_reaction":[],"date":1}},
+            {"update_id":5,"message_reaction":{"chat":{"id":42,"type":"group"},"message_id":29,"user":user,
+                "old_reaction":[],"new_reaction":[{"type":"emoji","emoji":"👍"}],"date":1}},
+        ]});
+        let mock: Mock = Arc::new(Mutex::new((Vec::new(), VecDeque::from([updates]))));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let telegram = Telegram {
+            client: reqwest::Client::new(),
+            api: format!("http://{}/botTEST", listener.local_addr().unwrap()),
+            origin: "https://example.test".into(),
+        };
+        let app = Router::new()
+            .route("/botTEST/{method}", post(record))
+            .with_state(mock.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (updates, offset) = telegram.receive(0).await.unwrap();
+        assert_eq!(offset, 6);
+        let [
+            Inbound::Message {
+                text,
+                reply: Some(quote),
+                ..
+            },
+            Inbound::Message { reply: None, .. },
+            Inbound::Reaction {
+                user,
+                message_id: 29,
+                emoji,
+                ..
+            },
+        ] = updates.as_slice()
+        else {
+            panic!("expected private replies and one new reaction")
+        };
+        assert_eq!(text, "👍");
+        assert_eq!(quote.message_id, 29);
+        assert_eq!(quote.excerpt.as_deref(), Some("earlier reply"));
+        assert!(quote.from_bot);
+        assert_eq!(user, "42");
+        assert_eq!(emoji, "👍");
+        assert!(
+            mock.lock().await.0[0].1["allowed_updates"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("message_reaction"))
+        );
+        server.abort();
     }
 
     #[tokio::test]
@@ -713,6 +939,7 @@ mod tests {
                 user,
                 text,
                 telegram_message_id: Some(message_id),
+                reply: None,
             },
         ] = updates.as_slice()
         else {
@@ -745,14 +972,17 @@ mod tests {
         assert!(store::queue_reaction(&db, &task, "❤️").await.unwrap());
         assert!(!store::queue_reaction(&db, &task, "🔥").await.unwrap());
         let item = store::claim_outbox(&db).await.unwrap().unwrap();
-        assert_eq!(send_outbound(&db, &telegram, &item).await.unwrap(), Some(3));
+        assert_eq!(
+            send_outbound(&db, &telegram, &item).await.unwrap(),
+            MessageDelivery::Retry(3)
+        );
         store::recover(&db).await.unwrap();
         let recovered = store::claim_outbox(&db).await.unwrap().unwrap();
         assert_eq!(recovered.id, item.id);
         let task = store::claim(&db).await.unwrap().unwrap();
         assert_eq!(
             send_outbound(&db, &telegram, &recovered).await.unwrap(),
-            None
+            MessageDelivery::Sent(None)
         );
         sqlx::query("DELETE FROM outbox WHERE id=?")
             .bind(item.id)
@@ -831,7 +1061,7 @@ mod tests {
 
     #[tokio::test]
     async fn sends_formatted_replies_and_keeps_original_reply_buttons_on_rejection() {
-        let accepted = json!({"ok":true});
+        let accepted = json!({"ok":true,"result":{"message_id":201}});
         let mock: Mock = Arc::new(Mutex::new((
             Vec::new(),
             VecDeque::from([
@@ -861,18 +1091,24 @@ mod tests {
             body: "Meer uitleg".into(),
         }];
 
-        assert_eq!(telegram.send("42", body, None).await.unwrap(), None);
+        assert_eq!(
+            telegram.send("42", body, None, None).await.unwrap(),
+            MessageDelivery::Sent(Some(201))
+        );
         for _ in 0..2 {
             assert_eq!(
                 telegram
-                    .send_suggested_replies("42", body, &replies)
+                    .send_suggested_replies("42", body, &replies, Some(51))
                     .await
                     .unwrap(),
-                None
+                MessageDelivery::Sent(Some(201))
             );
         }
-        assert_eq!(telegram.send("42", body, None).await.unwrap(), Some(4));
-        assert!(telegram.send("42", body, None).await.is_err());
+        assert_eq!(
+            telegram.send("42", body, None, None).await.unwrap(),
+            MessageDelivery::Retry(4)
+        );
+        assert!(telegram.send("42", body, None, None).await.is_err());
 
         let mock = mock.lock().await;
         let calls = &mock.0;
@@ -887,6 +1123,14 @@ mod tests {
         let source = json!({"text":"Documentatie","url":"https://example.test/docs"});
         assert_eq!(first["reply_markup"]["inline_keyboard"], json!([[source]]));
         let with_suggestions = &calls[1].1;
+        assert_eq!(
+            with_suggestions["reply_parameters"],
+            json!({"message_id":51,"allow_sending_without_reply":true})
+        );
+        assert_eq!(
+            calls[2].1["reply_parameters"],
+            with_suggestions["reply_parameters"]
+        );
         let keyboard = &with_suggestions["reply_markup"]["inline_keyboard"];
         assert_eq!(
             keyboard[0][0]["callback_data"],
@@ -941,43 +1185,55 @@ mod tests {
             token: "12345678-1234-4234-8234-123456789abc".into(),
             body: "Say it in Dutch".into(),
         }];
-        assert_eq!(telegram.send_card("42", &card, &[]).await.unwrap(), None);
         assert_eq!(
-            telegram.send_card("42", &card, &[]).await.unwrap(),
-            Some(12)
+            telegram.send_card("42", &card, &[], None).await.unwrap(),
+            MessageDelivery::Sent(None)
         );
         assert_eq!(
-            telegram.send_card("42", &card, &replies).await.unwrap(),
-            None
+            telegram.send_card("42", &card, &[], None).await.unwrap(),
+            MessageDelivery::Retry(12)
+        );
+        assert_eq!(
+            telegram
+                .send_card("42", &card, &replies, Some(42))
+                .await
+                .unwrap(),
+            MessageDelivery::Sent(None)
         );
         let choice = WidgetChoice {
             id: "12345678-1234-4234-8234-123456789abc".into(),
             label: "Pick a topic".into(),
             options: vec!["Travel".into(), "Cooking".into()],
         };
-        assert_eq!(telegram.send_choice("42", &choice).await.unwrap(), None);
-        assert_eq!(telegram.send_choice("42", &choice).await.unwrap(), None);
         assert_eq!(
-            telegram
-                .send("42", "Manage TinyBot", Some("panel"))
-                .await
-                .unwrap(),
-            None
+            telegram.send_choice("42", &choice).await.unwrap(),
+            MessageDelivery::Sent(None)
+        );
+        assert_eq!(
+            telegram.send_choice("42", &choice).await.unwrap(),
+            MessageDelivery::Sent(None)
         );
         assert_eq!(
             telegram
-                .send("42", "Open settings", Some("mini"))
+                .send("42", "Manage TinyBot", Some("panel"), None)
                 .await
                 .unwrap(),
-            None
+            MessageDelivery::Sent(None)
+        );
+        assert_eq!(
+            telegram
+                .send("42", "Open settings", Some("mini"), None)
+                .await
+                .unwrap(),
+            MessageDelivery::Sent(None)
         );
         let button = format!("form/{}", choice.id);
         assert_eq!(
             telegram
-                .send("42", "I prepared a form for you.", Some(&button))
+                .send("42", "I prepared a form for you.", Some(&button), None)
                 .await
                 .unwrap(),
-            None
+            MessageDelivery::Sent(None)
         );
 
         let mock = mock.lock().await;
@@ -1016,6 +1272,14 @@ mod tests {
             json!([{"type":"bold","offset":0,"length":5}])
         );
         assert_eq!(calls[2].1["reply_markup"], calls[3].1["reply_markup"]);
+        assert_eq!(
+            calls[2].1["reply_parameters"],
+            json!({"message_id":42,"allow_sending_without_reply":true})
+        );
+        assert_eq!(
+            calls[3].1["reply_parameters"],
+            calls[2].1["reply_parameters"]
+        );
         assert_eq!(
             calls[3].1["reply_markup"]["inline_keyboard"][0][0]["text"],
             "Say it in Dutch"

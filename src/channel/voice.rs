@@ -18,6 +18,7 @@ pub struct Received {
     user: String,
     telegram_message_id: i64,
     note: Note,
+    reply: Option<store::ReplyContext>,
 }
 
 impl Received {
@@ -26,12 +27,14 @@ impl Received {
         user: String,
         telegram_message_id: i64,
         note: Note,
+        reply: Option<store::ReplyContext>,
     ) -> Self {
         Self {
             external_id,
             user,
             telegram_message_id,
             note,
+            reply,
         }
     }
 }
@@ -116,14 +119,14 @@ async fn enqueue_transcript(
     received: &Received,
     transcript: &str,
 ) -> Result<()> {
-    // The prefix makes the transcript literal user input even if it begins with /cancel.
-    store::ingest_telegram(
+    store::ingest_telegram_voice(
         db,
         operator,
         received.external_id,
         &received.user,
         &format!("Voice message:\n{transcript}"),
         received.telegram_message_id,
+        received.reply.clone(),
     )
     .await
 }
@@ -240,6 +243,7 @@ mod tests {
                 file_id: "voice-file".into(),
                 file_size: Some(1250),
             },
+            None,
         )
     }
 
@@ -247,7 +251,9 @@ mod tests {
     async fn voice_updates_are_collected_only_from_the_senders_private_chat() {
         let updates = json!({"ok":true,"result":[
             {"update_id":10,"message":{"message_id":51,"chat":{"id":42,"type":"private"},
-                "from":{"id":42,"is_bot":false},"voice":{"file_id":"recording","file_size":1250}}},
+                "from":{"id":42,"is_bot":false},"voice":{"file_id":"recording","file_size":1250},
+                "reply_to_message":{"message_id":50,"chat":{"id":42,"type":"private"},
+                    "from":{"id":99,"is_bot":true},"text":"The earlier answer."}}},
             {"update_id":11,"message":{"message_id":52,"chat":{"id":-99,"type":"group"},
                 "from":{"id":42,"is_bot":false},"voice":{"file_id":"group-recording"}}},
             {"update_id":12,"message":{"message_id":53,"chat":{"id":43,"type":"private"},
@@ -273,6 +279,10 @@ mod tests {
         assert_eq!(received.telegram_message_id, 51);
         assert_eq!(received.user, "42");
         assert_eq!(received.note.file_id, "recording");
+        let reply = received.reply.as_ref().unwrap();
+        assert_eq!(reply.message_id, 50);
+        assert!(reply.from_bot);
+        assert_eq!(reply.excerpt.as_deref(), Some("The earlier answer."));
         server.abort();
     }
 
@@ -289,7 +299,12 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
-        let note = received(10, "42");
+        let mut note = received(10, "42");
+        note.reply = Some(store::ReplyContext {
+            message_id: 50,
+            excerpt: Some("A spoken reply's context".into()),
+            from_bot: true,
+        });
         assert!(eligible(&db, "telegram", &note).await.unwrap());
         assert!(
             !eligible(&db, "telegram", &received(11, "unknown"))
@@ -305,7 +320,7 @@ mod tests {
         let task = store::claim(&db).await.unwrap().unwrap();
         let events: Vec<(String, String, Option<i64>)> =
             sqlx::query_as("SELECT role,body,telegram_message_id FROM events WHERE task=?")
-                .bind(task.id)
+                .bind(&task.id)
                 .fetch_all(&db)
                 .await
                 .unwrap();
@@ -313,6 +328,12 @@ mod tests {
             events,
             vec![("user".into(), "Voice message:\n/cancel".into(), Some(51))]
         );
+        let reply = store::latest_reply_context(&db, &task.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply.message_id, 50);
+        assert_eq!(reply.excerpt.as_deref(), Some("A spoken reply's context"));
 
         let failed = received(11, "42");
         for _ in 0..2 {
