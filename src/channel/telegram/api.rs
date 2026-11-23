@@ -1,4 +1,4 @@
-use super::{Telegram, formatting};
+use super::{Telegram, formatting, rich};
 use crate::{channel::MessageDelivery, net, store};
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -115,6 +115,23 @@ impl Telegram {
                 rows.extend(reply.links.iter().map(|link| json!([link])));
             }
             data["reply_markup"] = markup;
+        }
+        if let Some(html) = rich::table(body) {
+            let mut table =
+                json!({"chat_id":user,"rich_message":{"html":html,"skip_entity_detection":true}});
+            for field in ["reply_markup", "reply_parameters"] {
+                if let Some(value) = data.get(field) {
+                    table[field] = value.clone();
+                }
+            }
+            let response = self.call("sendRichMessage", table).await?;
+            // Only retry as plain chat when Telegram explicitly rejected the rich message.
+            if response["ok"] != false
+                || !matches!(response["error_code"].as_i64(), Some(400 | 404))
+                || retry_after(&response).is_some()
+            {
+                return message_result(&response);
+            }
         }
         let response = self.call("sendMessage", data.clone()).await?;
         if let Some(description) = bad_request(&response) {

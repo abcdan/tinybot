@@ -542,6 +542,95 @@ async fn sends_formatted_replies_and_keeps_original_reply_buttons_on_rejection()
 }
 
 #[tokio::test]
+async fn sends_native_tables_and_falls_back_only_on_explicit_telegram_rejection() {
+    let accepted = json!({"ok":true,"result":{"message_id":215}});
+    let mock: Mock = Arc::new(Mutex::new((
+        Vec::new(),
+        VecDeque::from([
+            accepted.clone(),
+            json!({"ok":false,"error_code":400,"description":"Bad Request: invalid rich message"}),
+            accepted.clone(),
+            json!({"ok":false,"error_code":404,"description":"Not Found"}),
+            accepted,
+            json!({"ok":false,"error_code":429,"parameters":{"retry_after":5}}),
+            json!({"ok":false,"error_code":503,"description":"Service Unavailable"}),
+        ]),
+    )));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = format!("http://{}/botTEST", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route("/botTEST/{method}", post(record))
+        .with_state(mock.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let telegram = Telegram {
+        client: reqwest::Client::new(),
+        api,
+        origin: "https://example.test".into(),
+    };
+    let table = "| Abonnement | Maandprijs |\n| --- | ---: |\n| Lite | €15 |\n\n\
+                 Bronnen: [Tarieven](https://example.test/tarieven)";
+    let replies = [store::SuggestedReply {
+        token: "12345678-1234-4234-8234-123456789abc".into(),
+        body: "Meer uitleg".into(),
+    }];
+
+    for _ in 0..3 {
+        assert_eq!(
+            telegram
+                .send_suggested_replies("42", table, &replies, Some(51))
+                .await
+                .unwrap(),
+            MessageDelivery::Sent(Some(215))
+        );
+    }
+    assert_eq!(
+        telegram.send("42", table, None, None).await.unwrap(),
+        MessageDelivery::Retry(5)
+    );
+    assert!(telegram.send("42", table, None, None).await.is_err());
+
+    let mock = mock.lock().await;
+    let calls = &mock.0;
+    assert_eq!(
+        calls
+            .iter()
+            .map(|(method, _)| method.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "sendRichMessage",
+            "sendRichMessage",
+            "sendMessage",
+            "sendRichMessage",
+            "sendMessage",
+            "sendRichMessage",
+            "sendRichMessage"
+        ]
+    );
+    let native = &calls[0].1;
+    assert!(
+        native["rich_message"]["html"]
+            .as_str()
+            .unwrap()
+            .contains("<table bordered compact>")
+    );
+    assert_eq!(native["rich_message"]["skip_entity_detection"], true);
+    let keyboard = &native["reply_markup"]["inline_keyboard"];
+    assert_eq!(
+        keyboard[0][0]["callback_data"],
+        format!("reply/{}", replies[0].token)
+    );
+    assert_eq!(keyboard[1][0]["url"], "https://example.test/tarieven");
+    for fallback in [&calls[2].1, &calls[4].1] {
+        assert_eq!(fallback["reply_parameters"], native["reply_parameters"]);
+        assert_eq!(fallback["reply_markup"], native["reply_markup"]);
+        let text = fallback["text"].as_str().unwrap();
+        assert!(text.contains("Lite") && text.contains("Maandprijs") && text.contains("€15"));
+        assert!(!text.contains('|'));
+    }
+    server.abort();
+}
+
+#[tokio::test]
 async fn sends_native_cards_and_direct_choices_with_honest_delivery_fallbacks() {
     let accepted = json!({"ok":true,"result":{"widget":{}}});
     let rejected = json!({"ok":false,"error_code":400,"description":"Bad Request: INPUT_MEDIA_WIDGET_NOT_ALLOWED"});
