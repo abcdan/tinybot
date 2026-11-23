@@ -307,6 +307,12 @@ impl ChannelAdapter for Telegram {
                 }
             }
             Some("mini") => data["reply_markup"] = self.settings_keyboard(),
+            Some(button) if button.starts_with("form/") => {
+                let id = uuid::Uuid::parse_str(&button["form/".len()..])?;
+                data["reply_markup"] = json!({"inline_keyboard":[[{
+                    "text":"Open form","web_app":{"url":format!("{}/mini?form={id}",self.origin)}
+                }]]});
+            }
             None => {}
             _ => anyhow::bail!("unknown channel button"),
         }
@@ -549,6 +555,7 @@ mod tests {
                 rejected,
                 json!({"ok":true}),
                 json!({"ok":true}),
+                json!({"ok":true}),
             ]),
         )));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -600,6 +607,14 @@ mod tests {
                 .unwrap(),
             None
         );
+        let button = format!("form/{}", choice.id);
+        assert_eq!(
+            telegram
+                .send("42", "I prepared a form for you.", Some(&button))
+                .await
+                .unwrap(),
+            None
+        );
 
         let mock = mock.lock().await;
         let calls = &mock.0;
@@ -617,6 +632,7 @@ mod tests {
                 "sendWidget",
                 "sendMessage",
                 "sendWidget",
+                "sendMessage",
                 "sendMessage",
                 "sendMessage"
             ]
@@ -654,6 +670,10 @@ mod tests {
         assert_eq!(
             calls[9].1["reply_markup"]["inline_keyboard"][0][0]["web_app"]["url"],
             "https://example.test/mini"
+        );
+        assert_eq!(
+            calls[10].1["reply_markup"]["inline_keyboard"][0][0],
+            json!({"text":"Open form","web_app":{"url":format!("https://example.test/mini?form={}",choice.id)}})
         );
         server.abort();
     }

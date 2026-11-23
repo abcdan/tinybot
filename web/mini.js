@@ -6,6 +6,9 @@ import { schedules, model } from './mini-settings.js';
 export const telegram = window.Telegram?.WebApp;
 export const content = document.querySelector('#view');
 const notice = document.querySelector('#status');
+const refreshButton = document.querySelector('#refresh');
+const tabs = document.querySelector('#tabs');
+const formId = new URLSearchParams(window.location.search).get('form');
 let state;
 let tab = 'home';
 let generation = 0;
@@ -31,10 +34,18 @@ export async function api(action, data = {}) {
 export async function refresh() {
     const sequence = ++generation;
     try {
-        const result = await api('status');
+        const result = formId ? await api('get-form', {id: formId}) : await api('status');
         if (sequence !== generation) return;
-        state = result;
-        render();
+        if (formId) {
+            show('');
+            const item = card(result.test ? 'Test form' : 'Answer a few questions',
+                result.test ? 'Enter any sample answers.' : 'Your answers will be shared with your agent.');
+            item.append(generatedForm(result));
+            content.replaceChildren(item);
+        } else {
+            state = result;
+            render();
+        }
     } catch (error) {
         if (sequence === generation) {
             content.replaceChildren();
@@ -114,15 +125,26 @@ function generatedForm(request) {
         });
     });
     const website = request.kind === 'form';
-    return form(website ? 'Continue to review' : 'Send answers', inputs, async (values, element) => {
+    const label = website ? 'Continue to review' : request.test ? 'Submit test' : 'Send answers';
+    return form(label, inputs, async (values, element) => {
         await api(website ? 'submit-form' : 'answer-form', {id: request.id, values});
         element.reset();
+        if (formId) {
+            const done = card(request.test ? 'Test submitted' : 'Answers sent',
+                request.test ? 'Your sample answers reached TinyBot. Look for a confirmation in chat.' : 'TinyBot will continue in your chat.');
+            done.append(button('Back to chat', () => telegram?.close()));
+            content.replaceChildren(done);
+            refreshButton.hidden = true;
+            return;
+        }
         await refresh();
         show(website ? 'Details received. Review the submission below.' : 'Answers sent. TinyBot will continue.');
     });
 }
 
-document.querySelector('#refresh').addEventListener('click', () => refresh());
+tabs.hidden = Boolean(formId);
+if (formId) content.setAttribute('aria-label', 'Form');
+refreshButton.addEventListener('click', () => refresh());
 for (const item of document.querySelectorAll('#tabs button')) {
     item.addEventListener('click', () => setTab(item.dataset.tab));
 }

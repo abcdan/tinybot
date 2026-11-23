@@ -84,6 +84,13 @@ impl ModelProvider for WidgetChief {
         let step = if last == "Can you make a widget that says hello?" {
             assert!(system.contains("TinyBot renders it natively."));
             json!({"kind":"widget","text":"Hello!","suggested_replies":["Say it in Dutch"]})
+        } else if last == "Create a Mini App form with one choice." {
+            assert!(system.contains("surface=mini_app"));
+            json!({"kind":"tool","name":"request_input","args":{
+                "purpose":"Pick a topic",
+                "surface":"mini_app",
+                "fields":[{"name":"topic","label":"Pick a topic","type":"select","options":["Travel","Cooking"]}]
+            }})
         } else if last == "Give me the menu" {
             json!({"kind":"reply","text":"1. Search online\n2. Try a simple widget"})
         } else if last == "2" {
@@ -159,6 +166,123 @@ async fn a_widget_reply_queues_a_native_widget_without_a_form_request() {
     assert_eq!(replies[0].body, "Say it in Dutch");
     assert!(store::list_requests(&db, "1").await.unwrap().is_empty());
     assert_eq!(task_for(&db, &task.id).await.state, "idle");
+}
+
+#[tokio::test]
+async fn an_explicit_mini_app_form_keeps_a_single_select_in_the_mini_app() {
+    let db = fixture().await;
+    let app = app_with_model(&db, Arc::new(WidgetChief));
+    message(&db, 1, "1", "Create a Mini App form with one choice.").await;
+    let task = store::claim(&db).await.unwrap().unwrap();
+    runtime::work(&app, &task).await.unwrap();
+    let id = pending_id(&db, &task, "elicitation").await;
+    let delivery = store::claim_outbox(&db).await.unwrap().unwrap();
+    assert_eq!(delivery.button, Some(format!("form/{id}")));
+    assert!(forms::widget_choice(&db, "1", &id).await.is_err());
+    let form = forms::input_request(&db, "1", &id).await.unwrap();
+    assert_eq!(form["test"], false);
+    assert_eq!(
+        form["content"]["fields"][0]["options"],
+        json!(["Travel", "Cooking"])
+    );
+}
+
+#[tokio::test]
+async fn testform_submits_through_the_signed_mini_app_api_without_a_model() {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let db = fixture().await;
+    sqlx::query("UPDATE users SET provider=NULL,model=NULL WHERE id='1'")
+        .execute(&db)
+        .await
+        .unwrap();
+    message(&db, 1, "1", "/testform").await;
+    let notice = store::claim_outbox(&db).await.unwrap().unwrap();
+    let form_id = notice
+        .button
+        .as_deref()
+        .unwrap()
+        .strip_prefix("form/")
+        .unwrap();
+    let app = Arc::new(app_with_model(&db, Arc::new(WidgetChief)));
+    let signed = |id: u64| {
+        let date = now().to_string();
+        let user = json!({"id":id}).to_string();
+        let mut key = Hmac::<Sha256>::new_from_slice(b"WebAppData").unwrap();
+        key.update(app.token.as_bytes());
+        let mut signature = Hmac::<Sha256>::new_from_slice(&key.finalize().into_bytes()).unwrap();
+        signature.update(format!("auth_date={date}\nuser={user}").as_bytes());
+        url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("auth_date", &date)
+            .append_pair("user", &user)
+            .append_pair("hash", &hex::encode(signature.finalize().into_bytes()))
+            .finish()
+    };
+    let owner = signed(1);
+    let other = signed(2);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/api/mini", listener.local_addr().unwrap());
+    let origin = app.origin.clone();
+    let server =
+        tokio::spawn(async move { axum::serve(listener, web::router(app)).await.unwrap() });
+    let client = reqwest::Client::new();
+    let post = |init: &str, action: &str, data: Value| {
+        client
+            .post(&endpoint)
+            .header("origin", &origin)
+            .json(&json!({"init":init,"action":action,"data":data}))
+            .send()
+    };
+
+    for (init, status) in [("invalid", 403), (other.as_str(), 404)] {
+        assert_eq!(
+            post(init, "get-form", json!({"id":form_id}))
+                .await
+                .unwrap()
+                .status(),
+            status
+        );
+    }
+    let response = post(&owner, "get-form", json!({"id":form_id}))
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let result: Value = response.json().await.unwrap();
+    assert_eq!(result["test"], true);
+    assert_eq!(result["content"]["fields"][0]["type"], "text");
+    assert_eq!(result["content"]["fields"][1]["type"], "select");
+    assert_eq!(
+        post(
+            &owner,
+            "answer-form",
+            json!({"id":form_id,"values":{"topic":"Sample"}})
+        )
+        .await
+        .unwrap()
+        .status(),
+        400,
+    );
+    let values = json!({"id":form_id,"values":{"topic":"Sample","format":"Checklist"}});
+    assert_eq!(
+        post(&owner, "answer-form", values.clone())
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert_eq!(
+        post(&owner, "answer-form", values).await.unwrap().status(),
+        400
+    );
+    let confirmation = store::claim_outbox(&db).await.unwrap().unwrap();
+    assert_eq!(
+        confirmation.body,
+        "Mini App test passed. I received your sample answers."
+    );
+    assert!(store::claim_outbox(&db).await.unwrap().is_none());
+    assert!(store::list_tasks(&db, "1").await.unwrap().is_empty());
+    server.abort();
 }
 
 #[tokio::test]
@@ -323,16 +447,22 @@ async fn mini_app_form_keeps_approved_values_in_memory_and_scopes_the_request() 
     let forms = forms::Forms::default();
     let website = website_form();
     assert!(
-        FormSpec { fields: Vec::new() }
-            .match_website(&website)
-            .is_err()
+        FormSpec {
+            fields: Vec::new(),
+            mini_app: false
+        }
+        .match_website(&website)
+        .is_err()
     );
     let mut changed = website.fields.clone();
     changed[0].kind = "text".into();
     assert!(
-        FormSpec { fields: changed }
-            .match_website(&website)
-            .is_err()
+        FormSpec {
+            fields: changed,
+            mini_app: false
+        }
+        .match_website(&website)
+        .is_err()
     );
     forms.request(&db, &task, website).await.unwrap();
     let request = pending_id(&db, &task, "form").await;

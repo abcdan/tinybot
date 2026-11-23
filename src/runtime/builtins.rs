@@ -99,7 +99,7 @@ impl Tool for Builtin {
                 "Ask for values to fill a website form. Args: url, optional zero-based index."
             }
             Self::Input => {
-                "Ask for ordinary preferences. Args: purpose, optional fields array (name, label, type, required, options). For a simple test widget or menu, pass one select field with 2–6 short options so the user can tap directly in Telegram. Never request credentials, payment or private data."
+                "Create a form for ordinary preferences or demonstrate a form on request. Args: purpose, optional surface (auto or mini_app), and optional fields array (name, label, type, required, options). Pass fields directly when known. Choose mini_app for a form, even for one select field. In auto mode, one select with 2–6 short options can be answered in chat. Never request credentials, payment or private data."
             }
             Self::AgentSpec => {
                 "Propose an editable saved agent in the Mini App. Args: name, instructions."
