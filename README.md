@@ -59,11 +59,14 @@ after adding the domain. Then check `https://your-domain/health` and send
 
 ## Models and Mini Apps
 
-- **Tasks** use a tool-capable OpenRouter model you select or an eligible ChatGPT
-  plan through the official Codex App Server. To set up Codex, create a pairing
-  code in the Mini App and run `tinybot codex connect https://your-domain` on a
-  computer with a browser. Build the local command with `cargo build --locked
-  --release` and use the binary in the build output.
+- **Tasks** use a tool-capable OpenRouter model or an eligible ChatGPT plan
+  through the official Codex App Server. Connect your OpenRouter API key in the
+  Mini App to load the models available to your account, then choose a task
+  model. The same key enables Mercury for forms and acknowledgements, including
+  when Codex is the active task model.
+- **Codex** pairing uses a code from the Mini App. Run `tinybot codex connect
+  https://your-domain` on a computer with a browser. Build the local command
+  with `cargo build --locked --release` and use the binary in the build output.
 - **Forms** with a single choice can be answered using buttons in chat.
   Ask for a Mini App form to open it directly using **Open form**. After you
   submit it, TinyBot continues the same task in Telegram. TinyBot can use the
@@ -72,8 +75,7 @@ after adding the domain. Then check `https://your-domain/health` and send
   Website values go directly from the Mini App to TinyBot over HTTPS and stay
   in memory until use or expiry. Review the masked preview before submitting.
 - **Acknowledgements** use Mercury 3 to generate a short message in your
-  language while TinyBot starts a lookup or longer task. A connected OpenRouter
-  key enables them for both Codex and OpenRouter tasks.
+  language while TinyBot starts a lookup or longer task.
 - **Action review** defaults to a separate call to the active task model. Set
   `TINYBOT_REVIEW_MODEL=typesafe/jev-1.14` to use OpenRouter's typed Decisions API.
   The broker still enforces permissions and approvals. An optional

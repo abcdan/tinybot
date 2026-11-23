@@ -1,7 +1,8 @@
-use super::{Api, ApiError, accounts, agents, forbidden, invalid, origin, state};
+use super::{Api, ApiError, agents, forbidden, invalid, origin, state};
 use crate::{
     App,
     mcp::Candidate,
+    model::OpenRouterSettingsError,
     security::{hash, id, now, telegram_user, token},
     store,
 };
@@ -48,6 +49,14 @@ pub(super) async fn mini(
                     StatusCode::NOT_FOUND,
                     "This form is no longer available. Open a fresh form from TinyBot in Telegram.",
                 )
+            } else if let Some(error) = error.downcast_ref::<OpenRouterSettingsError>() {
+                match error {
+                    OpenRouterSettingsError::MissingKey => ApiError(StatusCode::BAD_REQUEST, "Connect your OpenRouter key first."),
+                    OpenRouterSettingsError::InvalidKey => ApiError(StatusCode::BAD_REQUEST, "OpenRouter rejected that key. Enter an active OpenRouter API key."),
+                    OpenRouterSettingsError::InvalidModel => ApiError(StatusCode::BAD_REQUEST, "That model is no longer available for tool calls. Refresh the model list and choose another."),
+                    OpenRouterSettingsError::Unavailable => ApiError(StatusCode::BAD_GATEWAY, "TinyBot couldn’t reach OpenRouter. Try again in a moment."),
+                    OpenRouterSettingsError::Changed => ApiError(StatusCode::CONFLICT, "Your OpenRouter key changed. Reload the model list and try again."),
+                }
             } else {
                 invalid(error)
             }
@@ -70,52 +79,23 @@ async fn operation(app: &App, user: &str, action: &str, data: Value) -> Result<V
             let request = text(&data, "id", 36)?;
             return crate::forms::input_request(&app.db, user, request).await;
         }
-        "openrouter" | "openrouter-forms" => {
-            let key = text(&data, "key", 8192)?;
-            let model = if action == "openrouter" {
-                Some(text(&data, "model", 150)?)
-            } else {
-                None
-            };
-            ensure!(
-                key.starts_with("sk-or-")
-                    && model.is_none_or(|id| id.contains('/')
-                        && !id.starts_with("typesafe/jev-1")
-                        && id != "~typesafe/jev-latest"),
-                "invalid OpenRouter settings"
-            );
-            let client = reqwest::Client::builder()
-                .no_proxy()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(std::time::Duration::from_secs(15))
-                .build()?;
-            let response = client
-                .get("https://openrouter.ai/api/v1/key")
-                .bearer_auth(key)
-                .send()
+        "openrouter-key" => {
+            let models = app
+                .models
+                .save_openrouter_key(user, text(&data, "key", 8192)?)
                 .await?;
-            ensure!(
-                response.status().is_success(),
-                "OpenRouter key validation failed"
-            );
-            let auxiliary = app
-                .vault
-                .seal(&format!("openrouter:{user}"), key.as_bytes())?;
-            sqlx::query("UPDATE users SET openrouter_key=? WHERE id=?")
-                .bind(auxiliary)
-                .bind(user)
-                .execute(&app.db)
-                .await?;
-            if let Some(model) = model {
-                let enc = app.vault.seal(&format!("model:{user}"), key.as_bytes())?;
-                accounts::configure(app, user, "openrouter", model, &enc).await?;
-            }
+            result = json!({"models":models});
         }
-        "disconnect-forms" => {
-            sqlx::query("UPDATE users SET openrouter_key=NULL WHERE id=?")
-                .bind(user)
-                .execute(&app.db)
+        "openrouter-models" => {
+            result = json!({"models":app.models.openrouter_models(user).await?});
+        }
+        "openrouter-model" => {
+            app.models
+                .select_openrouter_model(user, text(&data, "model", 150)?)
                 .await?;
+        }
+        "disconnect-openrouter" => {
+            app.models.disconnect_openrouter(user).await?;
         }
         "codex-pair" => {
             let model = text(&data, "model", 150)?;
@@ -144,11 +124,14 @@ async fn operation(app: &App, user: &str, action: &str, data: Value) -> Result<V
             result =
                 json!({"code":pairing,"command":format!("tinybot codex connect {}",app.origin)});
         }
+        "codex-select" => {
+            app.models.select_codex(user).await?;
+        }
+        "disconnect-codex" => {
+            app.models.disconnect_codex(user).await?;
+        }
         "disconnect-model" => {
-            sqlx::query("UPDATE users SET provider=NULL,model=NULL,credential=NULL WHERE id=?")
-                .bind(user)
-                .execute(&app.db)
-                .await?;
+            app.models.disconnect_model(user).await?;
         }
         "save-agent" => agents::save_agent(app, user, &data).await?,
         "invite-agent" => {

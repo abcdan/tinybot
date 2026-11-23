@@ -13,6 +13,7 @@ use tokio::sync::Notify;
 
 #[cfg(unix)]
 mod browsing;
+mod model_settings;
 
 async fn fixture() -> SqlitePool {
     let db = SqlitePoolOptions::new()
@@ -73,6 +74,23 @@ async fn pending_id(db: &SqlitePool, task: &Task, kind: &str) -> String {
         .fetch_one(db)
         .await
         .unwrap()
+}
+
+fn signed_mini_init(app: &App, id: u64) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let date = now().to_string();
+    let user = json!({"id":id}).to_string();
+    let mut key = Hmac::<Sha256>::new_from_slice(b"WebAppData").unwrap();
+    key.update(app.token.as_bytes());
+    let mut signature = Hmac::<Sha256>::new_from_slice(&key.finalize().into_bytes()).unwrap();
+    signature.update(format!("auth_date={date}\nuser={user}").as_bytes());
+    url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("auth_date", &date)
+        .append_pair("user", &user)
+        .append_pair("hash", &hex::encode(signature.finalize().into_bytes()))
+        .finish()
 }
 
 struct WidgetChief;
@@ -249,9 +267,6 @@ async fn an_explicit_mini_app_form_keeps_a_single_select_in_the_mini_app() {
 
 #[tokio::test]
 async fn generated_form_submits_through_the_signed_mini_app_api_and_resumes_the_task() {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-
     let db = fixture().await;
     let app = Arc::new(app_with_model(&db, Arc::new(WidgetChief)));
     message(&db, 1, "1", "Create a Mini App form for my project.").await;
@@ -265,21 +280,8 @@ async fn generated_form_submits_through_the_signed_mini_app_api_and_resumes_the_
         .unwrap()
         .strip_prefix("form/")
         .unwrap();
-    let signed = |id: u64| {
-        let date = now().to_string();
-        let user = json!({"id":id}).to_string();
-        let mut key = Hmac::<Sha256>::new_from_slice(b"WebAppData").unwrap();
-        key.update(app.token.as_bytes());
-        let mut signature = Hmac::<Sha256>::new_from_slice(&key.finalize().into_bytes()).unwrap();
-        signature.update(format!("auth_date={date}\nuser={user}").as_bytes());
-        url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("auth_date", &date)
-            .append_pair("user", &user)
-            .append_pair("hash", &hex::encode(signature.finalize().into_bytes()))
-            .finish()
-    };
-    let owner = signed(1);
-    let other = signed(2);
+    let owner = signed_mini_init(&app, 1);
+    let other = signed_mini_init(&app, 2);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}/api/mini", listener.local_addr().unwrap());
     let origin = app.origin.clone();
