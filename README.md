@@ -218,8 +218,38 @@ should be deployed behind an HTTPS MCP endpoint.
 
 TinyBot explains requested MCP calls in Telegram. Tap **Approve once**,
 **Always approve**, or **Deny**. Always approve applies to that exact tool on
-the current connection. Revoke it in **Settings & forms → Connectors**.
+the current connection. Revoke it in **Settings & forms → Connections**.
 Replacing or removing a connection clears its saved approvals.
+
+### Self-hosted AnythingMCP
+
+Run the gateway as a separate Dokploy Docker Compose service using
+[`compose.anythingmcp.dokploy.yaml`](compose.anythingmcp.dokploy.yaml). It uses
+the pinned upstream image (`linux/amd64`) and a private PostgreSQL database.
+
+| Variable | Value |
+| --- | --- |
+| `AMCP_DOMAIN` | Your gateway hostname, without a scheme or port |
+| `AMCP_JWT_SECRET`, `AMCP_COOKIE_SECRET`, `AMCP_POSTGRES_PASSWORD` | Run `openssl rand -hex 32` separately for each secret |
+| `AMCP_ENCRYPTION_KEY` | Run `openssl rand -hex 16` to generate the 32-character key upstream expects |
+
+Back up the database volume and keep the secrets across redeployments. Start
+the stack with access restricted to you while you register the first admin.
+In Dokploy, route the gateway hostname to `anythingmcp` on port `3000`, with
+path `/` and HTTPS. The first account becomes admin. Keep the route private
+or IP-restricted until registration is complete. The dashboard lets you skip
+email verification and license setup on a self-hosted instance. The stack
+blocks the vendor mail relay and license hostnames. To enable verification
+and invitations through your own mail server, set `AMCP_SMTP_HOST`,
+`AMCP_SMTP_USER`, `AMCP_SMTP_PASS`, and `AMCP_SMTP_FROM`. Set `AMCP_SMTP_PORT`
+if it differs from 587 and `AMCP_SMTP_SECURE=true` for implicit TLS.
+
+In your gateway, create an MCP server and copy its HTTPS endpoint, including
+the full `/mcp` or `/mcp/<server-id>` path. In TinyBot, open **Connections →
+Connect AnythingMCP** and paste it. Sign in to your gateway with OAuth, or
+use a per-user MCP API key created in the gateway. **View tools** lists the
+tools TinyBot discovers for that account. TinyBot applies the same tool permissions,
+Telegram approvals, and audit logging as for other MCP connections.
 
 With your saved OpenRouter key, Jev can confirm that a call uses an
 operator-verified tool to read data. Writes and ambiguous calls require a
