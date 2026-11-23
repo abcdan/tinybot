@@ -1,5 +1,5 @@
 use crate::{
-    App,
+    App, audit,
     model::{ModelProvider, json_reply},
     security::clip,
     store::{self, Task},
@@ -38,7 +38,7 @@ pub(super) async fn send(app: &App, task: &Task) -> Result<()> {
     let Some(model) = app.models.mercury(&task.user).await? else {
         return Ok(());
     };
-    if let Some(text) = generate(&*model, &body).await? {
+    if let Some(text) = audit::model("mercury_acknowledgement", generate(&*model, &body)).await? {
         enqueue(&app.db, task, event, &text).await?;
     }
     Ok(())
@@ -82,6 +82,9 @@ async fn enqueue(db: &SqlitePool, task: &Task, event: i64, text: &str) -> Result
             .await?;
     }
     tx.commit().await?;
+    if changed == 1 {
+        audit::record("message", "mercury_acknowledgement", "queued", json!({})).await;
+    }
     Ok(())
 }
 

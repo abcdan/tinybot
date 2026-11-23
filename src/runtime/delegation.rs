@@ -4,6 +4,7 @@ use super::{
     tool_definitions,
 };
 use crate::{
+    audit,
     model::parse_json_reply,
     security::clip,
     store::{self, Agent},
@@ -58,10 +59,13 @@ pub(super) async fn delegate(ctx: &ToolContext<'_>, args: &Value) -> Result<Valu
         let input = json!({"brief":brief,"tools":descriptions(&allowed),
             "connectors":connector_context(ctx),"observations":history})
         .to_string();
-        let output = model
-            .complete_turn(&instruction, &input, &definitions, None)
-            .await?;
-        let step: Step = parse_json_reply(&output)?;
+        let step: Step = audit::model("delegated_turn", async {
+            let output = model
+                .complete_turn(&instruction, &input, &definitions, None)
+                .await?;
+            parse_json_reply(&output)
+        })
+        .await?;
         ensure!(
             store::current(&ctx.app.db, ctx.task).await?,
             "task was updated during delegation"
@@ -78,6 +82,13 @@ pub(super) async fn delegate(ctx: &ToolContext<'_>, args: &Value) -> Result<Valu
                 match tool.inspect(ctx, &args).await {
                     Ok(intent) if matches!(intent.risk, Risk::Read | Risk::PublicRead) => {
                         if review(ctx, &intent).await?.verdict != Verdict::Allow {
+                            audit::record(
+                                "tool",
+                                tool.name(),
+                                "blocked",
+                                json!({"scope":"delegation","stage":"review"}),
+                            )
+                            .await;
                             return Ok(
                                 json!({"chief_request":format!("Review {} at {}",intent.detail,intent.destination)}),
                             );
@@ -87,11 +98,21 @@ pub(super) async fn delegate(ctx: &ToolContext<'_>, args: &Value) -> Result<Valu
                             "task permissions changed during delegation"
                         );
                         tool.inspect(ctx, &args).await?;
-                        if let Outcome::Continue(value) = tool.execute(ctx, args).await? {
+                        audit::tool_started(tool.name(), &args).await;
+                        let outcome = tool.execute(ctx, args).await;
+                        audit::tool_finished(tool.name(), &outcome).await;
+                        if let Outcome::Continue(value) = outcome? {
                             history.push(value);
                         }
                     }
                     _ => {
+                        audit::record(
+                            "tool",
+                            tool.name(),
+                            "blocked",
+                            json!({"scope":"delegation","stage":"permissions"}),
+                        )
+                        .await;
                         return Ok(
                             json!({"chief_request":"A requested tool needs your permissions or approval.","tool":name}),
                         );

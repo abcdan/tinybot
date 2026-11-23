@@ -2,7 +2,7 @@ use super::review::{Verdict, review};
 use super::suggestions::valid_suggestions;
 use super::{Intent, Outcome, Risk, ToolContext, builtins::Builtin, delegation::delegate, string};
 use crate::{
-    App,
+    App, audit,
     forms::{FormSpec, WebsiteForm},
     mcp::Candidate,
     model::json_reply,
@@ -143,10 +143,13 @@ pub(super) async fn execute(tool: Builtin, ctx: &ToolContext<'_>, args: Value) -
             let mut form: WebsiteForm =
                 serde_json::from_value(app.workers.browser("inspect", &args).await?)?;
             let model = app.models.forms(&task.user).await?;
-            let spec: FormSpec = json_reply(
-                &*model,
-                &format!("{UI_SPEC}\n{FIELDS}"),
-                &json!({"fields":form.fields}),
+            let spec: FormSpec = audit::model(
+                "website_form_schema",
+                json_reply(
+                    &*model,
+                    &format!("{UI_SPEC}\n{FIELDS}"),
+                    &json!({"fields":form.fields}),
+                ),
             )
             .await?;
             form.fields = spec.match_website(&form)?;
@@ -174,9 +177,9 @@ pub(super) async fn execute(tool: Builtin, ctx: &ToolContext<'_>, args: Value) -
                 serde_json::from_value(json!({"fields":fields}))?
             } else {
                 let model = app.models.forms(&task.user).await?;
-                json_reply(&*model,
+                audit::model("input_form_schema", json_reply(&*model,
                     &format!("{UI_SPEC}\nReturn only JSON with fields. Propose up to eight fields for the stated task. Use text, textarea, number, date, select or checkbox. Use private=false, with options for selects. Ask only for ordinary task preferences. Never request contact, credentials, payment, identity, medical or other private information."),
-                    &json!({"purpose":purpose})).await?
+                    &json!({"purpose":purpose}))).await?
             };
             let surface = args
                 .get("surface")
@@ -238,9 +241,9 @@ pub(super) async fn execute(tool: Builtin, ctx: &ToolContext<'_>, args: Value) -
             let name = string(&args, "name", 80)?;
             let instructions = string(&args, "instructions", 2500)?;
             let reviewer = app.models.forms(&task.user).await?;
-            let spec:FormSpec=json_reply(&*reviewer,
+            let spec:FormSpec=audit::model("agent_form_schema", json_reply(&*reviewer,
                     &format!("{UI_SPEC}\nReturn only JSON with fields. Include name (text) and instructions (textarea); optionally include tools (textarea). Use only these names and types. All options are empty. No private fields."),
-                    &json!({"agent":name,"configuration_purpose":"saved subagent"})).await?;
+                    &json!({"agent":name,"configuration_purpose":"saved subagent"}))).await?;
             spec.validate()?;
             ensure!(
                 spec.fields.iter().all(|f| matches!(
