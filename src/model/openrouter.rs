@@ -1,17 +1,15 @@
 use super::{ModelProvider, TextDelta, ToolDefinition, native_reply, native_tool_proposal};
+use crate::{
+    audit::{self, ModelCall},
+    net,
+};
 use anyhow::{Context, Result, anyhow, ensure};
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
-use rig::{
-    agent::{Agent, MultiTurnStreamItem},
-    completion::{AssistantContent, CompletionModel, Prompt, ToolDefinition as RigToolDefinition},
-    prelude::CompletionClient,
-    providers::openrouter,
-    streaming::{StreamedAssistantContent, StreamingPrompt},
-};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, time::Duration};
+use tokio::time::{Instant, timeout_at};
 
 const MAX_TOKENS: u64 = 3600;
 const MAX_STREAM_BYTES: usize = 1_000_000;
@@ -23,120 +21,26 @@ pub(super) struct OpenRouter {
 }
 
 impl OpenRouter {
-    fn agent(&self, system: &str) -> Agent<openrouter::CompletionModel> {
-        openrouter::Client::new(&self.key)
-            .agent(&self.model)
-            .preamble(system)
-            .max_tokens(MAX_TOKENS)
-            .build()
-    }
-
-    async fn native_buffered(
-        &self,
-        system: &str,
-        input: &str,
-        tools: &[ToolDefinition],
-    ) -> Result<String> {
-        let client = openrouter::Client::new(&self.key);
-        let model = client.completion_model(&self.model);
-        let response = model
-            .completion_request(input)
-            .preamble(system.to_owned())
-            .tools(rig_tools(tools))
-            .additional_params(json!({
-                "tool_choice":"auto",
-                "parallel_tool_calls":false,
-                "max_tokens":MAX_TOKENS,
-            }))
-            .send()
-            .await
-            .map_err(|_| anyhow!("OpenRouter could not complete the tool turn"))?;
-        let finish = response
-            .raw_response
-            .choices
-            .first()
-            .and_then(|choice| choice.finish_reason.as_deref());
-        let mut text = String::new();
-        for item in response.choice {
-            match item {
-                AssistantContent::Text(part) if finish == Some("stop") => text.push_str(&part.text),
-                AssistantContent::ToolCall(call)
-                    if finish == Some("tool_calls") && !call.id.is_empty() =>
-                {
-                    if let Ok(proposal) =
-                        native_tool_proposal(tools, &call.function.name, call.function.arguments)
-                    {
-                        return Ok(proposal);
-                    }
-                }
-                _ => {}
-            }
-        }
-        ensure!(
-            !text.trim().is_empty(),
-            "OpenRouter did not complete a reply or tool proposal"
-        );
-        native_reply(text)
-    }
-
-    async fn native_streamed(
-        &self,
-        system: &str,
-        input: &str,
-        tools: &[ToolDefinition],
-        delta: &mut TextDelta<'_>,
-    ) -> Result<String> {
-        let response = reqwest::Client::builder()
+    async fn send(&self, request: Value) -> Result<reqwest::Response> {
+        reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(10))
             .build()?
             .post(CHAT_COMPLETIONS)
             .bearer_auth(&self.key)
-            .json(&stream_request(&self.model, system, input, tools))
+            .json(&request)
             .send()
             .await
             .and_then(reqwest::Response::error_for_status)
-            .map_err(|_| anyhow!("OpenRouter could not stream the tool turn"))?;
-        let mut bytes = 0;
-        let mut events = response
-            .bytes_stream()
-            .map(move |chunk| {
-                let chunk = chunk?;
-                bytes += chunk.len();
-                ensure!(
-                    bytes <= MAX_STREAM_BYTES,
-                    "OpenRouter stream exceeded its size limit"
-                );
-                Ok::<_, anyhow::Error>(chunk)
-            })
-            .eventsource();
-
-        // Rig 0.24's OpenRouter stream does not retain finish reasons and rejects
-        // usage-only frames. Require a finish reason before handing a call to the broker.
-        let mut turn = StreamTurn::default();
-        while let Some(event) = events.next().await {
-            let event = event.map_err(|_| anyhow!("OpenRouter stream failed"))?;
-            if event.data == "[DONE]" {
-                break;
-            }
-            if let Some(result) = turn.accept(&event.data, tools, delta)? {
-                return Ok(result);
-            }
-        }
-        Err(anyhow!(
-            "OpenRouter stream ended without a completed reply or tool proposal"
-        ))
+            .map_err(|_| anyhow!("OpenRouter could not complete the request"))
     }
 }
 
 #[async_trait]
 impl ModelProvider for OpenRouter {
     async fn complete(&self, system: &str, input: &str) -> Result<String> {
-        let agent = self.agent(system);
-        tokio::time::timeout(Duration::from_secs(90), agent.prompt(input))
-            .await?
-            .map_err(|_| anyhow!("OpenRouter could not complete the request"))
+        self.complete_turn(system, input, &[], None).await
     }
 
     async fn complete_streaming(
@@ -145,25 +49,7 @@ impl ModelProvider for OpenRouter {
         input: &str,
         delta: &mut TextDelta<'_>,
     ) -> Result<String> {
-        tokio::time::timeout(Duration::from_secs(90), async {
-            let agent = self.agent(system);
-            let mut stream = agent.stream_prompt(input).await;
-            while let Some(item) = stream.next().await {
-                match item.map_err(|_| anyhow!("OpenRouter could not complete the request"))? {
-                    MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
-                        text,
-                    )) => {
-                        delta(&text.text);
-                    }
-                    MultiTurnStreamItem::FinalResponse(response) => {
-                        return Ok(response.response().to_owned());
-                    }
-                    _ => {}
-                }
-            }
-            Err(anyhow!("OpenRouter stopped before completing the request"))
-        })
-        .await?
+        self.complete_turn(system, input, &[], Some(delta)).await
     }
 
     async fn complete_turn(
@@ -173,50 +59,171 @@ impl ModelProvider for OpenRouter {
         tools: &[ToolDefinition],
         delta: Option<&mut TextDelta<'_>>,
     ) -> Result<String> {
-        if tools.is_empty() {
-            return match delta {
-                Some(delta) => self.complete_streaming(system, input, delta).await,
-                None => self.complete(system, input).await,
-            };
-        }
-        let timeout = Duration::from_secs(90);
-        match delta {
-            Some(delta) => {
-                tokio::time::timeout(timeout, self.native_streamed(system, input, tools, delta))
-                    .await?
+        audit::provider_call("openrouter", &self.model, async |call| {
+            let deadline = Instant::now() + Duration::from_secs(90);
+            let req = chat_request(&self.model, system, input, tools, delta.is_some());
+            let response = timeout_at(deadline, self.send(req)).await??;
+            match delta {
+                Some(delta) => stream_response(response, tools, delta, call, deadline).await,
+                None => {
+                    let body =
+                        timeout_at(deadline, net::body(response, MAX_STREAM_BYTES)).await??;
+                    let reply: Value = serde_json::from_slice(&body)
+                        .context("invalid OpenRouter completion response")?;
+                    buffered_response(&reply, tools, call)
+                }
             }
-            None => {
-                tokio::time::timeout(timeout, self.native_buffered(system, input, tools)).await?
-            }
-        }
+        })
+        .await
     }
 }
 
-fn rig_tools(tools: &[ToolDefinition]) -> Vec<RigToolDefinition> {
-    tools
-        .iter()
-        .map(|tool| RigToolDefinition {
-            name: tool.name.into(),
-            description: tool.description.into(),
-            parameters: tool.input_schema.clone(),
-        })
-        .collect()
+fn buffered_response(
+    reply: &Value,
+    tools: &[ToolDefinition],
+    call: &mut ModelCall,
+) -> Result<String> {
+    call.openrouter(reply);
+    let choice = &reply["choices"][0];
+    let message = &choice["message"];
+    ensure!(
+        message["role"] == "assistant",
+        "OpenRouter did not return an assistant message"
+    );
+    let finish = choice["finish_reason"].as_str();
+    if finish == Some("tool_calls") {
+        for item in message["tool_calls"].as_array().into_iter().flatten() {
+            if let Some(kind) = item.get("type")
+                && kind != "function"
+            {
+                continue;
+            }
+            if let (Some(name), Some(args)) = (
+                item["function"]["name"].as_str(),
+                item["function"]["arguments"].as_str(),
+            ) && item["id"].as_str().is_some_and(|id| !id.is_empty())
+                && let Ok(args) = serde_json::from_str(args)
+                && let Ok(proposal) = native_tool_proposal(tools, name, args)
+            {
+                return Ok(proposal);
+            }
+        }
+    }
+    let content = &message["content"];
+    let text = match content {
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| match part["type"].as_str() {
+                Some("text") => part["text"].as_str(),
+                Some("refusal") => part["refusal"].as_str(),
+                _ => None,
+            })
+            .collect::<String>(),
+        _ => message["refusal"].as_str().unwrap_or_default().to_owned(),
+    };
+    ensure!(
+        (tools.is_empty() || finish == Some("stop")) && !text.trim().is_empty(),
+        "OpenRouter did not complete a reply or tool proposal"
+    );
+    if tools.is_empty() {
+        Ok(text)
+    } else {
+        native_reply(text)
+    }
 }
 
-fn stream_request(model: &str, system: &str, input: &str, tools: &[ToolDefinition]) -> Value {
-    let tools: Vec<_> = rig_tools(tools)
-        .into_iter()
-        .map(|tool| json!({"type":"function","function":tool}))
-        .collect();
-    json!({
+async fn stream_response(
+    response: reqwest::Response,
+    tools: &[ToolDefinition],
+    delta: &mut TextDelta<'_>,
+    call: &mut ModelCall,
+    deadline: Instant,
+) -> Result<String> {
+    let mut bytes = 0;
+    let mut events = response
+        .bytes_stream()
+        .map(move |chunk| {
+            let chunk = chunk?;
+            bytes += chunk.len();
+            ensure!(
+                bytes <= MAX_STREAM_BYTES,
+                "OpenRouter stream exceeded its size limit"
+            );
+            Ok::<_, anyhow::Error>(chunk)
+        })
+        .eventsource();
+    let mut turn = StreamTurn::default();
+    let mut result = None;
+    let mut accounting_deadline = None;
+    loop {
+        let event = if let Some(deadline) = accounting_deadline {
+            // Usage arrives after the finish frame. Bound the wait when a relay
+            // omits the final usage frame or leaves the connection open.
+            match timeout_at(deadline, events.next()).await {
+                Ok(event) => event,
+                Err(_) => break,
+            }
+        } else {
+            timeout_at(deadline, events.next()).await?
+        };
+        let Some(event) = event else { break };
+        let event = match event {
+            Ok(event) => event,
+            Err(_) if result.is_some() => break,
+            Err(_) => return Err(anyhow!("OpenRouter stream failed")),
+        };
+        if event.data == "[DONE]" {
+            break;
+        }
+        let value: Value = match serde_json::from_str(&event.data) {
+            Ok(value) => value,
+            Err(_) if result.is_some() => continue,
+            Err(_) => return Err(anyhow!("invalid OpenRouter stream frame")),
+        };
+        call.openrouter(&value);
+        if result.is_some()
+            && value["usage"].is_object()
+            && value["choices"].as_array().is_none_or(Vec::is_empty)
+        {
+            break;
+        }
+        if result.is_none() {
+            result = turn.accept(&value, tools, delta).transpose();
+            if result.is_some() {
+                accounting_deadline = Some(Instant::now() + Duration::from_secs(2));
+            }
+        }
+    }
+    result.context("OpenRouter stream ended without a completed reply or tool proposal")?
+}
+
+fn chat_request(
+    model: &str,
+    system: &str,
+    input: &str,
+    tools: &[ToolDefinition],
+    stream: bool,
+) -> Value {
+    let mut body = json!({
         "model":model,
         "messages":[{"role":"system","content":system},{"role":"user","content":input}],
-        "stream":true,
-        "tools":tools,
-        "tool_choice":"auto",
-        "parallel_tool_calls":false,
-        "max_tokens":MAX_TOKENS,
-    })
+        "stream":stream,
+        "usage":{"include":true},
+    });
+    if stream {
+        body["stream_options"] = json!({"include_usage":true});
+    }
+    if !tools.is_empty() {
+        body["max_tokens"] = json!(MAX_TOKENS);
+        body["tools"] =
+            json!(tools.iter().map(|tool| json!({"type":"function","function":{
+            "name":tool.name,"description":tool.description,"parameters":tool.input_schema
+        }})).collect::<Vec<_>>());
+        body["tool_choice"] = json!("auto");
+        body["parallel_tool_calls"] = json!(false);
+    }
+    body
 }
 
 #[derive(Default)]
@@ -235,11 +242,10 @@ struct StreamTurn {
 impl StreamTurn {
     fn accept(
         &mut self,
-        data: &str,
+        event: &Value,
         tools: &[ToolDefinition],
         delta: &mut TextDelta<'_>,
     ) -> Result<Option<String>> {
-        let event: Value = serde_json::from_str(data)?;
         ensure!(
             event["error"].is_null(),
             "OpenRouter reported a stream error"
@@ -278,6 +284,9 @@ impl StreamTurn {
         }
         match choice["finish_reason"].as_str() {
             None => Ok(None),
+            Some("stop" | "length") if tools.is_empty() && !self.text.trim().is_empty() => {
+                Ok(Some(std::mem::take(&mut self.text)))
+            }
             Some("stop") if self.calls.is_empty() && !self.text.trim().is_empty() => {
                 native_reply(std::mem::take(&mut self.text)).map(Some)
             }
@@ -313,11 +322,12 @@ mod tests {
     #[test]
     fn registers_native_openrouter_function_schemas() {
         let definitions = definitions();
-        let body = stream_request(
+        let body = chat_request(
             "provider/model",
             "system prompt",
             "task context",
             &definitions,
+            true,
         );
         assert_eq!(body["messages"][0]["content"], "system prompt");
         assert_eq!(body["messages"][1]["content"], "task context");
@@ -329,6 +339,90 @@ mod tests {
         );
         assert_eq!(body["tool_choice"], "auto");
         assert_eq!(body["parallel_tool_calls"], false);
+        assert_eq!(body["max_tokens"], MAX_TOKENS);
+        assert_eq!(body["usage"]["include"], true);
+        assert_eq!(body["stream_options"]["include_usage"], true);
+        let auxiliary = chat_request("inception/mercury-3", "preamble", "input", &[], false);
+        assert_eq!(auxiliary["usage"]["include"], true);
+        assert!(auxiliary.get("tools").is_none());
+        assert!(auxiliary.get("max_tokens").is_none());
+    }
+
+    #[tokio::test]
+    async fn tallies_the_usage_tail_after_the_stream_finish_frame() {
+        use axum::{Router, http::header, routing::get};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/fixture", listener.local_addr().unwrap());
+        let app = Router::new().route("/fixture", get(|| async {
+            ([(header::CONTENT_TYPE, "text/event-stream")], r#"data: {"provider":"Fixture Compute","model":"fixture/served","choices":[{"delta":{"content":"Hello"},"finish_reason":"stop"}]}
+
+data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10,"cost":0.00001,"private_field":"not for audit"}}
+
+data: [DONE]
+
+"#)
+        }));
+        let worker = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(endpoint)
+            .send()
+            .await
+            .unwrap();
+        audit::provider_call("openrouter", "openrouter/free", async |call| {
+            let mut draft = String::new();
+            let output = stream_response(response, &definitions(), &mut |part| {
+                draft.push_str(part);
+            }, call, Instant::now() + Duration::from_secs(2)).await?;
+            assert_eq!(output, "Hello");
+            assert_eq!(draft, "Hello");
+            assert_eq!(json!(call), json!({
+                "provider":"Fixture Compute","model":"fixture/served",
+                "usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10,"cost_usd":0.00001}
+            }));
+            Ok(())
+        }).await.unwrap();
+        worker.abort();
+    }
+
+    #[tokio::test]
+    async fn buffered_calls_preserve_routed_usage_and_native_proposals() {
+        let reply = json!({
+            "provider":"Fixture Compute","model":"fixture/served",
+            "choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[
+                {"id":"call_1","type":"function","function":{"name":"browse","arguments":"{\"url\":\"https://example.org\"}"}}
+            ]}}],
+            "usage":{"prompt_tokens":5,"total_tokens":9,"cost":0.0}
+        });
+        audit::provider_call("openrouter", "fixture/requested", async |call| {
+            let output = buffered_response(&reply, &definitions(), call)?;
+            assert_eq!(
+                serde_json::from_str::<Value>(&output)?,
+                json!({
+                    "kind":"tool","name":"browse","args":{"url":"https://example.org"}
+                })
+            );
+            assert_eq!(
+                json!(call),
+                json!({
+                    "provider":"Fixture Compute","model":"fixture/served",
+                    "usage":{"input_tokens":5,"output_tokens":null,"total_tokens":9,"cost_usd":0.0}
+                })
+            );
+            let mut invalid = reply;
+            invalid["choices"][0]["message"]["tool_calls"][0]["type"] = json!("other");
+            assert!(buffered_response(&invalid, &definitions(), call).is_err());
+            invalid["choices"][0]["message"]["tool_calls"][0]["type"] = json!("function");
+            invalid["choices"][0]["message"]["role"] = json!("user");
+            assert!(buffered_response(&invalid, &definitions(), call).is_err());
+            Ok(())
+        })
+        .await
+        .unwrap();
     }
 
     #[test]
@@ -339,7 +433,7 @@ mod tests {
         let mut emit = |part: &str| draft.push_str(part);
         assert!(
             turn.accept(
-                r#"{"choices":[],"usage":{"completion_tokens":4}}"#,
+                &json!({"choices":[],"usage":{"completion_tokens":4}}),
                 &definitions,
                 &mut emit
             )
@@ -353,18 +447,18 @@ mod tests {
             {"index":0,"function":{"arguments":"\"https://example.org\"}"}}
         ]},"finish_reason":null}]});
         assert!(
-            turn.accept(&start.to_string(), &definitions, &mut emit)
+            turn.accept(&start, &definitions, &mut emit)
                 .unwrap()
                 .is_none()
         );
         assert!(
-            turn.accept(&args.to_string(), &definitions, &mut emit)
+            turn.accept(&args, &definitions, &mut emit)
                 .unwrap()
                 .is_none()
         );
         let result = turn
             .accept(
-                r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+                &json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]}),
                 &definitions,
                 &mut emit,
             )
@@ -388,20 +482,17 @@ mod tests {
         let finished = json!({"choices":[{"delta":{"content":reply},"finish_reason":"stop"}]});
         let mut draft = String::new();
         assert_eq!(
-            turn.accept(&finished.to_string(), &definitions, &mut |part: &str| draft
+            turn.accept(&finished, &definitions, &mut |part: &str| draft
                 .push_str(part))
                 .unwrap(),
             Some(reply.into())
         );
         assert_eq!(draft, reply);
         let fake = json!({"choices":[{"delta":{"content":"{\"kind\":\"tool\",\"name\":\"browse\",\"args\":{}}"},"finish_reason":"stop"}]});
-        assert!(
-            turn.accept(&fake.to_string(), &definitions, &mut emit)
-                .is_err()
-        );
+        assert!(turn.accept(&fake, &definitions, &mut emit).is_err());
         assert!(
             turn.accept(
-                r#"{"error":{"message":"partial failure"}}"#,
+                &json!({"error":{"message":"partial failure"}}),
                 &definitions,
                 &mut emit
             )

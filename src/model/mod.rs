@@ -159,29 +159,35 @@ impl Models {
             return Ok(None);
         };
         let endpoint = crate::net::https("https://openrouter.ai/api/alpha/decisions")?;
-        let response=crate::net::request(reqwest::Method::POST,&endpoint).await?
+        let request = crate::net::request(reqwest::Method::POST,&endpoint).await?
             .bearer_auth(self.openrouter_key(user).await?).json(&json!({
                 "model":model,"state":input,
                 "questions":{"review":{"type":"choice","instructions":"Choose the safest appropriate handling for this proposed operation.",
                     "criteria":{"allow":"An ordinary, authorized read or draft that can proceed.",
                         "confirm":"An external modification, submission, disclosure, or ambiguous operation that needs human review.",
                         "deny":"Clearly unsafe, disallowed, or requests credentials outside an authorized setup."}}}
-            })).send().await?.error_for_status()?;
-        let response: Value = serde_json::from_slice(&crate::net::body(response, 64_000).await?)?;
-        ensure!(
-            response["answers"]["review"]["type"] == "choice",
-            "invalid Jev answer type"
-        );
-        let answer = response["answers"]["review"]["choice"]
-            .as_str()
-            .context("missing Jev decision")?;
-        let reason = match answer {
-            "allow" => "The decision model classified this as an ordinary action.",
-            "confirm" => "The decision model requested human review.",
-            "deny" => "The decision model flagged this action as unsafe.",
-            _ => anyhow::bail!("unknown Jev decision"),
-        };
-        Ok(Some(json!({"verdict":answer,"reason":reason})))
+            }));
+        crate::audit::provider_call("openrouter", model, async |call| {
+            let response = request.send().await?.error_for_status()?;
+            let response: Value =
+                serde_json::from_slice(&crate::net::body(response, 64_000).await?)?;
+            call.openrouter(&response);
+            ensure!(
+                response["answers"]["review"]["type"] == "choice",
+                "invalid Jev answer type"
+            );
+            let answer = response["answers"]["review"]["choice"]
+                .as_str()
+                .context("missing Jev decision")?;
+            let reason = match answer {
+                "allow" => "The decision model classified this as an ordinary action.",
+                "confirm" => "The decision model requested human review.",
+                "deny" => "The decision model flagged this action as unsafe.",
+                _ => anyhow::bail!("unknown Jev decision"),
+            };
+            Ok(Some(json!({"verdict":answer,"reason":reason})))
+        })
+        .await
     }
 
     pub async fn provider(&self, user: &str, review: bool) -> Result<Arc<dyn ModelProvider>> {
