@@ -1,4 +1,7 @@
 mod details;
+mod usage;
+
+pub(crate) use usage::{ModelCall, ingress_model_call, provider_call};
 
 use crate::{runtime::Outcome, security::now, store::Task};
 use anyhow::{Context, Result};
@@ -13,6 +16,7 @@ const ENTRY_PAGE: usize = 100;
 
 tokio::task_local! {
     static CURRENT: Option<Trace>;
+    static MODEL_SCOPE: &'static str;
 }
 
 #[derive(Clone)]
@@ -71,14 +75,20 @@ impl Trace {
         Ok(())
     }
 
-    async fn push(&self, kind: &str, name: &str, status: &str, detail: &Value) -> Result<()> {
+    async fn push(
+        &self,
+        kind: &str,
+        name: &str,
+        status: &str,
+        detail: &Value,
+    ) -> Result<Option<i64>> {
         let mut body = detail.to_string();
         if body.len() > 4096 {
             body = r#"{"summary":"Details exceed the preview limit."}"#.into();
         }
-        sqlx::query(
+        Ok(sqlx::query_scalar(
             "INSERT INTO audit_entries(session,attempt,at,kind,name,status,detail)
-             SELECT id,?,?,?,?,?,? FROM audit_sessions WHERE id=? AND started_at>?",
+             SELECT id,?,?,?,?,?,? FROM audit_sessions WHERE id=? AND started_at>? RETURNING id",
         )
         .bind(self.attempt)
         .bind(now())
@@ -88,9 +98,8 @@ impl Trace {
         .bind(body)
         .bind(self.session)
         .bind(now() - RETENTION)
-        .execute(&self.db)
-        .await?;
-        Ok(())
+        .fetch_optional(&self.db)
+        .await?)
     }
 }
 
@@ -106,10 +115,13 @@ pub(crate) async fn record(kind: &str, name: &str, status: &str, detail: Value) 
     }
 }
 
-pub(crate) async fn model<T>(name: &str, future: impl Future<Output = Result<T>>) -> Result<T> {
+pub(crate) async fn model<T>(
+    name: &'static str,
+    future: impl Future<Output = Result<T>>,
+) -> Result<T> {
     record("model", name, "started", Value::Null).await;
     let start = Instant::now();
-    let output = future.await;
+    let output = MODEL_SCOPE.scope(name, future).await;
     record(
         "model",
         name,
@@ -118,7 +130,7 @@ pub(crate) async fn model<T>(name: &str, future: impl Future<Output = Result<T>>
         } else {
             "failed"
         },
-        json!({"duration_ms": start.elapsed().as_millis() as u64}),
+        json!({"duration_ms": start.elapsed().as_millis() as u64, "usage_tracking":true}),
     )
     .await;
     output
@@ -286,13 +298,14 @@ pub(crate) async fn prune(tx: &mut Transaction<'_, Sqlite>) -> Result<()> {
 }
 
 // All audit reads require both ownership of the message and current access to the agent.
-const SESSION_SELECT: &str =
-    "SELECT s.id,s.task,a.name AS agent,s.message,s.started_at,s.finished_at,
-       s.status,(SELECT count(*) FROM audit_entries e WHERE e.session=s.id) AS entry_count
-     FROM audit_sessions s JOIN tasks t ON s.task=t.id LEFT JOIN agents a ON t.agent=a.id
+const VISIBLE_SESSIONS: &str =
+    "FROM audit_sessions s JOIN tasks t ON s.task=t.id LEFT JOIN agents a ON t.agent=a.id
      WHERE t.user=? AND s.started_at>? AND t.state<>'revoked'
        AND (t.agent IS NULL OR a.owner=t.user OR EXISTS(
            SELECT 1 FROM grants g WHERE g.agent=t.agent AND g.member=t.user))";
+const SESSION_FIELDS: &str =
+    "SELECT s.id,s.task,a.name AS agent,s.message,s.started_at,s.finished_at,
+       s.status,(SELECT count(*) FROM audit_entries e WHERE e.session=s.id) AS entry_count";
 
 #[derive(FromRow, Serialize)]
 struct Session {
@@ -307,18 +320,24 @@ struct Session {
 }
 
 pub(crate) async fn sessions(db: &SqlitePool, user: &str, before: Option<i64>) -> Result<Value> {
-    let sql = format!("{SESSION_SELECT} AND (? IS NULL OR s.id<?) ORDER BY s.id DESC LIMIT ?");
+    let cutoff = now() - RETENTION;
+    let mut tx = db.begin().await?;
+    let sql = format!(
+        "{SESSION_FIELDS} {VISIBLE_SESSIONS} AND (? IS NULL OR s.id<?) ORDER BY s.id DESC LIMIT ?"
+    );
     let mut rows: Vec<Session> = sqlx::query_as(&sql)
         .bind(user)
-        .bind(now() - RETENTION)
+        .bind(cutoff)
         .bind(before)
         .bind(before)
         .bind(SESSION_PAGE as i64 + 1)
-        .fetch_all(db)
+        .fetch_all(&mut *tx)
         .await?;
+    let usage = usage::summary(&mut tx, user, None, cutoff).await?;
+    tx.commit().await?;
     let next = (rows.len() > SESSION_PAGE).then(|| rows[SESSION_PAGE - 1].id);
     rows.truncate(SESSION_PAGE);
-    Ok(json!({"sessions":rows,"next_before":next}))
+    Ok(json!({"sessions":rows,"next_before":next,"usage":usage}))
 }
 
 #[derive(FromRow)]
@@ -335,7 +354,7 @@ struct Entry {
 pub(crate) async fn session(db: &SqlitePool, user: &str, id: i64, after: i64) -> Result<Value> {
     let cutoff = now() - RETENTION;
     let mut tx = db.begin().await?;
-    let sql = format!("{SESSION_SELECT} AND s.id=?");
+    let sql = format!("{SESSION_FIELDS} {VISIBLE_SESSIONS} AND s.id=?");
     let session: Session = sqlx::query_as(&sql)
         .bind(user)
         .bind(cutoff)
@@ -352,6 +371,7 @@ pub(crate) async fn session(db: &SqlitePool, user: &str, id: i64, after: i64) ->
     .bind(ENTRY_PAGE as i64 + 1)
     .fetch_all(&mut *tx)
     .await?;
+    let usage = usage::summary(&mut tx, user, Some(id), cutoff).await?;
     tx.commit().await?;
     let next = (rows.len() > ENTRY_PAGE).then(|| rows[ENTRY_PAGE - 1].id);
     rows.truncate(ENTRY_PAGE);
@@ -359,5 +379,5 @@ pub(crate) async fn session(db: &SqlitePool, user: &str, id: i64, after: i64) ->
         "id":row.id,"attempt":row.attempt,"at":row.at,"kind":row.kind,"name":row.name,"status":row.status,
         "detail":serde_json::from_str::<Value>(&row.detail).unwrap_or(Value::Null)
     })).collect();
-    Ok(json!({"session":session,"entries":entries,"next_after":next}))
+    Ok(json!({"session":session,"entries":entries,"next_after":next,"usage":usage}))
 }
