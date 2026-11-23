@@ -19,24 +19,87 @@ use std::{collections::HashMap, sync::Arc};
 
 pub fn router(app: Arc<App>) -> Router {
     Router::new()
-        .route("/",get(||async{Html("<!doctype html><meta charset=utf-8><title>TinyBot</title><p>Open TinyBot through your Telegram bot.</p>")}))
-        .route("/health",get(health))
-        .route("/mini",get(||async{Html(include_str!("../../web/mini.html"))}))
-        .route("/app.css",get(||async{asset("text/css; charset=utf-8",include_str!("../../web/app.css"))}))
-        .route("/mini.js",get(||async{asset("application/javascript; charset=utf-8",include_str!("../../web/mini.js"))}))
-        .route("/mini-ui.js",get(||async{asset("application/javascript; charset=utf-8",include_str!("../../web/mini-ui.js"))}))
-        .route("/mini-agents.js",get(||async{asset("application/javascript; charset=utf-8",include_str!("../../web/mini-agents.js"))}))
-        .route("/mini-connectors.js",get(||async{asset("application/javascript; charset=utf-8",include_str!("../../web/mini-connectors.js"))}))
-        .route("/mini-settings.js",get(||async{asset("application/javascript; charset=utf-8",include_str!("../../web/mini-settings.js"))}))
-        .route("/mini-audit.js",get(||async{asset("application/javascript; charset=utf-8",include_str!("../../web/mini-audit.js"))}))
-        .route("/mini-memory.js",get(||async{asset("application/javascript; charset=utf-8",include_str!("../../web/mini-memory.js"))}))
-        .route("/api/mini",post(mini))
-        .route("/api/codex/import",post(import_codex))
-        .route("/oauth/mcp",get(oauth))
-        .route("/oauth/mcp-client.json",get(mcp_client_metadata))
+        .route("/", get(mini_page))
+        .route("/health", get(health))
+        .route("/mini", get(mini_page))
+        .route(
+            "/app.css",
+            get(|| async { asset("text/css; charset=utf-8", include_str!("../../web/app.css")) }),
+        )
+        .route(
+            "/mini.js",
+            get(|| async {
+                asset(
+                    "application/javascript; charset=utf-8",
+                    include_str!("../../web/mini.js"),
+                )
+            }),
+        )
+        .route(
+            "/mini-ui.js",
+            get(|| async {
+                asset(
+                    "application/javascript; charset=utf-8",
+                    include_str!("../../web/mini-ui.js"),
+                )
+            }),
+        )
+        .route(
+            "/mini-agents.js",
+            get(|| async {
+                asset(
+                    "application/javascript; charset=utf-8",
+                    include_str!("../../web/mini-agents.js"),
+                )
+            }),
+        )
+        .route(
+            "/mini-connectors.js",
+            get(|| async {
+                asset(
+                    "application/javascript; charset=utf-8",
+                    include_str!("../../web/mini-connectors.js"),
+                )
+            }),
+        )
+        .route(
+            "/mini-settings.js",
+            get(|| async {
+                asset(
+                    "application/javascript; charset=utf-8",
+                    include_str!("../../web/mini-settings.js"),
+                )
+            }),
+        )
+        .route(
+            "/mini-audit.js",
+            get(|| async {
+                asset(
+                    "application/javascript; charset=utf-8",
+                    include_str!("../../web/mini-audit.js"),
+                )
+            }),
+        )
+        .route(
+            "/mini-memory.js",
+            get(|| async {
+                asset(
+                    "application/javascript; charset=utf-8",
+                    include_str!("../../web/mini-memory.js"),
+                )
+            }),
+        )
+        .route("/api/mini", post(mini))
+        .route("/api/codex/import", post(import_codex))
+        .route("/oauth/mcp", get(oauth))
+        .route("/oauth/mcp-client.json", get(mcp_client_metadata))
         .layer(DefaultBodyLimit::max(96_000))
         .layer(middleware::from_fn(headers))
         .with_state(app)
+}
+
+async fn mini_page() -> Html<&'static str> {
+    Html(include_str!("../../web/mini.html"))
 }
 
 fn asset(kind: &'static str, body: &'static str) -> impl IntoResponse {
@@ -44,7 +107,7 @@ fn asset(kind: &'static str, body: &'static str) -> impl IntoResponse {
 }
 
 async fn headers(request: axum::extract::Request, next: Next) -> Response {
-    let is_mini = request.uri().path() == "/mini";
+    let is_mini = matches!(request.uri().path(), "/" | "/mini");
     let mut response = next.run(request).await;
     let csp = if is_mini {
         "default-src 'none'; script-src 'self' https://telegram.org; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'self' https://web.telegram.org"

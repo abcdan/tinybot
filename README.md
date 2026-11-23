@@ -59,6 +59,10 @@ after adding the domain. Then check `https://your-domain/health` and send
 
 ## Models and Mini Apps
 
+Set the BotFather Main Mini App URL to your public HTTPS domain or its `/mini`
+path. When people open the app from the bot, Telegram signs them in using their
+existing account. TinyBot allows the configured operator and invited users.
+
 - **Tasks** use a tool-capable OpenRouter model or an eligible ChatGPT plan
   through the official Codex App Server. Connect your OpenRouter API key in the
   Mini App to load the models available to your account, then choose a task
