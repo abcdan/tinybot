@@ -23,36 +23,97 @@ export function schedules(state) {
 
 export function model(state) {
     if (state.provider) {
-        const current = card('Connected model', state.provider + ' · ' + state.model);
-        current.append(action('Disconnect model', 'disconnect-model', {}, 'Model disconnected.', true));
+        const provider = state.provider === 'openrouter' ? 'OpenRouter' : 'ChatGPT for Codex';
+        const current = card('Task model', provider + ' · ' + state.model);
+        current.append(action('Disconnect task model', 'disconnect-model', {}, 'Task model disconnected.', true));
         content.append(current);
     }
-    const router = card('OpenRouter', 'Use a tool-capable model from your OpenRouter account.');
-    router.append(form('Connect OpenRouter', [field('model', 'Model ID', {max: 150}), field('key', 'API key', {type: 'password', max: 8192})],
-        async (data, element) => {
-            try {
-                await api('openrouter', data);
-                await refresh();
-                show('OpenRouter connected.');
-            } finally { element.elements.key.value = ''; }
+    content.append(openRouter(state), codexSettings(state));
+}
+
+let prefetchedModels;
+
+function openRouter(state) {
+    const router = card('OpenRouter', 'Use one API key for OpenRouter task models and Mercury 3 forms and acknowledgements.');
+    const key = form('Save API key', [field('key', 'OpenRouter API key', {type: 'password', max: 8192})], async (data, element) => {
+        show('Checking your OpenRouter key…');
+        try {
+            const {models} = await api('openrouter-key', data);
+            prefetchedModels = models;
+            show('OpenRouter key saved.');
+            await refresh();
+        } finally { element.reset(); }
+    });
+    if (!state.openrouter_connected) {
+        router.append(key);
+        return router;
+    }
+    const catalog = node('div');
+    const replace = node('details');
+    replace.append(node('summary', 'Replace API key'), key);
+    router.append(catalog, replace, button('Remove OpenRouter key', async () => {
+        show('Removing the OpenRouter key…');
+        await api('disconnect-openrouter');
+        prefetchedModels = undefined;
+        show('OpenRouter key removed.');
+        await refresh();
+    }, true));
+    void loadOpenRouterModels(catalog, state);
+    return router;
+}
+
+async function loadOpenRouterModels(catalog, state) {
+    const status = node('p', 'Loading OpenRouter models…', 'meta');
+    status.setAttribute('role', 'status');
+    catalog.replaceChildren(status);
+    const saved = prefetchedModels;
+    prefetchedModels = undefined;
+    try {
+        const models = saved ?? (await api('openrouter-models')).models;
+        if (!Array.isArray(models)) throw new Error('TinyBot could not load the OpenRouter model list.');
+        if (!models.length) throw new Error('OpenRouter returned no tool-capable models.');
+        const choices = [['', 'Choose a model'], ...models.map(({id, name}) => [
+            id, name && name !== id ? name + ' (' + id + ')' : id
+        ])];
+        const current = state.provider === 'openrouter' ? state.model : '';
+        catalog.replaceChildren(form('Use OpenRouter for tasks', [field('model', 'OpenRouter task model', {
+            choices, value: models.some(({id}) => id === current) ? current : ''
+        })], async data => {
+            show('Saving your task model…');
+            await api('openrouter-model', data);
+            prefetchedModels = models;
+            show('OpenRouter task model saved.');
+            await refresh();
         }));
-    const codex = card('ChatGPT for Codex', 'Connect from a computer with the TinyBot CLI and a browser.');
+    } catch (error) {
+        status.textContent = error.message;
+        catalog.append(button('Retry model list', () => loadOpenRouterModels(catalog, state), true));
+    }
+}
+
+function codexSettings(state) {
+    const codex = card('ChatGPT for Codex', state.codex_model ? 'Connected · ' + state.codex_model
+        : 'Connect from a computer with the TinyBot CLI and a browser.');
     const pairing = node('pre');
     pairing.hidden = true;
-    codex.append(form('Create pairing code', [field('model', 'Codex model ID', {max: 150})], async data => {
+    const pair = form('Create pairing code', [field('model', 'Codex model ID', {max: 150, value: state.codex_model ?? ''})], async data => {
+        show('Creating a pairing code…');
         const result = await api('codex-pair', data);
+        show('');
         pairing.textContent = result.command + '\n\nEnter this code when prompted\n' + result.code;
         pairing.hidden = false;
-    }), pairing);
-    const generator = card('Mercury 3', 'Connect OpenRouter to generate forms and short acknowledgements when TinyBot starts working.');
-    generator.append(form('Save OpenRouter key', [field('key', 'OpenRouter API key', {type: 'password', max: 8192})], async (data, element) => {
-        try {
-            await api('openrouter-forms', data);
-            await refresh();
-            show('Mercury key saved.');
-        } finally { element.reset(); }
-    }));
-    if (state.forms_key && state.provider !== 'openrouter') generator.append(row(action('Remove Mercury key',
-        'disconnect-forms', {}, 'Mercury key removed.', true)));
-    content.append(router, codex, generator);
+    });
+    if (!state.codex_model) {
+        codex.append(pair, pairing);
+        return codex;
+    }
+    const controls = row();
+    if (state.provider !== 'codex') {
+        controls.append(action('Use Codex for tasks', 'codex-select', {}, 'Codex task model saved.'));
+    }
+    controls.append(action('Disconnect Codex', 'disconnect-codex', {}, 'Codex disconnected.', true));
+    const reconnect = node('details');
+    reconnect.append(node('summary', 'Pair a different Codex model'), pair, pairing);
+    codex.append(controls, reconnect);
+    return codex;
 }
