@@ -1,3 +1,5 @@
+mod handoff;
+
 use super::review::{Verdict, review};
 use super::{
     Outcome, Risk, Step, ToolContext, connector_context, descriptions, string, tool_definitions,
@@ -61,6 +63,16 @@ pub(super) async fn delegate(ctx: &ToolContext<'_>, args: &Value) -> Result<Valu
     );
 
     let model = ctx.app.models.provider(&ctx.task.user, false).await?;
+    handoff::announce(
+        ctx.app,
+        ctx.task,
+        &*model,
+        saved
+            .as_ref()
+            .map(|worker| (worker.id.as_str(), worker.name.as_str())),
+        args["handoff"].as_str(),
+    )
+    .await?;
     audit::record(
         "delegation",
         "helper",
