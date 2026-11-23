@@ -109,6 +109,75 @@ test('settings have readable light and dark palettes without Telegram theme data
     }
 });
 
+test('browser proxy settings are operator only and clear the private URL after saving or error', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    const context = await browser.newContext({viewport: {width: 360, height: 720}});
+    const page = await context.newPage();
+    const state = {user: '1', provider: 'codex', requests: [], tasks: [], browser_proxy: null};
+    const proxyUrl = 'socks5://user:fixture-password@proxy.example:1080';
+    await mockMiniApp(context, ({action, data}) => {
+        switch (action) {
+            case 'status': return state;
+            case 'save-browser-proxy':
+                assert.deepEqual(data, {url: proxyUrl});
+                state.browser_proxy = {source: 'saved'};
+                return {ok: true};
+            case 'remove-browser-proxy':
+                assert.deepEqual(data, {});
+                state.browser_proxy = {source: 'environment'};
+                return {ok: true};
+            default: assert.fail('Unexpected Mini App action ' + action);
+        }
+    });
+    await page.route('**/api/mini', route => {
+        const {action, data} = route.request().postDataJSON();
+        if (action === 'save-browser-proxy' && data.url === 'https://bad-proxy.example') {
+            return route.fulfill({status: 400, json: {error: 'Use an HTTP or SOCKS5 proxy URL.'}});
+        }
+        return route.fallback();
+    });
+    try {
+        await page.goto('https://tinybot.test/mini');
+        await page.getByRole('heading', {name: 'Requests', exact: true}).waitFor();
+        const tab = page.getByRole('button', {name: 'Browser', exact: true});
+        assert.equal(await tab.count(), 0);
+        const refresh = page.getByRole('button', {name: 'Refresh', exact: true});
+        state.browser_proxy = {source: 'unavailable'};
+        await refresh.click();
+        await tab.click();
+        await page.getByText('Proxy settings are unavailable. Tap Refresh to try again.').waitFor();
+        const url = page.getByLabel('Proxy URL');
+        assert.equal(await url.count(), 0);
+
+        state.browser_proxy = {source: 'direct'};
+        await refresh.click();
+        await page.getByText('Using a direct browser connection.').waitFor();
+        assert.equal(await url.getAttribute('type'), 'password');
+        const save = page.getByRole('button', {name: 'Save proxy'});
+        await url.fill('https://bad-proxy.example');
+        await save.click();
+        await page.getByText('Use an HTTP or SOCKS5 proxy URL.', {exact: true}).waitFor();
+        assert.equal(await url.inputValue(), '');
+
+        await url.fill(proxyUrl);
+        await save.click();
+        await page.getByText('Using the saved proxy for browser traffic.').waitFor();
+        assert.equal(await url.inputValue(), '');
+        assert.equal((await page.locator('body').innerText()).includes('fixture-password'), false);
+        const remove = page.getByRole('button', {name: 'Remove saved proxy'});
+        await remove.click();
+        await page.getByText('Using the proxy configured in deployment settings.').waitFor();
+        assert.equal(await remove.count(), 0);
+
+        state.browser_proxy = null;
+        await refresh.click();
+        await page.getByRole('heading', {name: 'Requests', exact: true}).waitFor();
+        assert.equal(await tab.count(), 0);
+    } finally {
+        await browser.close();
+    }
+});
+
 test('a generated Mini App uses shared controls and submits details for masked review', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
     const context = await browser.newContext();
