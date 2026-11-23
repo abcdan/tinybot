@@ -95,9 +95,8 @@ function home() {
         content.append(item);
     }
     content.append(node('h2', 'Tasks'));
-    const tasks = state.tasks.filter(task => !task.agent);
-    if (!tasks.length) content.append(card(null, 'Send a message to your Chief in Telegram to start a task.'));
-    for (const task of tasks) {
+    if (!state.tasks.length) content.append(card(null, 'Send a message to your Chief in Telegram to start a task.'));
+    for (const task of state.tasks) {
         const item = card(task.title, task.state.replaceAll('-', ' '));
         if (task.id !== state.active_task && task.state !== 'cancelled') {
             item.append(action('Switch to task', 'select-task', {task: task.id}, 'Send your next message in Telegram.', true));

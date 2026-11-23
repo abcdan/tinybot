@@ -99,7 +99,7 @@ test('helpers can be managed while only Chief tasks can be selected in chat', as
         user: '1', provider: 'codex', requests: [], active_task: null,
         tasks: [
             {id: 'chief-task', agent: null, title: 'Chief research task', state: 'idle'},
-            {id: 'old-helper-task', agent: 'research', title: 'Ask the research helper', state: 'idle'}
+            {id: 'shared-chief-task', agent: 'research', title: 'Chief task in a shared workspace', state: 'idle'}
         ],
         agents: [
             {id: 'research', owner: '1', name: 'Research helper', instructions: 'Find sources.', tools: '[]'},
@@ -117,8 +117,9 @@ test('helpers can be managed while only Chief tasks can be selected in chat', as
     try {
         await page.goto('https://tinybot.test/mini');
         await page.getByRole('heading', {name: 'Chief research task'}).waitFor();
-        assert.equal(await page.getByRole('heading', {name: 'Ask the research helper'}).count(), 0);
-        await page.getByRole('button', {name: 'Switch to task'}).click();
+        await page.getByRole('heading', {name: 'Chief task in a shared workspace'}).waitFor();
+        await page.locator('.card').filter({has: page.getByRole('heading', {name: 'Chief research task'})})
+            .getByRole('button', {name: 'Switch to task'}).click();
         await page.getByText('Current Chief task', {exact: true}).waitFor();
         await page.getByRole('button', {name: 'Helpers', exact: true}).click();
         await page.getByRole('heading', {name: 'Research helper', exact: true}).waitFor();
