@@ -1,3 +1,4 @@
+mod callback;
 mod widget;
 
 use crate::{
@@ -21,6 +22,7 @@ pub enum Inbound {
         text: String,
     },
     Widget(widget::Query),
+    Callback(callback::Query),
 }
 
 enum Dispatch {
@@ -35,6 +37,19 @@ pub trait ChannelAdapter: Send + Sync {
     async fn receive(&self, offset: i64) -> Result<(Vec<Inbound>, i64)>;
     async fn send(&self, user: &str, body: &str, button: Option<&str>) -> Result<Option<i64>>;
     async fn answer_widget(&self, _query: &str, _data: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn send_suggested_replies(
+        &self,
+        user: &str,
+        body: &str,
+        _replies: &[store::SuggestedReply],
+    ) -> Result<Option<i64>> {
+        self.send(user, body, None).await
+    }
+
+    async fn answer_callback(&self, _query: &str, _text: &str) -> Result<()> {
         Ok(())
     }
 
@@ -78,6 +93,17 @@ impl Telegram {
         anyhow::bail!("Telegram rejected the chat feedback")
     }
 
+    async fn send_message(&self, data: Value) -> Result<Option<i64>> {
+        let output = self.call("sendMessage", data).await?;
+        if output["ok"] == true {
+            return Ok(None);
+        }
+        if let Some(delay) = output["parameters"]["retry_after"].as_i64() {
+            return Ok(Some(delay.clamp(1, 600)));
+        }
+        anyhow::bail!("Telegram rejected the reply")
+    }
+
     async fn call(&self, method: &str, data: Value) -> Result<Value> {
         let response = self
             .client
@@ -100,6 +126,7 @@ struct Update {
     update_id: i64,
     message: Option<Message>,
     widget_query: Option<widget::Query>,
+    callback_query: Option<callback::Query>,
 }
 #[derive(Deserialize)]
 struct Message {
@@ -150,7 +177,7 @@ impl ChannelAdapter for Telegram {
         let output = self
             .call(
                 "getUpdates",
-                json!({"offset":offset,"timeout":25,"allowed_updates":["message","widget_query"]}),
+                json!({"offset":offset,"timeout":25,"allowed_updates":["message","widget_query","callback_query"]}),
             )
             .await?;
         ensure!(
@@ -164,6 +191,9 @@ impl ChannelAdapter for Telegram {
             .filter_map(|update| {
                 if let Some(query) = update.widget_query {
                     return query.is_private().then_some(Inbound::Widget(query));
+                }
+                if let Some(query) = update.callback_query {
+                    return query.is_private().then_some(Inbound::Callback(query));
                 }
                 let message = update.message?;
                 let user = message.from?;
@@ -203,14 +233,41 @@ impl ChannelAdapter for Telegram {
             }
             data["reply_markup"] = keyboard;
         }
-        let output = self.call("sendMessage", data).await?;
-        if output["ok"] == true {
-            return Ok(None);
-        }
-        if let Some(delay) = output["parameters"]["retry_after"].as_i64() {
-            return Ok(Some(delay.clamp(1, 600)));
-        }
-        anyhow::bail!("Telegram rejected the reply")
+        self.send_message(data).await
+    }
+
+    async fn send_suggested_replies(
+        &self,
+        user: &str,
+        body: &str,
+        replies: &[store::SuggestedReply],
+    ) -> Result<Option<i64>> {
+        let user = user.parse::<i64>().context("invalid Telegram recipient")?;
+        let keyboard: Vec<_> = replies
+            .iter()
+            .map(|reply| {
+                [json!({"text":reply.body,"callback_data":format!("reply/{}",reply.token)})]
+            })
+            .collect();
+        self.send_message(json!({
+            "chat_id":user,"text":clip(body,3900),"link_preview_options":{"is_disabled":true},
+            "reply_markup":{"inline_keyboard":keyboard}
+        }))
+        .await
+    }
+
+    async fn answer_callback(&self, query: &str, text: &str) -> Result<()> {
+        let feedback = self
+            .feedback(
+                "answerCallbackQuery",
+                json!({"callback_query_id":query,"text":text}),
+            )
+            .await?;
+        ensure!(
+            feedback.is_none(),
+            "Telegram rate-limited the callback answer"
+        );
+        Ok(())
     }
 
     async fn answer_widget(&self, query: &str, data: &str) -> Result<()> {
@@ -251,6 +308,12 @@ pub async fn listen(db: SqlitePool, operator: String, adapter: std::sync::Arc<dy
                             tracing::debug!("widget answer expired or could not be delivered");
                         }
                     }
+                    Inbound::Callback(query) => {
+                        let text = callback::answer(&db, &query).await?;
+                        if adapter.answer_callback(&query.id, text).await.is_err() {
+                            tracing::debug!("callback answer expired or could not be delivered");
+                        }
+                    }
                 }
             }
             Ok::<_, anyhow::Error>(next)
@@ -273,7 +336,14 @@ pub async fn outbox(db: SqlitePool, adapter: std::sync::Arc<dyn ChannelAdapter>)
             let dispatch=if !store::can_deliver(&db,&item).await? {
                 Dispatch::Failed
             } else {
-                match adapter.send(&item.user,&item.body,item.button.as_deref()).await {
+                let sent = match store::suggested_replies(&db, item.id).await {
+                    Ok(replies) if replies.is_empty() => {
+                        adapter.send(&item.user, &item.body, item.button.as_deref()).await
+                    }
+                    Ok(replies) => adapter.send_suggested_replies(&item.user, &item.body, &replies).await,
+                    Err(_) => Ok(Some(2)),
+                };
+                match sent {
                     Ok(None)=>Dispatch::Sent,
                     Ok(Some(delay))=>Dispatch::Retry(now()+delay),
                     Err(_)=>Dispatch::Failed
