@@ -2716,6 +2716,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "croner",
+ "eventsource-stream",
  "futures",
  "hex",
  "hmac",

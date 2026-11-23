@@ -36,6 +36,16 @@ fn native_tool_proposal(tools: &[ToolDefinition], name: &str, args: Value) -> Re
     ))
 }
 
+fn native_reply(response: String) -> Result<String> {
+    if let Ok(value) = parse_json_reply::<Value>(&response) {
+        ensure!(
+            value["kind"] != "tool",
+            "expected a native provider tool call"
+        );
+    }
+    Ok(response)
+}
+
 #[async_trait]
 pub trait ModelProvider: Send + Sync {
     async fn complete(&self, system: &str, input: &str) -> Result<String>;
