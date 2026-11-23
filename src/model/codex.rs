@@ -1,4 +1,4 @@
-use super::{ModelProvider, TextDelta, ToolDefinition, native_tool_proposal};
+use super::{ModelProvider, TextDelta, ToolDefinition, native_reply, native_tool_proposal};
 use anyhow::{Context, Result, anyhow, ensure};
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -167,7 +167,11 @@ impl Codex {
                         value["params"]["turn"]["status"] == "completed" && !result.is_empty(),
                         "Codex did not finish the turn"
                     );
-                    return Ok(result);
+                    return if tools.is_empty() {
+                        Ok(result)
+                    } else {
+                        native_reply(result)
+                    };
                 }
                 _ => {}
             }
