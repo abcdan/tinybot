@@ -1,5 +1,6 @@
 mod callback;
 mod card;
+mod formatting;
 mod widget;
 
 pub use card::Card;
@@ -161,15 +162,83 @@ impl Telegram {
     }
 
     async fn send_message(&self, data: Value) -> Result<Option<i64>> {
-        let response = self.call("sendMessage", data).await?;
-        if response["ok"] == true {
-            return Ok(None);
-        }
-        if let Some(delay) = retry_after(&response) {
-            return Ok(Some(delay));
-        }
-        anyhow::bail!("Telegram rejected the reply")
+        message_result(&self.call("sendMessage", data).await?)
     }
+
+    async fn send_reply(
+        &self,
+        user: i64,
+        body: &str,
+        keyboard: Option<Value>,
+    ) -> Result<Option<i64>> {
+        let reply = formatting::render(body);
+        let mut data =
+            json!({"chat_id":user,"text":reply.text,"link_preview_options":{"is_disabled":true}});
+        if let Some(keyboard) = &keyboard {
+            data["reply_markup"] = keyboard.clone();
+        }
+        let has_entities = !reply.entities.is_empty();
+        if has_entities {
+            data["entities"] = json!(reply.entities);
+        }
+        let has_sources = !reply.sources.is_empty();
+        if has_sources {
+            let mut markup = keyboard
+                .clone()
+                .unwrap_or_else(|| json!({"inline_keyboard":[]}));
+            if let Some(rows) = markup["inline_keyboard"].as_array_mut() {
+                rows.extend(reply.sources.iter().map(|source| json!([source])));
+            }
+            data["reply_markup"] = markup;
+        }
+        let response = self.call("sendMessage", data.clone()).await?;
+        if let Some(description) = bad_request(&response) {
+            if has_entities && invalid_entities(&description) {
+                data.as_object_mut()
+                    .expect("message object")
+                    .remove("entities");
+                return self.send_message(data).await;
+            }
+            if has_sources
+                && (description.contains("button_url_invalid")
+                    || description.contains("button url"))
+            {
+                if let Some(keyboard) = keyboard {
+                    data["reply_markup"] = keyboard;
+                } else {
+                    data.as_object_mut()
+                        .expect("message object")
+                        .remove("reply_markup");
+                }
+                return self.send_message(data).await;
+            }
+        }
+        message_result(&response)
+    }
+}
+
+fn message_result(response: &Value) -> Result<Option<i64>> {
+    if response["ok"] == true {
+        return Ok(None);
+    }
+    if let Some(delay) = retry_after(response) {
+        return Ok(Some(delay));
+    }
+    anyhow::bail!("Telegram rejected the reply")
+}
+
+fn bad_request(response: &Value) -> Option<String> {
+    (response["ok"] == false && response["error_code"] == 400 && retry_after(response).is_none())
+        .then(|| {
+            response["description"]
+                .as_str()
+                .unwrap_or("")
+                .to_ascii_lowercase()
+        })
+}
+
+fn invalid_entities(description: &str) -> bool {
+    description.contains("parse entities") || description.contains("entity bounds")
 }
 
 fn retry_after(response: &Value) -> Option<i64> {
@@ -310,6 +379,9 @@ impl ChannelAdapter for Telegram {
 
     async fn send(&self, user: &str, body: &str, button: Option<&str>) -> Result<Option<i64>> {
         let user = user.parse::<i64>().context("invalid Telegram recipient")?;
+        if button.is_none() {
+            return self.send_reply(user, body, None).await;
+        }
         let mut data = json!({"chat_id":user,"text":clip(body,3900),"link_preview_options":{"is_disabled":true}});
         match button {
             Some("panel") => {
@@ -344,11 +416,8 @@ impl ChannelAdapter for Telegram {
         replies: &[store::SuggestedReply],
     ) -> Result<Option<i64>> {
         let user = user.parse::<i64>().context("invalid Telegram recipient")?;
-        self.send_message(json!({
-            "chat_id":user,"text":clip(body,3900),"link_preview_options":{"is_disabled":true},
-            "reply_markup":suggested_keyboard(replies)
-        }))
-        .await
+        self.send_reply(user, body, Some(suggested_keyboard(replies)))
+            .await
     }
 
     async fn answer_callback(&self, query: &str, text: &str) -> Result<()> {
@@ -675,6 +744,77 @@ mod tests {
             json!({"chat_id":42,"message_id":51,"reaction":[{"type":"emoji","emoji":"❤"}]});
         assert_eq!(calls[1], ("setMessageReaction".into(), reaction));
         assert_eq!(calls[1], calls[2]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn sends_formatted_replies_and_keeps_original_reply_buttons_on_rejection() {
+        let accepted = json!({"ok":true});
+        let mock: Mock = Arc::new(Mutex::new((
+            Vec::new(),
+            VecDeque::from([
+                accepted.clone(),
+                json!({"ok":false,"error_code":400,"description":"Bad Request: can't parse entities"}),
+                accepted.clone(),
+                json!({"ok":false,"error_code":400,"description":"Bad Request: BUTTON_URL_INVALID"}),
+                accepted,
+                json!({"ok":false,"error_code":429,"parameters":{"retry_after":4}}),
+                json!({"ok":false,"error_code":403,"description":"Forbidden"}),
+            ]),
+        )));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = format!("http://{}/botTEST", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route("/botTEST/{method}", post(record))
+            .with_state(mock.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let telegram = Telegram {
+            client: reqwest::Client::new(),
+            api,
+            origin: "https://example.test".into(),
+        };
+        let body = "😀 **Gevonden**. Bronnen: [Documentatie](https://example.test/docs)";
+        let replies = [store::SuggestedReply {
+            token: "12345678-1234-4234-8234-123456789abc".into(),
+            body: "Meer uitleg".into(),
+        }];
+
+        assert_eq!(telegram.send("42", body, None).await.unwrap(), None);
+        for _ in 0..2 {
+            assert_eq!(
+                telegram
+                    .send_suggested_replies("42", body, &replies)
+                    .await
+                    .unwrap(),
+                None
+            );
+        }
+        assert_eq!(telegram.send("42", body, None).await.unwrap(), Some(4));
+        assert!(telegram.send("42", body, None).await.is_err());
+
+        let mock = mock.lock().await;
+        let calls = &mock.0;
+        assert_eq!(calls.len(), 7);
+        assert!(calls.iter().all(|(method, _)| method == "sendMessage"));
+        let first = &calls[0].1;
+        assert_eq!(first["text"], "😀 Gevonden.\n\nBronnen: Documentatie");
+        assert_eq!(
+            first["entities"][0],
+            json!({"type":"bold","offset":3,"length":8})
+        );
+        let source = json!({"text":"Documentatie","url":"https://example.test/docs"});
+        assert_eq!(first["reply_markup"]["inline_keyboard"], json!([[source]]));
+        let with_suggestions = &calls[1].1;
+        let keyboard = &with_suggestions["reply_markup"]["inline_keyboard"];
+        assert_eq!(
+            keyboard[0][0]["callback_data"],
+            format!("reply/{}", replies[0].token)
+        );
+        assert_eq!(keyboard[1][0], source);
+        assert_eq!(calls[2].1["reply_markup"], with_suggestions["reply_markup"]);
+        assert!(calls[2].1.get("entities").is_none());
+        assert_eq!(calls[4].1["entities"], with_suggestions["entities"]);
+        assert_eq!(calls[4].1["reply_markup"], suggested_keyboard(&replies));
         server.abort();
     }
 

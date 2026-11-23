@@ -23,6 +23,7 @@ hex = "0.4"
 hmac = "0.12"
 ipnet = "2"
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+pulldown-cmark = { version = "0.13", default-features = false }
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rig-core = { version = "0.24", default-features = false, features = ["reqwest-rustls"] }
