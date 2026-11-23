@@ -129,19 +129,19 @@ impl Tool for Builtin {
             Self::Browse | Self::Form => {
                 ensure!(ctx.owner, "browser access is restricted on shared agents");
                 let raw = string(args, "url", 2048)?;
-                let url = if matches!(self, Self::Browse) {
-                    net::website(raw)?
+                let (url, risk) = if matches!(self, Self::Browse) {
+                    (net::website(raw)?, Risk::PublicRead)
                 } else {
-                    net::https(raw)?
+                    (net::https(raw)?, Risk::Read)
                 };
                 destination = url.origin().ascii_serialization();
-                Risk::Read
+                risk
             }
             Self::SearchWeb => {
                 ensure!(ctx.owner, "web search is restricted on shared agents");
                 string(args, "query", 240)?;
                 destination = "Public web search".into();
-                Risk::Read
+                Risk::PublicRead
             }
             Self::Discover => {
                 ensure!(ctx.owner, "only the agent owner can connect MCPs");

@@ -72,7 +72,7 @@ pub(super) async fn delegate(ctx: &ToolContext<'_>, args: &Value) -> Result<Valu
                     continue;
                 };
                 match tool.inspect(ctx, &args).await {
-                    Ok(intent) if intent.risk == Risk::Read => {
+                    Ok(intent) if matches!(intent.risk, Risk::Read | Risk::PublicRead) => {
                         if review(ctx, &intent).await?.verdict != Verdict::Allow {
                             return Ok(
                                 json!({"chief_request":format!("Review {} at {}",intent.detail,intent.destination)}),

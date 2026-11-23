@@ -11,6 +11,9 @@ use sqlx::sqlite::SqlitePoolOptions;
 use std::collections::BTreeMap;
 use tokio::sync::Notify;
 
+#[cfg(unix)]
+mod browsing;
+
 async fn fixture() -> SqlitePool {
     let db = SqlitePoolOptions::new()
         .max_connections(1)
