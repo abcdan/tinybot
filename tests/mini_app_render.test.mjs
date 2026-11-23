@@ -152,11 +152,119 @@ test('MCP approvals show a plain explanation and can be revoked for the exact co
         assert.equal(await page.getByRole('button', {name: 'Deny', exact: true}).count(), 1);
         await page.getByRole('button', {name: 'Always approve', exact: true}).click();
         await page.getByText('Approval saved for this tool.', {exact: true}).waitFor();
-        await page.getByRole('button', {name: 'Connectors', exact: true}).click();
+        await page.getByRole('button', {name: 'Connections', exact: true}).click();
         await page.getByRole('heading', {name: 'Always approved tools', exact: true}).waitFor();
         await page.getByRole('button', {name: 'Revoke approval for search_and_read', exact: true}).click();
         await page.getByText('Approval revoked.', {exact: true}).waitFor();
         assert.equal(await page.getByRole('heading', {name: 'Always approved tools', exact: true}).count(), 0);
+    } finally {
+        await browser.close();
+    }
+});
+
+test('a self-hosted AnythingMCP gateway signs in from Connections and lists its tools as text', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 620}});
+        const page = await context.newPage();
+        const endpoint = 'https://mcp.example.test/mcp/workspace';
+        const consent = 'https://mcp.example.test/oauth/authorize?state=fixture';
+        const connector = {id: 'gateway', name: 'AnythingMCP', endpoint, kind: 'anythingmcp', auth: 'pending', transport: 'streamable-http'};
+        const state = {user: '1', provider: 'codex', requests: [], tasks: [], connectors: []};
+        let registrations = 0;
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return state;
+            if (action === 'add-anything-mcp') {
+                assert.deepEqual(data, {endpoint});
+                registrations++;
+                state.connectors = [connector];
+                return {id: connector.id};
+            }
+            if (action === 'mcp-oauth') {
+                assert.deepEqual(data, {id: connector.id});
+                return {consent_url: consent};
+            }
+            if (action === 'mcp-tools') {
+                assert.equal(connector.auth, 'oauth');
+                assert.deepEqual(data, {id: connector.id});
+                return {total: 2, tools: [{name: 'list_projects', description: '<b>List projects</b>'}]};
+            }
+            assert.fail(`Unexpected Mini App action ${action}`);
+        }, `window.Telegram = {WebApp: {
+            initData: 'fixture', ready() {}, openLink(url) { window.openedLink = url; },
+        }};`);
+        await page.goto('https://tinybot.test/');
+        await page.getByRole('button', {name: 'Connections', exact: true}).click();
+        await page.getByRole('heading', {name: 'Connect AnythingMCP'}).waitFor();
+        const url = page.getByLabel('Gateway MCP URL', {exact: true});
+        assert.equal(await url.inputValue(), '');
+        await url.fill(endpoint);
+        await page.getByRole('button', {name: 'Continue', exact: true}).click();
+        const card = page.locator('#connection-gateway');
+        await card.getByText(endpoint, {exact: true}).waitFor();
+        assert.equal(await card.evaluate(element => element === document.activeElement), true);
+        assert.equal(await card.getByRole('button', {name: 'Connect without a token'}).count(), 0);
+        await card.getByRole('button', {name: 'Sign in to AnythingMCP'}).click();
+        const open = card.getByRole('button', {name: 'Open gateway sign-in'});
+        await open.waitFor();
+        assert.equal(await page.evaluate(() => window.openedLink), undefined);
+        await open.click();
+        assert.equal(await page.evaluate(() => window.openedLink), consent);
+        connector.auth = 'oauth';
+        await card.getByRole('button', {name: 'Check connection'}).click();
+        await card.getByText('Signed in with OAuth', {exact: true}).waitFor();
+        await card.getByRole('button', {name: 'View tools'}).click();
+        await card.getByRole('heading', {name: 'Showing 1 of 2 tools'}).waitFor();
+        await card.getByText('list_projects', {exact: true}).waitFor();
+        await card.getByText('<b>List projects</b>', {exact: true}).waitFor();
+        assert.equal(await card.locator('b').count(), 0);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
+        assert.equal(registrations, 1);
+    } finally {
+        await browser.close();
+    }
+});
+
+test('AnythingMCP API keys reuse the connection and empty the password field after a failed verification', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext();
+        const page = await context.newPage();
+        const connector = {id: 'gateway', name: 'AnythingMCP', endpoint: 'https://mcp.example.test/mcp', kind: 'anythingmcp', auth: 'pending', transport: 'streamable-http'};
+        const state = {user: '1', provider: 'codex', requests: [], tasks: [], connectors: [connector]};
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return state;
+            if (action === 'mcp-token') {
+                assert.deepEqual(data, {id: 'gateway', token: 'amcp_local_fixture', header: 'X-API-Key', prefix: ''});
+                connector.auth = 'api';
+                return {ok: true};
+            }
+            assert.fail(`Unexpected Mini App action ${action}`);
+        });
+        await page.route('**/api/mini', route => {
+            const {action, data} = route.request().postDataJSON();
+            if (action === 'mcp-token' && data.token === 'wrong-key') {
+                return route.fulfill({status: 400, json: {error: 'Check the MCP API key.'}});
+            }
+            return route.fallback();
+        });
+        await page.goto('https://tinybot.test/');
+        await page.getByRole('button', {name: 'Connections', exact: true}).click();
+        const card = page.locator('#connection-gateway');
+        await card.getByText('Use an MCP API key', {exact: true}).click();
+        const key = card.getByLabel('MCP API key', {exact: true});
+        const connect = card.getByRole('button', {name: 'Connect with API key'});
+        await key.fill('wrong-key');
+        await connect.click();
+        await page.getByText('Check the MCP API key.', {exact: true}).waitFor();
+        assert.equal(await key.inputValue(), '');
+        assert.equal(await card.getByLabel('Token header', {exact: false}).count(), 0);
+        await key.fill('amcp_local_fixture');
+        await connect.click();
+        await card.getByText('Connected with an API key', {exact: true}).waitFor();
+        await card.getByText('Reconnect', {exact: true}).click();
+        await card.getByText('Use an MCP API key', {exact: true}).click();
+        assert.equal(await key.inputValue(), '');
     } finally {
         await browser.close();
     }
