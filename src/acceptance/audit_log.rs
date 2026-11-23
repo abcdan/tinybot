@@ -121,10 +121,31 @@ async fn queued_audit_previews_hide_credentials_and_record_supersession() {
 }
 
 #[tokio::test]
-async fn the_signed_mini_app_restricts_audit_details_to_the_message_owner() {
+async fn signed_audit_usage_is_limited_to_the_message_owner_and_retention_window() {
     let db = fixture().await;
     let app = Arc::new(app_with_model(&db, Arc::new(WidgetChief)));
-    message(&db, 1, "1", "Give me the menu").await;
+    for (message_id, user, label) in [
+        (1, "1", "Expired lookup"),
+        (2, "1", "Give me the menu"),
+        (3, "2", "Another user's lookup"),
+    ] {
+        message(&db, message_id, user, label).await;
+        sqlx::query("INSERT INTO audit_entries(session,attempt,at,kind,name,status,detail)
+            SELECT id,1,?,'model_call','agent_turn','completed',? FROM audit_sessions WHERE message=?")
+            .bind(now())
+            .bind(json!({"provider":"Test Provider","model":"test/model","usage":{
+                "input_tokens":80,"output_tokens":20,"total_tokens":100,"cost_usd":0.015625
+            }}).to_string())
+            .bind(label)
+            .execute(&db)
+            .await
+            .unwrap();
+    }
+    sqlx::query("UPDATE audit_sessions SET started_at=? WHERE message='Expired lookup'")
+        .bind(now() - 7 * 24 * 60 * 60 - 1)
+        .execute(&db)
+        .await
+        .unwrap();
     let owner = signed_mini_init(&app, 1);
     let other = signed_mini_init(&app, 2);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -147,11 +168,22 @@ async fn the_signed_mini_app_restricts_audit_details_to_the_message_owner() {
         .await
         .unwrap();
     let id = rows["sessions"][0]["id"].as_i64().unwrap();
-    for (user, status) in [
-        (owner.as_str(), 200),
-        (other.as_str(), 404),
-        ("invalid", 403),
-    ] {
+    assert_eq!(rows["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(rows["usage"]["total"]["calls"], 1);
+    assert_eq!(rows["usage"]["total"]["total_tokens"], 100);
+    assert_eq!(rows["usage"]["providers"][0]["provider"], "Test Provider");
+    assert_eq!(rows["usage"]["models"][0]["model"], "test/model");
+    assert_eq!(rows["usage"]["models"][0]["cost_usd"], 0.015625);
+    let run: Value = post(&owner, "audit-session", json!({"id":id}))
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(run["usage"], rows["usage"]);
+    for (user, status) in [(other.as_str(), 404), ("invalid", 403)] {
         assert_eq!(
             post(user, "audit-session", json!({"id":id}))
                 .await
