@@ -13,7 +13,13 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 
-const READ_TOOLS: [&str; 4] = ["list_mcp_tools", "call_mcp", "browse", "search_web"];
+const READ_TOOLS: [&str; 5] = [
+    "list_mcp_tools",
+    "call_mcp",
+    "browse",
+    "search_web",
+    "task_files",
+];
 const TOOL_LIMIT: usize = 4;
 const HELPER_PROMPT: &str = concat!(
     "You are a temporary helper working for the Chief. Follow the bounded brief and your saved role. ",
@@ -57,6 +63,17 @@ pub(super) async fn delegate(ctx: &ToolContext<'_>, args: &Value) -> Result<Valu
                 && worker.allows(tool.name())
         })
         .collect();
+    let memory: Vec<String> = if let Some(worker) = &saved {
+        sqlx::query_scalar(
+            "SELECT body FROM memory WHERE owner=? AND agent=? ORDER BY rowid DESC LIMIT 16",
+        )
+        .bind(&worker.owner)
+        .bind(&worker.id)
+        .fetch_all(&ctx.app.db)
+        .await?
+    } else {
+        Vec::new()
+    };
     ensure!(
         store::current(&ctx.app.db, worker.task).await?,
         "task or worker access changed before delegation"
@@ -109,7 +126,7 @@ pub(super) async fn delegate(ctx: &ToolContext<'_>, args: &Value) -> Result<Valu
         };
         let input = json!({
             "brief":brief,"worker":saved.as_ref().map(|worker|worker.name.as_str()),
-            "tools":described,"connectors":connector_context(&worker),"observations":history
+            "tools":described,"connectors":connector_context(&worker),"memory":memory,"observations":history
         })
         .to_string();
         let step: Step = audit::model("delegated_turn", async {
@@ -141,7 +158,12 @@ pub(super) async fn delegate(ctx: &ToolContext<'_>, args: &Value) -> Result<Valu
                     continue;
                 }
                 let intent = match tool.inspect(&worker, &args).await {
-                    Ok(intent) if matches!(intent.risk, Risk::Read | Risk::PublicRead) => intent,
+                    Ok(intent)
+                        if matches!(intent.risk, Risk::Read | Risk::PublicRead)
+                            || (tool.name() == "task_files" && intent.risk == Risk::Local) =>
+                    {
+                        intent
+                    }
                     _ => {
                         audit::record(
                             "tool",
@@ -156,7 +178,9 @@ pub(super) async fn delegate(ctx: &ToolContext<'_>, args: &Value) -> Result<Valu
                         }));
                     }
                 };
-                if review(&worker, &intent).await?.verdict != Verdict::Allow {
+                if intent.risk != Risk::Local
+                    && review(&worker, &intent).await?.verdict != Verdict::Allow
+                {
                     audit::record(
                         "tool",
                         tool.name(),

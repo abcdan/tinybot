@@ -164,10 +164,7 @@ async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> Resul
                     false,
                 )
             }
-            "chief-delegate" => (
-                delegate(&ctx, &payload).await.map(Outcome::Continue),
-                false,
-            ),
+            "chief-delegate" => (delegate(&ctx, &payload).await.map(Outcome::Continue), false),
             _ => {
                 let call: Call = serde_json::from_value(payload["call"].clone())?;
                 audit::record("approval", "external_action", "approved", Value::Null).await;
@@ -200,17 +197,29 @@ async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> Resul
          WHERE (a.owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=?))
            AND (? IS NULL OR a.id=?)
          ORDER BY a.name LIMIT 30",
-    ).bind(&task.user).bind(&task.user).bind(&task.user).bind(&task.agent).bind(&task.agent)
-      .fetch_all(&app.db).await?;
-    let saved: Vec<_> = saved.iter().map(|(id,name,description)| json!({
-        "id":id,"name":name,"description":description.as_deref().map(|text|clip(text,500))
-    })).collect();
+    )
+    .bind(&task.user)
+    .bind(&task.user)
+    .bind(&task.user)
+    .bind(&task.agent)
+    .bind(&task.agent)
+    .fetch_all(&app.db)
+    .await?;
+    let saved: Vec<_> = saved
+        .iter()
+        .map(|(id, name, description)| {
+            json!({
+                "id":id,"name":name,"description":description.as_deref().map(|text|clip(text,500))
+            })
+        })
+        .collect();
     let model = app.models.provider(&task.user, false).await?;
     let tools: Vec<_> = app
         .tools
         .iter()
         .filter(|tool| {
-            ctx.allows(tool.name()) && (owner || matches!(tool.name(), "delegate" | "send_reply" | "react_to_message"))
+            ctx.allows(tool.name())
+                && (owner || matches!(tool.name(), "delegate" | "send_reply" | "react_to_message"))
         })
         .collect();
     let definitions = tool_definitions(&tools);
@@ -521,24 +530,44 @@ async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> Resul
 }
 
 async fn bind_shared_delegation(db: &sqlx::SqlitePool, task: &Task, args: &Value) -> Result<bool> {
-    let Some(helper) = args["agent"].as_str().filter(|_|task.agent.is_none()) else {
+    let Some(helper) = args["agent"].as_str().filter(|_| task.agent.is_none()) else {
         return Ok(false);
     };
+    if super::string(args, "brief", 4000).is_err() {
+        return Ok(false);
+    }
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
-    let updated = sqlx::query("UPDATE tasks SET agent=?,state='queued',updated=?
+    let updated = sqlx::query(
+        "UPDATE tasks SET agent=?,state='queued',updated=?
         WHERE id=? AND user=? AND revision=? AND chief_chat=1 AND agent IS NULL AND state='running'
         AND EXISTS(SELECT 1 FROM agents a JOIN grants g ON g.agent=a.id
-            WHERE a.id=? AND g.member=tasks.user AND a.owner<>tasks.user)")
-        .bind(helper).bind(now()).bind(&task.id).bind(&task.user).bind(task.revision).bind(helper)
-        .execute(&mut *tx).await?.rows_affected();
+            WHERE a.id=? AND g.member=tasks.user AND a.owner<>tasks.user)",
+    )
+    .bind(helper)
+    .bind(now())
+    .bind(&task.id)
+    .bind(&task.user)
+    .bind(task.revision)
+    .bind(helper)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
     if updated == 1 {
-        sqlx::query("INSERT INTO pending(id,user,task,revision,kind,payload,state,expires)
-            VALUES(?,?,?,?,'chief-delegate',?,'approved',?)")
-            .bind(id()).bind(&task.user).bind(&task.id).bind(task.revision).bind(args.to_string()).bind(now()+900)
-            .execute(&mut *tx).await?;
+        sqlx::query(
+            "INSERT INTO pending(id,user,task,revision,kind,payload,state,expires)
+            VALUES(?,?,?,?,'chief-delegate',?,'approved',?)",
+        )
+        .bind(id())
+        .bind(&task.user)
+        .bind(&task.id)
+        .bind(task.revision)
+        .bind(args.to_string())
+        .bind(now() + 900)
+        .execute(&mut *tx)
+        .await?;
     }
     tx.commit().await?;
-    Ok(updated==1)
+    Ok(updated == 1)
 }
 
 #[derive(Deserialize)]

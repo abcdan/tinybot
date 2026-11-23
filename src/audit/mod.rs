@@ -59,7 +59,8 @@ impl Trace {
             _ => session_status(&state, failed),
         };
         self.push("session", "agent", status, &Value::Null).await?;
-        let finished = (!matches!(status, "waiting" | "uncertain")).then(now);
+        let finished =
+            matches!(status, "completed" | "failed" | "superseded" | "cancelled").then(now);
         sqlx::query("UPDATE audit_sessions SET status=?,finished_at=? WHERE id=? AND attempts=? AND status='running'")
             .bind(status)
             .bind(finished)

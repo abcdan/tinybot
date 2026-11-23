@@ -5,12 +5,8 @@ const toolNames = {
     list_mcp_tools: 'Browse connector tools',
     call_mcp: 'Use connectors',
     browse: 'Read public websites',
-    request_form: 'Fill website forms',
-    request_input: 'Ask with a Mini App form',
-    task_files: 'Read task files',
-    python: 'Run offline Python',
-    delegate: 'Delegate',
-    set_goal: 'Update task goals'
+    search_web: 'Search the web',
+    task_files: 'Read task files'
 };
 export function agentForm(agent, proposal, pending) {
     const current = agent ? JSON.parse(agent.tools) : ['list_mcp_tools', 'call_mcp'];
