@@ -3,10 +3,10 @@ import {readFile} from 'node:fs/promises';
 import {test} from 'node:test';
 import {chromium} from 'playwright';
 
-async function mockMiniApp(context, respond) {
+async function mockMiniApp(context, respond, bridge) {
     await context.route('https://telegram.org/**', route => route.fulfill({
         contentType: 'application/javascript',
-        body: 'window.Telegram = {WebApp: {initData: "fixture", ready() {}, close() { window.miniAppClosed = true; }}};'
+        body: bridge ?? 'window.Telegram = {WebApp: {initData: "fixture", ready() {}, close() { window.miniAppClosed = true; }}};'
     }));
     await context.route('https://tinybot.test/**', async route => {
         const path = new URL(route.request().url()).pathname;
@@ -21,6 +21,93 @@ async function mockMiniApp(context, respond) {
         return route.fulfill({contentType: type, body: await readFile('/opt/tinybot/web/' + file, 'utf8')});
     });
 }
+
+test('settings follow live Telegram colors and open the GitHub source in Telegram', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    const context = await browser.newContext({colorScheme: 'light', viewport: {width: 360, height: 720}});
+    const page = await context.newPage();
+    const state = {user: '1', provider: 'codex', requests: [], tasks: []};
+    await mockMiniApp(context, () => state, `
+        let themeChanged;
+        window.Telegram = {WebApp: {
+            initData: 'fixture',
+            ready() {},
+            isVersionAtLeast(version) { return version === '6.1'; },
+            onEvent(name, callback) { if (name === 'themeChanged') themeChanged = callback; },
+            setHeaderColor(color) { window.headerColor = color; },
+            setBackgroundColor(color) { window.backgroundColor = color; },
+            openLink(url) { window.openedLink = url; },
+        }};
+        window.setTheme = (scheme, colors) => {
+            for (const [name, color] of Object.entries(colors)) {
+                document.documentElement.style.setProperty('--tg-theme-' + name, color);
+            }
+            window.Telegram.WebApp.colorScheme = scheme;
+            themeChanged?.();
+        };
+        window.setTheme('light', {
+            'secondary-bg-color': '#f1edf4', 'section-bg-color': '#faf7fb',
+            'button-color': '#67439b', 'button-text-color': '#ffffff', 'link-color': '#5f3c82',
+        });
+    `);
+    try {
+        await page.goto('https://tinybot.test/mini');
+        await page.getByRole('heading', {name: 'Requests', exact: true}).waitFor();
+        const colors = () => page.evaluate(() => ({
+            bodyBackground: getComputedStyle(document.body).backgroundColor,
+            cardBackground: getComputedStyle(document.querySelector('.card')).backgroundColor,
+            selectedBackground: getComputedStyle(document.querySelector('nav button[aria-current]')).backgroundColor,
+            browserScheme: getComputedStyle(document.documentElement).colorScheme,
+        }));
+        assert.deepEqual(await colors(), {
+            bodyBackground: 'rgb(241, 237, 244)',
+            cardBackground: 'rgb(250, 247, 251)',
+            selectedBackground: 'rgb(103, 67, 155)',
+            browserScheme: 'light',
+        });
+        await page.evaluate(() => window.setTheme('dark', {
+            'secondary-bg-color': '#0e1a23', 'section-bg-color': '#192936',
+            'button-color': '#97d3f8', 'button-text-color': '#102536', 'link-color': '#a9ddff',
+        }));
+        assert.deepEqual(await colors(), {
+            bodyBackground: 'rgb(14, 26, 35)',
+            cardBackground: 'rgb(25, 41, 54)',
+            selectedBackground: 'rgb(151, 211, 248)',
+            browserScheme: 'dark',
+        });
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 360);
+        assert.deepEqual(await page.evaluate(() => [window.headerColor, window.backgroundColor]), [
+            'secondary_bg_color', 'secondary_bg_color',
+        ]);
+        const source = page.getByRole('link', {name: 'Source on GitHub', exact: true});
+        assert.equal(await source.getAttribute('href'), 'https://github.com/abcdan/tinybot');
+        assert.equal(await source.evaluate(element => getComputedStyle(element).color), 'rgb(169, 221, 255)');
+        await source.click();
+        assert.equal(await page.evaluate(() => window.openedLink), 'https://github.com/abcdan/tinybot');
+    } finally {
+        await browser.close();
+    }
+});
+
+test('settings have readable light and dark palettes without Telegram theme data', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    const context = await browser.newContext({colorScheme: 'dark'});
+    const page = await context.newPage();
+    await mockMiniApp(context, () => ({user: '1', provider: 'codex', requests: [], tasks: []}));
+    try {
+        await page.goto('https://tinybot.test/mini');
+        await page.getByRole('heading', {name: 'Requests', exact: true}).waitFor();
+        const colors = () => page.locator('body').evaluate(body => {
+            const {backgroundColor, color} = getComputedStyle(body);
+            return {backgroundColor, color};
+        });
+        assert.deepEqual(await colors(), {backgroundColor: 'rgb(16, 25, 35)', color: 'rgb(233, 240, 247)'});
+        await page.emulateMedia({colorScheme: 'light'});
+        assert.deepEqual(await colors(), {backgroundColor: 'rgb(237, 242, 247)', color: 'rgb(24, 38, 52)'});
+    } finally {
+        await browser.close();
+    }
+});
 
 test('a generated Mini App uses shared controls and submits details for masked review', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
@@ -75,6 +162,7 @@ test('a generated focused form submits text and a selected option from Telegram'
         await page.goto('https://tinybot.test/mini?form=form-1');
         await page.getByRole('heading', {name: 'Answer a few questions', exact: true}).waitFor();
         assert.equal(await page.getByRole('navigation', {name: 'TinyBot settings'}).isVisible(), false);
+        assert.equal(await page.getByRole('link', {name: 'Source on GitHub'}).isVisible(), false);
         await page.getByRole('textbox', {name: 'Project name'}).fill('Weekend plans');
         await page.getByRole('combobox', {name: 'Priority'}).selectOption('High');
         await page.getByRole('button', {name: 'Send answers'}).click();
