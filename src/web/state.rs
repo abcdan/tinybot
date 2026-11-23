@@ -3,11 +3,15 @@ use anyhow::Result;
 use serde_json::{Value, json};
 
 pub(super) async fn status(app: &App, user: &str) -> Result<Value> {
-    let profile: (Option<String>, Option<String>, Option<String>) =
-        sqlx::query_as("SELECT provider,model,active_task FROM users WHERE id=?")
-            .bind(user)
-            .fetch_one(&app.db)
-            .await?;
+    let profile: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT u.provider,u.model,t.id FROM users u LEFT JOIN tasks t ON t.id=u.active_task
+         AND t.user=u.id AND t.chief_chat=1 AND t.state NOT IN ('cancelled','revoked')
+         AND (t.agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=t.agent
+         AND (a.owner=u.id OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=u.id)))) WHERE u.id=?",
+    )
+    .bind(user)
+    .fetch_one(&app.db)
+    .await?;
     let agents: Vec<store::Agent> = sqlx::query_as(
         "SELECT * FROM agents a WHERE owner=? OR EXISTS
         (SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=?) ORDER BY name LIMIT 100",
