@@ -135,6 +135,9 @@ legend { font-size: .83rem; font-weight: 650; }
 pre { background: var(--background); border-radius: 8px; padding: 10px; font-size: .83rem; white-space: pre-wrap; overflow-wrap: anywhere; }
 details { margin-block: 12px; }
 summary { cursor: pointer; font-size: .87rem; font-weight: 650; }
+.connection-tools { font-size: .88rem; overflow-wrap: anywhere; }
+.connection-tools dt { font-weight: 650; margin-top: 10px; }
+.connection-tools dd { color: var(--secondary); margin: 2px 0 0; }
 .audit-page { --audit-inset: clamp(12px, 3.5vw, 18px); }
 .audit-page-title { color: var(--text); font-size: 1.42rem; letter-spacing: -.025em; margin: 0 0 12px; }
 .audit-section-title { color: var(--section-title); font-size: .85rem; margin: 20px 4px 8px; }

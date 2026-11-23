@@ -88,7 +88,7 @@ pub(super) async fn execute(tool: Builtin, ctx: &ToolContext<'_>, args: Value) -
             let candidate: Candidate = serde_json::from_value(args)?;
             let reference = app.mcp.prepare(&task.user, &candidate).await?;
             store::pause(&app.db,task,"connector-setup",&json!({"connector":reference}),
-                    &format!("Open TinyBot → Connectors and authorize {}. Use the OAuth or API-token option available to you.",candidate.name),
+                    &format!("Open TinyBot → Connections and authorize {}. Use the OAuth or API-token option available to you.",candidate.name),
                     Some("mini"),1800,&id()).await?;
             return Ok(Outcome::Pause);
         }
