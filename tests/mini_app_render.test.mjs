@@ -90,3 +90,78 @@ test('a generated focused form submits text and a selected option from Telegram'
         await browser.close();
     }
 });
+
+test('one OpenRouter key lists task models while retaining Codex pairing', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    const requests = [];
+    const state = {
+        provider: 'codex', model: 'codex-fixture', codex_model: 'codex-fixture',
+        openrouter_connected: false, requests: [], tasks: []
+    };
+    const models = [
+        {id: 'provider/one', name: 'First model'},
+        {id: 'provider/two', name: 'Second model'}
+    ];
+    const key = 'sk-or-fixture';
+    await mockMiniApp(context, ({action, data}) => {
+        requests.push({action, data});
+        switch (action) {
+            case 'status': return state;
+            case 'openrouter-key':
+                assert.deepEqual(data, {key});
+                state.openrouter_connected = true;
+                return {models};
+            case 'openrouter-models':
+                assert(state.openrouter_connected);
+                return {models};
+            case 'openrouter-model':
+                assert.deepEqual(data, {model: 'provider/two'});
+                state.provider = 'openrouter';
+                state.model = data.model;
+                return {ok: true};
+            case 'codex-select':
+                state.provider = 'codex';
+                state.model = state.codex_model;
+                return {ok: true};
+            case 'disconnect-openrouter':
+                assert.equal(state.provider, 'codex');
+                state.openrouter_connected = false;
+                return {ok: true};
+            default: assert.fail('Unexpected Mini App action ' + action);
+        }
+    });
+    try {
+        await page.goto('https://tinybot.test/mini');
+        await page.getByRole('button', {name: 'Model', exact: true}).click();
+        const password = page.getByLabel('OpenRouter API key');
+        await password.waitFor();
+        assert.equal(await page.locator('input[type=password]').count(), 1);
+        await password.fill(key);
+        await page.getByRole('button', {name: 'Save API key'}).click();
+        const selector = page.getByRole('combobox', {name: 'OpenRouter task model'});
+        await selector.waitFor();
+        assert.equal(await password.inputValue(), '');
+        assert.equal(requests.some(({action}) => action === 'openrouter-models'), false);
+        const modelListRequest = page.waitForRequest(request => request.url().endsWith('/api/mini') &&
+            request.postDataJSON()?.action === 'openrouter-models');
+        await page.getByRole('button', {name: 'Refresh', exact: true}).click();
+        await modelListRequest;
+        await selector.getByRole('option', {name: 'Second model (provider/two)'}).waitFor({state: 'attached'});
+        assert.equal(requests.filter(({action}) => action === 'openrouter-models').length, 1);
+        await selector.selectOption('provider/two');
+        await page.getByRole('button', {name: 'Use OpenRouter for tasks'}).click();
+        await page.getByText('OpenRouter · provider/two', {exact: true}).waitFor();
+        await page.getByRole('button', {name: 'Use Codex for tasks'}).click();
+        await page.getByText('ChatGPT for Codex · codex-fixture', {exact: true}).waitFor();
+        await selector.waitFor();
+        await page.getByRole('button', {name: 'Remove OpenRouter key'}).click();
+        await password.waitFor();
+        assert.equal(await selector.count(), 0);
+        assert.equal(await page.getByText('Connected · codex-fixture', {exact: true}).count(), 1);
+        assert.equal(requests.filter(({action}) => action === 'openrouter-key').length, 1);
+    } finally {
+        await browser.close();
+    }
+});
