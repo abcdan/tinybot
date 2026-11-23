@@ -62,12 +62,15 @@ pub async fn recover(db: &SqlitePool) -> Result<()> {
     sqlx::query("UPDATE pending SET state='reconciled' WHERE state IN ('uncertain','lost')")
         .execute(&mut *tx)
         .await?;
+    crate::audit::recover(&mut tx).await?;
+    crate::audit::prune(&mut tx).await?;
     tx.commit().await?;
     Ok(())
 }
 
 pub async fn expire(db: &SqlitePool) -> Result<()> {
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+    crate::audit::prune(&mut tx).await?;
     sqlx::query(
         "UPDATE pending SET state='expiring' WHERE expires<? AND state IN ('waiting','approved')",
     )
@@ -192,6 +195,12 @@ async fn settle_task(
     .bind(&task.id)
     .fetch_optional(&mut *tx)
     .await?;
+    if let Some(row) = &affected {
+        use sqlx::Row;
+        if row.get::<i64, _>("revision") == task.revision {
+            crate::audit::mark_task(&mut tx, task, state).await?;
+        }
+    }
     if let (Some(row), Some(message)) = (affected, message) {
         use sqlx::Row;
         if row.get::<i64, _>("revision") == task.revision {

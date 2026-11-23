@@ -105,6 +105,8 @@ impl Forms {
             (SELECT 1 FROM tasks t WHERE t.id=pending.task AND t.revision=pending.revision AND t.state='waiting')")
             .bind(pending_id).bind(now()).execute(&mut *tx).await?.rows_affected();
         ensure!(changed == 1, "form was replaced or already submitted");
+        crate::audit::request_changed(&mut tx, &task.id, task.revision, "website_form", "answered")
+            .await?;
         // Store only redacted preview data in SQLite. Full values stay in the sealed in-memory request.
         sqlx::query("INSERT INTO pending(id,user,task,revision,kind,payload,expires) VALUES(?,?,?,?,'form-submit',?,?)")
             .bind(&approval).bind(&task.user).bind(&task.id).bind(task.revision)
@@ -247,10 +249,12 @@ async fn submit_answer(
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     let pending = waiting_input(&mut *tx, user, request).await?;
     let task = pending.task.as_deref().context("form unavailable")?;
+    let revision = pending.revision.context("form unavailable")?;
     let spec: FormSpec = serde_json::from_str(&pending.payload)?;
     spec.validate()?;
     let values = values(&spec)?;
     validate_values(&spec.fields, &values)?;
+    crate::audit::request_changed(&mut tx, task, revision, "generated_form", "answered").await?;
     sqlx::query("UPDATE pending SET state='done' WHERE id=?")
         .bind(request)
         .execute(&mut *tx)

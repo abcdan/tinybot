@@ -129,6 +129,7 @@ async fn ingest_message(
                 if let Some(task) = active.as_deref() {
                     sqlx::query("UPDATE tasks SET state='cancelled',revision=revision+1 WHERE id=? AND user=? AND state<>'revoked'")
                         .bind(task).bind(user).execute(&mut *tx).await?;
+                    crate::audit::cancel(&mut tx, task, user).await?;
                     sqlx::query("UPDATE pending SET state='superseded' WHERE task=? AND state IN ('waiting','approved')")
                         .bind(task).execute(&mut *tx).await?;
                     sqlx::query("UPDATE users SET active_task=NULL WHERE id=?").bind(user).execute(&mut *tx).await?;
@@ -259,6 +260,7 @@ pub(super) async fn enqueue_input(
         .bind(telegram_message_id)
         .execute(&mut **tx)
         .await?;
+    crate::audit::open(tx, task, input).await?;
     if state == "uncertain" {
         sqlx::query("INSERT INTO outbox(user,body) VALUES(?,?)")
             .bind(user)
