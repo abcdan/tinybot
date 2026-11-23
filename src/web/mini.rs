@@ -1,5 +1,9 @@
 use super::{Api, ApiError, agents, forbidden, invalid, origin, state};
-use crate::{App, model::OpenRouterSettingsError, security::telegram_user};
+use crate::{
+    App,
+    model::{OnboardingError, OpenRouterSettingsError},
+    security::telegram_user,
+};
 use anyhow::{Context, Result, bail};
 use axum::{
     Json,
@@ -14,6 +18,7 @@ mod browser;
 mod connectors;
 mod memory;
 mod models;
+mod onboarding;
 mod sharing;
 mod tasks;
 
@@ -54,6 +59,12 @@ pub(super) async fn mini(
                 ApiError(StatusCode::NOT_FOUND, "This audit session is no longer available.")
             } else if let Some(error) = error.downcast_ref::<browser::SettingsError>() {
                 error.response()
+            } else if let Some(error) = error.downcast_ref::<OnboardingError>() {
+                let status = match error {
+                    OnboardingError::InvalidName => StatusCode::BAD_REQUEST,
+                    OnboardingError::AlreadyConfigured => StatusCode::CONFLICT,
+                };
+                ApiError(status, error.message())
             } else if let Some(error) = error.downcast_ref::<OpenRouterSettingsError>() {
                 match error {
                     OpenRouterSettingsError::MissingKey => ApiError(StatusCode::BAD_REQUEST, "Connect your OpenRouter key first."),
@@ -79,6 +90,8 @@ pub(super) fn text<'a>(data: &'a Value, key: &str, max: usize) -> Result<&'a str
 async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<Value> {
     match action {
         "status" => return state::status(app, user).await,
+        "onboarding-models" => return onboarding::models(app, user, data).await,
+        "complete-onboarding" => onboarding::complete(app, user, data).await?,
         "audit-sessions" => return tasks::audit_sessions(app, user, data).await,
         "audit-session" => return tasks::audit_session(app, user, data).await,
         "save-browser-proxy" => browser::save(app, user, data)?,

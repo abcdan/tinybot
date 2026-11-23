@@ -5,6 +5,7 @@ mod media;
 mod openrouter;
 mod transcription;
 
+pub(crate) use connections::OnboardingError;
 pub use connections::OpenRouterSettingsError;
 pub use media::{AttachmentInput, AttachmentRead};
 pub(crate) use transcription::MAX_VOICE_BYTES;

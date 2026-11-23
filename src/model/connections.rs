@@ -1,4 +1,5 @@
 mod catalog;
+mod onboarding;
 #[cfg(test)]
 mod tests;
 
@@ -7,6 +8,7 @@ use crate::siwc::Profile;
 use anyhow::{Context, Result, ensure};
 pub use catalog::OpenRouterModel;
 use catalog::{openrouter_catalog, valid_model_id, verify_key};
+pub(crate) use onboarding::OnboardingError;
 use serde::Serialize;
 use sqlx::{Sqlite, Transaction};
 
