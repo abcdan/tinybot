@@ -9,6 +9,7 @@ export const content = document.querySelector('#view');
 const notice = document.querySelector('#status');
 const refreshButton = document.querySelector('#refresh');
 const tabs = document.querySelector('#tabs');
+const sourceLink = document.querySelector('#source-link');
 const formId = new URLSearchParams(window.location.search).get('form');
 let state;
 let tab = 'home';
@@ -141,11 +142,30 @@ function generatedForm(request) {
     });
 }
 
+function syncColorScheme() {
+    const scheme = telegram?.colorScheme;
+    if (scheme === 'light' || scheme === 'dark') document.documentElement.style.colorScheme = scheme;
+}
+
 tabs.hidden = Boolean(formId);
-if (formId) content.setAttribute('aria-label', 'Form');
+if (formId) {
+    content.closest('main').classList.add('narrow');
+    content.setAttribute('aria-label', 'Form');
+}
 refreshButton.addEventListener('click', () => refresh());
+sourceLink.addEventListener('click', event => {
+    if (!telegram?.initData || !telegram.openLink || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    telegram.openLink(sourceLink.href);
+    event.preventDefault();
+});
 for (const item of document.querySelectorAll('#tabs button')) {
     item.addEventListener('click', () => setTab(item.dataset.tab));
+}
+syncColorScheme();
+telegram?.onEvent?.('themeChanged', syncColorScheme);
+if (telegram?.isVersionAtLeast?.('6.1')) {
+    telegram.setHeaderColor('secondary_bg_color');
+    telegram.setBackgroundColor('secondary_bg_color');
 }
 telegram?.ready();
 refresh();
