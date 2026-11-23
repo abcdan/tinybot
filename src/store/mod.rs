@@ -1,5 +1,6 @@
 pub mod attachments;
 mod ingress;
+pub mod mail;
 mod mcp_approvals;
 pub mod memory;
 mod queue;

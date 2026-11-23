@@ -3,6 +3,7 @@ mod acceptance;
 mod audit;
 mod channel;
 mod forms;
+mod mail;
 mod mcp;
 mod model;
 mod net;

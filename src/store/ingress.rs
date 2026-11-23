@@ -330,21 +330,27 @@ async fn ingest_message(
             .await?;
     } else {
         let input = if command == "/new" { argument } else { text };
-        let target: Option<(String, Option<String>)> = if command != "/new"
+        let target: Option<(String, Option<String>, bool, bool)> = if command != "/new"
             && let Some(reply) = telegram
                 .reply
                 .as_ref()
                 .filter(|reply| reply.from_bot && reply.message_id > 0)
         {
             sqlx::query_as(
-                    "SELECT o.task,e.body FROM outbox o LEFT JOIN events e ON e.id=o.assistant_event_id AND e.task=o.task
+                    "SELECT o.task,e.body,EXISTS(SELECT 1 FROM mail_messages m WHERE m.notice=o.id),
+                            EXISTS(SELECT 1 FROM mail_messages m WHERE m.preview=o.id)
+                     FROM outbox o LEFT JOIN events e ON e.id=o.assistant_event_id AND e.task=o.task
                      WHERE o.user=? AND o.telegram_message_id=? AND o.state='sent' AND o.task IS NOT NULL",
                 )
                 .bind(user).bind(reply.message_id).fetch_optional(&mut *tx).await?
         } else {
             None
         };
-        if let Some((task, excerpt)) = target {
+        if let Some((task, excerpt, mail_notice, mail_preview)) = target {
+            if mail_notice && telegram.reaction {
+                tx.commit().await?;
+                return Ok(());
+            }
             if !super::select_task(&mut *tx, user, &task).await? {
                 if !telegram.reaction {
                     sqlx::query("INSERT INTO outbox(user,body) VALUES(?,?)")
@@ -356,10 +362,15 @@ async fn ingest_message(
                 tx.commit().await?;
                 return Ok(());
             }
-            if let Some(reply) = &mut telegram.reply
-                && reply.excerpt.is_none()
-            {
-                reply.excerpt = excerpt;
+            if let Some(reply) = &mut telegram.reply {
+                if mail_preview {
+                    reply.excerpt = None;
+                } else if reply.excerpt.is_none() {
+                    reply.excerpt = excerpt;
+                }
+            }
+            if mail_notice && let Some(reply) = &telegram.reply {
+                super::mail::reveal_reply(&mut tx, user, &task, reply.message_id).await?;
             }
             active = Some(task);
         } else if telegram.reaction {
