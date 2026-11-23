@@ -2,6 +2,7 @@ import { action, button, card, field, form, node, row } from './mini-ui.js';
 import { agentForm, agents } from './mini-agents.js';
 import { audit } from './mini-audit.js';
 import { connectors } from './mini-connectors.js';
+import { mail } from './mini-mail.js';
 import { memories } from './mini-memory.js';
 import { onboarding } from './mini-onboarding.js';
 import { browser, schedules, model } from './mini-settings.js';
@@ -151,7 +152,7 @@ function setTab(next) {
 function render(animate = false) {
     if (!state) return;
     content.replaceChildren();
-    ({home, agents, memories, connectors, browser, schedules, audit, model})[tab](state);
+    ({home, agents, memories, connectors, mail, browser, schedules, audit, model})[tab](state);
     if (animate && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
         content.getAnimations?.().forEach(animation => animation.cancel());
         content.animate?.([{opacity: 0, transform: 'translateY(6px)'}, {opacity: 1, transform: 'translateY(0)'}],
@@ -177,6 +178,12 @@ function home() {
         } else if (request.kind === 'form' || request.kind === 'elicitation') {
             if (request.kind === 'elicitation') item.append(node('p', 'Your answers go to your Chief.'));
             item.append(generatedForm(request), row(action('Decline', 'deny', {id: request.id}, 'Request declined.', true)));
+        } else if (request.kind === 'email-send') {
+            const data = {id: request.id};
+            item.append(node('pre', details.explanation), row(
+                action('Approve once', 'approve', data, 'Send approved.'),
+                action('Deny', 'deny', data, 'Send denied.', true)
+            ));
         } else if (details.mcp) {
             const data = {id: request.id};
             const choices = [action('Approve once', 'approve', data, 'Approved for this call.')];

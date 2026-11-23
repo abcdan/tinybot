@@ -121,6 +121,16 @@ legend { font-size: .83rem; font-weight: 650; }
 .actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
 .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; justify-content: space-between; }
 .meta { font-size: .82rem; color: var(--secondary); }
+.mail-card h3, .mail-folder-list strong { overflow-wrap: anywhere; }
+.mail-folder-list { margin: 12px 0; padding: 0; list-style: none; }
+.mail-folder-list li { display: flex; align-items: baseline; flex-wrap: wrap; column-gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); }
+.mail-folder-list .meta { margin-inline-start: auto; }
+.mail-protocol { margin: 12px 0; border-top: 1px solid var(--line); }
+.mail-check { display: flex; align-items: center; min-height: 44px; margin: 4px 0; }
+.mail-check input { flex: none; }
+.mail-protocol-inputs { min-width: 0; margin: 0 0 10px; }
+.mail-watch { border-top: 1px solid var(--line); padding: 12px 0; }
+.mail-watch-entry { margin: 10px 0; padding: 4px 10px 10px; border-radius: 8px; background: var(--background); }
 .memory-note { color: var(--text); white-space: pre-wrap; }
 pre { background: var(--background); border-radius: 8px; padding: 10px; font-size: .83rem; white-space: pre-wrap; overflow-wrap: anywhere; }
 details { margin-block: 12px; }

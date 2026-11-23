@@ -34,11 +34,19 @@ pub(super) async fn status(app: &App, user: &str) -> Result<Value> {
     let requests = store::list_requests(&app.db, user)
         .await?
         .into_iter()
-        .map(|entry| {
-            let payload = request_content(&entry.kind, &entry.payload);
-            json!({"id":entry.id,"kind":entry.kind,"content":payload,"expires":entry.expires})
+        .filter_map(|entry| {
+            let payload = if entry.kind == "email-send" {
+                let raw: Value = serde_json::from_str(&entry.payload).ok()?;
+                let preview =
+                    crate::runtime::smtp_preview(&app.vault, user, &entry.id, &raw).ok()?;
+                json!({"operation":"Send email","explanation":preview})
+            } else {
+                request_content(&entry.kind, &entry.payload)
+            };
+            Some(json!({"id":entry.id,"kind":entry.kind,"content":payload,"expires":entry.expires}))
         })
         .collect::<Vec<_>>();
+    let mail_accounts = store::mail::list_accounts(&app.db, &app.vault, user).await?;
     let connectors: Vec<Connector> =
         sqlx::query_as("SELECT * FROM connectors WHERE owner=? ORDER BY name LIMIT 40")
             .bind(user)
@@ -101,7 +109,7 @@ pub(super) async fn status(app: &App, user: &str) -> Result<Value> {
         "openrouter_server_tools":openrouter_server_tools,
         "codex_model":connections.codex_model,"read_tools":read_tools,"browser_proxy":browser_proxy,
         "onboarding_required":onboarding.required,"display_name":onboarding.display_name,"chief_name":onboarding.chief_name,
-        "mcp_approvals":mcp_approvals}),
+        "mcp_approvals":mcp_approvals,"mail_accounts":mail_accounts}),
     )
 }
 
