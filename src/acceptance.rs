@@ -81,7 +81,10 @@ impl ModelProvider for WidgetChief {
         let context: Value = serde_json::from_str(input)?;
         let history = context["history"].as_array().unwrap();
         let last = history.last().unwrap()["text"].as_str().unwrap();
-        let step = if last == "Give me the menu" {
+        let step = if last == "Can you make a widget that says hello?" {
+            assert!(system.contains("TinyBot renders it natively."));
+            json!({"kind":"widget","text":"Hello!","suggested_replies":["Say it in Dutch"]})
+        } else if last == "Give me the menu" {
             json!({"kind":"reply","text":"1. Search online\n2. Try a simple widget"})
         } else if last == "2" {
             // The model can recover from an invalid field without blocking the whole turn.
@@ -123,11 +126,11 @@ async fn replying_to_a_menu_opens_an_answerable_choice_without_a_second_model() 
     assert_eq!(task_for(&db, &task.id).await.state, "waiting");
     let pending = pending_id(&db, &task, "elicitation").await;
     let widget = store::claim_outbox(&db).await.unwrap().unwrap();
-    assert_eq!(widget.button.as_deref(), Some("mini"));
-    assert!(widget.body.starts_with("Tap Answer"));
+    assert_eq!(widget.button, Some(format!("choice/{pending}")));
+    assert_eq!(widget.body, "Pick a topic");
     assert!(forms::widget_choice(&db, "2", &pending).await.is_err());
     let choice = forms::widget_choice(&db, "1", &pending).await.unwrap();
-    assert_eq!(choice["options"], json!(["Travel", "Cooking"]));
+    assert_eq!(choice.options, ["Travel", "Cooking"]);
     assert!(forms::answer_choice(&db, "2", &pending, 1).await.is_err());
     assert!(forms::answer_choice(&db, "1", &pending, 2).await.is_err());
     forms::answer_choice(&db, "1", &pending, 1).await.unwrap();
@@ -138,6 +141,24 @@ async fn replying_to_a_menu_opens_an_answerable_choice_without_a_second_model() 
     runtime::work(&app, &resumed).await.unwrap();
     let reply = store::claim_outbox(&db).await.unwrap().unwrap();
     assert_eq!(reply.body, "You picked Cooking.");
+}
+
+#[tokio::test]
+async fn a_widget_reply_queues_a_native_widget_without_a_form_request() {
+    let db = fixture().await;
+    let app = app_with_model(&db, Arc::new(WidgetChief));
+    message(&db, 1, "1", "Can you make a widget that says hello?").await;
+    let task = store::claim(&db).await.unwrap().unwrap();
+    runtime::work(&app, &task).await.unwrap();
+    let widget = store::claim_outbox(&db).await.unwrap().unwrap();
+    assert_eq!(widget.body, "Hello!");
+    let content: crate::channel::Card =
+        serde_json::from_str(widget.widget.as_deref().unwrap()).unwrap();
+    assert!(content.html().contains("<p>Hello!</p>"));
+    let replies = store::suggested_replies(&db, widget.id).await.unwrap();
+    assert_eq!(replies[0].body, "Say it in Dutch");
+    assert!(store::list_requests(&db, "1").await.unwrap().is_empty());
+    assert_eq!(task_for(&db, &task.id).await.state, "idle");
 }
 
 #[tokio::test]

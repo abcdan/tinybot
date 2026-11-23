@@ -6,7 +6,7 @@ mod requests;
 pub use ingress::ingest;
 pub use queue::{
     append, claim, compact, compaction_batch, current, expire, has_access, history, list_tasks,
-    recover, select_task, settle, settle_reply,
+    recover, select_task, settle, settle_reply, settle_widget,
 };
 pub use replies::{SuggestedReply, redeem_reply, suggested_replies};
 pub use requests::{
@@ -62,6 +62,7 @@ pub struct Outbound {
     pub task: Option<String>,
     pub body: String,
     pub button: Option<String>,
+    pub widget: Option<String>,
 }
 
 pub async fn open(path: &Path) -> Result<SqlitePool> {

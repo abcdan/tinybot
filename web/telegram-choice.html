@@ -1,0 +1,42 @@
+<style>
+body {
+    margin: 0;
+    padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+}
+#options { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+#status { color: var(--tg-theme-hint-color); }
+</style>
+<strong id="question"></strong>
+<div id="options"></div>
+<div id="status" role="status"></div>
+<script>
+const widget = window.TelegramWidget;
+const question = document.getElementById('question');
+const options = document.getElementById('options');
+const status = document.getElementById('status');
+const choice = JSON.parse(widget?.chatData || 'null');
+if (choice) {
+    question.textContent = choice.label;
+    const buttons = choice.options.map((label, index) => {
+        const button = document.createElement('button');
+        button.textContent = label;
+        button.addEventListener('click', async () => {
+            for (const option of buttons) option.disabled = true;
+            status.textContent = 'Sending…';
+            try {
+                const { result } = await widget.request('answer/' + choice.id + '/' + index);
+                const response = JSON.parse(result);
+                if (response.error) throw new Error(response.error);
+                options.replaceChildren();
+                status.textContent = 'Answer sent.';
+            } catch {
+                status.textContent = 'This choice could not be recorded. Try again or open /settings.';
+                for (const option of buttons) option.disabled = false;
+            }
+        });
+        return button;
+    });
+    options.append(...buttons);
+}
+widget?.ready();
+</script>
