@@ -1,0 +1,10 @@
+services:
+  gateway:
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=dokploy-network
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-anythingmcp.rule=Host(`${AMCP_DOMAIN:-mcp.${TINYBOT_DOMAIN}}`)
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-anythingmcp.entrypoints=websecure
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-anythingmcp.tls.certresolver=letsencrypt
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-anythingmcp.service=${COMPOSE_PROJECT_NAME}-anythingmcp
+      - traefik.http.services.${COMPOSE_PROJECT_NAME}-anythingmcp.loadbalancer.server.port=8080
