@@ -16,6 +16,7 @@ pub(super) async fn save_agent(app: &App, user: &str, data: &Value) -> Result<()
         "list_mcp_tools",
         "call_mcp",
         "browse",
+        "search_web",
         "request_form",
         "request_input",
         "task_files",

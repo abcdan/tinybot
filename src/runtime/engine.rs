@@ -1,3 +1,4 @@
+use super::delegation::delegate;
 use super::execution::{execute_approved, finish};
 use super::feedback::Feedback;
 use super::lookup::{self, Lookup};
@@ -163,6 +164,10 @@ async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> Resul
                     false,
                 )
             }
+            "chief-delegate" => (
+                delegate(&ctx, &payload).await.map(Outcome::Continue),
+                false,
+            ),
             _ => {
                 let call: Call = serde_json::from_value(payload["call"].clone())?;
                 audit::record("approval", "external_action", "approved", Value::Null).await;
@@ -190,19 +195,23 @@ async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> Resul
         .fetch_all(&app.db)
         .await?
     };
-    let saved: Vec<(String, String)> = if owner && task.agent.is_none() {
-        sqlx::query_as("SELECT id,name FROM agents WHERE owner=? ORDER BY name LIMIT 30")
-            .bind(&task.user)
-            .fetch_all(&app.db)
-            .await?
-    } else {
-        Vec::new()
-    };
+    let saved: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT a.id,a.name,CASE WHEN a.owner=? THEN a.instructions END FROM agents a
+         WHERE (a.owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=?))
+           AND (? IS NULL OR a.id=?)
+         ORDER BY a.name LIMIT 30",
+    ).bind(&task.user).bind(&task.user).bind(&task.user).bind(&task.agent).bind(&task.agent)
+      .fetch_all(&app.db).await?;
+    let saved: Vec<_> = saved.iter().map(|(id,name,description)| json!({
+        "id":id,"name":name,"description":description.as_deref().map(|text|clip(text,500))
+    })).collect();
     let model = app.models.provider(&task.user, false).await?;
     let tools: Vec<_> = app
         .tools
         .iter()
-        .filter(|tool| ctx.allows(tool.name()))
+        .filter(|tool| {
+            ctx.allows(tool.name()) && (owner || matches!(tool.name(), "delegate" | "send_reply" | "react_to_message"))
+        })
         .collect();
     let definitions = tool_definitions(&tools);
     let latest_request: Option<String> = sqlx::query_scalar(
@@ -266,7 +275,7 @@ async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> Resul
         let input = json!({
             "goal":goal,"summary":summary,"latest_request":latest_request.as_deref().map(|text|clip(text,8000)),"history":history,"memory":memory,
             "local_time":schedules::local_iso(now(),zone),"time_zone":zone.name(),
-            "agent_role":agent.as_ref().map(|agent|clip(&agent.instructions,2500)),
+            "shared_helper_scope":agent.as_ref().filter(|_|!owner).map(|agent|&agent.id),
             "saved_agents":saved,"tools":descriptions(&tools),"connectors":connector_context(&ctx)
         });
         if finish_lookup || step_number == TOOL_STEP_LIMIT {
@@ -435,6 +444,10 @@ async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> Resul
                     return store::settle(&app.db, task, "idle", None).await;
                 }
                 tool.inspect(&ctx, &args).await?;
+                if name == "delegate" && bind_shared_delegation(&app.db, task, &args).await? {
+                    audit::record("delegation", "helper", "scoped", Value::Null).await;
+                    return Ok(());
+                }
                 // These operations manage their own durable task state.
                 if matches!(
                     name.as_str(),
@@ -505,6 +518,27 @@ async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> Resul
         Some("I reached the task’s step limit. Send a follow-up to continue."),
     )
     .await
+}
+
+async fn bind_shared_delegation(db: &sqlx::SqlitePool, task: &Task, args: &Value) -> Result<bool> {
+    let Some(helper) = args["agent"].as_str().filter(|_|task.agent.is_none()) else {
+        return Ok(false);
+    };
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+    let updated = sqlx::query("UPDATE tasks SET agent=?,state='queued',updated=?
+        WHERE id=? AND user=? AND revision=? AND chief_chat=1 AND agent IS NULL AND state='running'
+        AND EXISTS(SELECT 1 FROM agents a JOIN grants g ON g.agent=a.id
+            WHERE a.id=? AND g.member=tasks.user AND a.owner<>tasks.user)")
+        .bind(helper).bind(now()).bind(&task.id).bind(&task.user).bind(task.revision).bind(helper)
+        .execute(&mut *tx).await?.rows_affected();
+    if updated == 1 {
+        sqlx::query("INSERT INTO pending(id,user,task,revision,kind,payload,state,expires)
+            VALUES(?,?,?,?,'chief-delegate',?,'approved',?)")
+            .bind(id()).bind(&task.user).bind(&task.id).bind(task.revision).bind(args.to_string()).bind(now()+900)
+            .execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    Ok(updated==1)
 }
 
 #[derive(Deserialize)]
