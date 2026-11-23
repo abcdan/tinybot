@@ -125,6 +125,14 @@ summaries, including work that resumes after an approval or form submission.
 The log keeps seven days of activity. Entries summarize sensitive tool
 payloads and omit private form values, credentials, and raw model prompts.
 
+## Agent memory
+
+Ask your Chief to remember a preference across conversations. You can name
+one of your helpers to make the note available to it, or say “remember this
+for the group” to share a note with your Chief and all your owned helpers.
+Manage each scope under **Settings & forms → Memory**. Invited members retain
+access to the notes you explicitly publish for their shared helper.
+
 ## MCP connectors
 
 Send a message such as **Connect the Atlassian MCP**. TinyBot searches the MCP

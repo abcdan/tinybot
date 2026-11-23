@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 mod browser;
 mod connectors;
+mod memory;
 mod models;
 mod sharing;
 mod tasks;
@@ -97,7 +98,9 @@ async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<
         "invite-agent" => return sharing::invite_agent(app, user, data).await,
         "revoke-member" => sharing::revoke_member(app, user, data).await?,
         "publish-memory" => sharing::publish_memory(app, user, data).await?,
-        "delete-memory" => sharing::delete_memory(app, user, data).await?,
+        "list-memories" => return memory::list(app, user, data).await,
+        "save-memory" => memory::save(app, user, data).await?,
+        "delete-memory" => memory::remove(app, user, data).await?,
 
         "grant-connector" => connectors::grant(app, user, data).await?,
         "revoke-connector" => connectors::revoke(app, user, data).await?,

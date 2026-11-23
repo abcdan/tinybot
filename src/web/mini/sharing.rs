@@ -57,9 +57,9 @@ pub(super) async fn publish_memory(app: &App, user: &str, data: &Value) -> Resul
     Ok(())
 }
 
-pub(super) async fn delete_memory(app: &App, user: &str, data: &Value) -> Result<()> {
+pub(super) async fn delete_published_memory(app: &App, user: &str, entry: &str) -> Result<()> {
     sqlx::query("DELETE FROM memory WHERE id=? AND owner=?")
-        .bind(text(data, "id", 64)?)
+        .bind(entry)
         .bind(user)
         .execute(&app.db)
         .await?;
