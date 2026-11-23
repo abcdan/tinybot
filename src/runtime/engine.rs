@@ -285,6 +285,7 @@ async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> Resul
             "goal":goal,"summary":summary,"latest_request":latest_request.as_deref().map(|text|clip(text,8000)),"history":history,"memory":memory,
             "local_time":schedules::local_iso(now(),zone),"time_zone":zone.name(),
             "shared_helper_scope":agent.as_ref().filter(|_|!owner).map(|agent|&agent.id),
+            "telegram_reply":store::latest_reply_context(&app.db, &task.id).await?,
             "saved_agents":saved,"tools":descriptions(&tools),"connectors":connector_context(&ctx)
         });
         if finish_lookup || step_number == TOOL_STEP_LIMIT {

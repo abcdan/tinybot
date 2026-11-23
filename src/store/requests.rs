@@ -188,7 +188,7 @@ pub async fn notify(db: &SqlitePool, user: &str, body: &str, button: Option<&str
 pub async fn claim_outbox(db: &SqlitePool) -> Result<Option<Outbound>> {
     Ok(sqlx::query_as(
         "UPDATE outbox SET state='sending' WHERE id=(SELECT id FROM outbox WHERE state='queued'
-        AND retry_at<=? ORDER BY id LIMIT 1) RETURNING id,user,agent,task,body,button,widget,reaction_event",
+        AND retry_at<=? ORDER BY id LIMIT 1) RETURNING id,user,agent,task,body,button,widget,reaction_event,reply_to_message_id",
     )
     .bind(now())
     .fetch_optional(db)

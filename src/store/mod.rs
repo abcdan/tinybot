@@ -4,7 +4,11 @@ mod reactions;
 mod replies;
 mod requests;
 
-pub use ingress::{ingest, ingest_telegram};
+pub use ingress::ingest_telegram_voice;
+pub use ingress::{
+    ReplyContext, ingest, ingest_telegram, ingest_telegram_reaction, ingest_telegram_reply,
+    latest_reply_context,
+};
 pub use queue::{
     append, claim, compact, compaction_batch, current, expire, has_access, history, list_tasks,
     recover, select_task, settle, settle_reply, settle_widget,
@@ -66,6 +70,7 @@ pub struct Outbound {
     pub button: Option<String>,
     pub widget: Option<String>,
     pub reaction_event: Option<i64>,
+    pub reply_to_message_id: Option<i64>,
 }
 
 pub async fn open(path: &Path) -> Result<SqlitePool> {
