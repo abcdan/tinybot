@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod acceptance;
+mod audit;
 mod channel;
 mod forms;
 mod mcp;

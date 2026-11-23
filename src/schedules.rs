@@ -195,6 +195,7 @@ pub async fn dispatch(db: &SqlitePool, time: i64) -> Result<()> {
                 .bind(format!("{instruction}\n\n{}", schedule.input))
                 .execute(&mut *tx)
                 .await?;
+            crate::audit::open(&mut tx, &task, "Scheduled task").await?;
         }
     }
     tx.commit().await?;

@@ -34,6 +34,7 @@ pub async fn pause(
     .await?
     .rows_affected();
     ensure!(updated == 1, "task changed before request could be created");
+    crate::audit::mark_task(&mut tx, task, "waiting").await?;
     sqlx::query(
         "INSERT INTO pending(id,user,task,revision,kind,payload,expires) VALUES(?,?,?,?,?,?,?)",
     )
@@ -124,6 +125,7 @@ pub async fn uncertain_action(
         .bind(&task.id)
         .execute(&mut *tx)
         .await?;
+    crate::audit::mark_task(&mut tx, task, "uncertain").await?;
     sqlx::query("INSERT INTO events(task,role,body) VALUES(?,'tool',?)")
         .bind(&task.id)
         .bind(message)
@@ -150,6 +152,16 @@ pub async fn respond(db: &SqlitePool, user: &str, pending: &str, approve: bool) 
         .bind(if approve {"approved"} else {"denied"}).bind(pending).bind(user).bind(now())
         .bind(if approve {"approved"} else {"denied"}).bind(user).bind(user)
         .fetch_optional(&mut *tx).await?.context("request expired, changed, or already answered")?;
+    if let (Some(task), Some(revision)) = (&entry.task, entry.revision) {
+        crate::audit::request_changed(
+            &mut tx,
+            task,
+            revision,
+            &entry.kind,
+            if approve { "approved" } else { "declined" },
+        )
+        .await?;
+    }
     if !approve {
         sqlx::query("INSERT INTO events(task,role,body) VALUES(?,'tool','User declined the pending action.')")
             .bind(&entry.task).execute(&mut *tx).await?;
