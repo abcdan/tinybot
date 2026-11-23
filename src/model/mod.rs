@@ -293,7 +293,16 @@ mod tests {
         .execute(&db)
         .await
         .unwrap();
-        let models = Models::new(db, vault, "codex".into(), None, None);
+        let key = vault.seal("openrouter:1", b"synthetic-key").unwrap();
+        let models = Models::new(db.clone(), vault, "codex".into(), None, None);
         assert!(models.forms("1").await.is_ok());
+        assert!(models.mercury("1").await.unwrap().is_none());
+
+        sqlx::query("UPDATE users SET openrouter_key=? WHERE id='1'")
+            .bind(key)
+            .execute(&db)
+            .await
+            .unwrap();
+        assert!(models.mercury("1").await.unwrap().is_some());
     }
 }
