@@ -39,6 +39,17 @@ pub(super) async fn resume_approval(ctx: &ToolContext<'_>) -> Result<bool> {
         _ => {
             let call: Call = serde_json::from_value(payload["call"].clone())?;
             audit::record("approval", "external_action", "approved", Value::Null).await;
+            if let Some(scope) = payload.get("mcp_approval") {
+                let scope: store::McpApprovalScope = serde_json::from_value(scope.clone())?;
+                let current = call.name == "call_mcp"
+                    && super::mcp_approval::scope(ctx, &call.args)
+                        .is_ok_and(|value| value == scope)
+                    && store::mcp_approval_current(&app.db, &ctx.task.user, &scope).await?;
+                if !current {
+                    store::finish_action(&app.db, ctx.task, &pending.id, "The MCP connection changed. Ask for a new approval before executing this call.", false).await?;
+                    return store::current(&app.db, ctx.task).await;
+                }
+            }
             (execute_approved(ctx, call).await, true)
         }
     };

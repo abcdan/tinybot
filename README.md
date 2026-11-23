@@ -186,11 +186,19 @@ Run `docker compose --profile stdio up -d --build` and tell TinyBot to connect
 configuration. It runs offline by default. Servers that need external access
 should be deployed behind an HTTPS MCP endpoint.
 
-To delegate a connector read, configure its exact endpoint and tool names in
-the operator-owned JSON read policy. The default policy is empty. Choose
-the tool and exact JSON arguments in the agent’s Sharing settings. The
-connector’s upstream credentials must be scoped to the data you intend to
-share. Tools outside the reviewed set require owner approval.
+TinyBot explains requested MCP calls in Telegram. Tap **Approve once**,
+**Always approve**, or **Deny**. Always approve applies to that exact tool on
+the current connection. Revoke it in **Settings & forms → Connectors**.
+Replacing or removing a connection clears its saved approvals.
+
+With your saved OpenRouter key, Jev can confirm that a call uses an
+operator-verified tool to read data. Writes and ambiguous calls require a
+decision unless you have explicitly remembered approval for that tool. The
+bundled Compose policy lists verified Docblock read tools. Add other reviewed
+endpoint and tool pairs to the JSON policy to allow smart approval for them.
+To delegate a connector read to a shared helper, choose the verified tool
+and exact JSON arguments in the helper’s Sharing settings. Scope the connector’s
+upstream credentials to the data you intend to share.
 
 ## Chief and helpers
 

@@ -17,6 +17,7 @@ mod audit_log;
 mod browser_settings;
 #[cfg(unix)]
 mod browsing;
+mod mcp_approvals;
 mod model_settings;
 
 async fn fixture() -> SqlitePool {

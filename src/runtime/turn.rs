@@ -1,6 +1,7 @@
 use super::execution::{finish, resume_approval};
 use super::feedback::Feedback;
 use super::lookup::{self, Lookup};
+use super::mcp_approval;
 use super::review::{Verdict, review};
 use super::suggestions::valid_suggestions;
 use super::{
@@ -288,11 +289,40 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                     continue;
                 }
                 repeated_lookup = false;
+                let mcp = if name == "call_mcp" && ctx.owner {
+                    let scope = mcp_approval::scope(&ctx, &args)?;
+                    if store::mcp_denied_in_turn(&app.db, task, &scope, &args["arguments"]).await? {
+                        audit::record(
+                            "tool",
+                            tool.name(),
+                            "rejected",
+                            json!({"category":"user_denied"}),
+                        )
+                        .await;
+                        store::append(
+                            &app.db,
+                            &task.id,
+                            "tool",
+                            "The user denied this MCP call. Do not retry it in this turn.",
+                        )
+                        .await?;
+                        continue;
+                    }
+                    Some(scope)
+                } else {
+                    None
+                };
+                let request = latest_request
+                    .as_ref()
+                    .map_or("", |(_, text, _)| text.as_str());
                 let mut requires_confirmation = intent.risk == Risk::Write;
                 if intent.risk != Risk::Local {
-                    let review = review(&ctx, &intent)
-                        .await
-                        .context("decision model did not provide a valid review")?;
+                    let review = if mcp.is_some() {
+                        mcp_approval::review_call(&ctx, &intent, &args, request).await
+                    } else {
+                        review(&ctx, &intent).await
+                    }
+                    .context("decision model did not provide a valid review")?;
                     if !store::current(&app.db, task).await? {
                         return store::settle(&app.db, task, "idle", None).await;
                     }
@@ -320,6 +350,34 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                 if requires_confirmation {
                     ensure!(owner, "shared-agent members cannot approve this action");
                     let call = Call { name, args };
+                    if let Some(scope) = mcp {
+                        if !ctx.still_allows(tool.name()).await? {
+                            return store::settle(&app.db, task, "idle", None).await;
+                        }
+                        tool.inspect(&ctx, &call.args).await?;
+                        let action = id();
+                        if store::start_remembered_mcp(&app.db, task, &action, &scope).await? {
+                            audit::record(
+                                "approval",
+                                "mcp_call",
+                                "remembered",
+                                json!({"tool":scope.tool}),
+                            )
+                            .await;
+                            audit::tool_started(tool.name(), &call.args).await;
+                            let result = tool.execute(&ctx, call.args).await;
+                            audit::tool_finished(tool.name(), &result).await;
+                            let uncertain = result.is_err();
+                            finish(&ctx, &action, result, uncertain).await?;
+                            if uncertain {
+                                return Ok(());
+                            }
+                            continue;
+                        }
+                        mcp_approval::pause(&ctx, &*model, &intent, call, &scope, request).await?;
+                        audit::record("tool", tool.name(), "waiting_approval", Value::Null).await;
+                        return Ok(());
+                    }
                     let payload = json!({"call":call,"destination":intent.destination,"operation":intent.detail});
                     store::pause(
                         &app.db,

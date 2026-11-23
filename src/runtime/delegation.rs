@@ -177,9 +177,16 @@ pub(super) async fn delegate(ctx: &ToolContext<'_>, args: &Value) -> Result<Valu
                         }));
                     }
                 };
-                if intent.risk != Risk::Local
-                    && review(&worker, &intent).await?.verdict != Verdict::Allow
-                {
+                let verdict = if intent.risk == Risk::Local {
+                    Verdict::Allow
+                } else if tool.name() == "call_mcp" {
+                    super::mcp_approval::review_call(&worker, &intent, &args, &brief)
+                        .await?
+                        .verdict
+                } else {
+                    review(&worker, &intent).await?.verdict
+                };
+                if verdict != Verdict::Allow {
                     audit::record(
                         "tool",
                         tool.name(),
