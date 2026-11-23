@@ -11,6 +11,7 @@ use sqlx::sqlite::SqlitePoolOptions;
 use std::collections::BTreeMap;
 use tokio::sync::Notify;
 
+mod audit_log;
 #[cfg(unix)]
 mod browsing;
 mod model_settings;
