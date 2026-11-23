@@ -16,11 +16,13 @@ services:
       TELEGRAM_OPERATOR_ID: ${TELEGRAM_OPERATOR_ID:?Set TELEGRAM_OPERATOR_ID in .env}
       TINYBOT_REVIEW_MODEL: ${TINYBOT_REVIEW_MODEL:-}
       TINYBOT_REVIEW_OPENROUTER_KEY: ${TINYBOT_REVIEW_OPENROUTER_KEY:-}
+      TINYBOT_BROWSER_PROXY_DEPLOYED: ${TINYBOT_BROWSER_PROXY:+1}
       TINYBOT_BRAVE_SEARCH_KEY: ${TINYBOT_BRAVE_SEARCH_KEY:-}
       TINYBOT_TIMEZONE: ${TINYBOT_TIMEZONE:-UTC}
       TINYBOT_MCP_READ_POLICY_FILE: /etc/tinybot/mcp-reads.json
     volumes:
       - app_data:/data
+      - browser_proxy:/browser-proxy
       - browser_socket:/browser:ro
       - sandbox_socket:/sandbox:ro
       - stdio_socket:/mcp-stdio:ro
@@ -65,6 +67,8 @@ services:
       target: egress
     environment:
       TINYBOT_BROWSER_PROXY: ${TINYBOT_BROWSER_PROXY:-}
+    volumes:
+      - browser_proxy:/browser-proxy:ro
     mem_limit: 128m
     pids_limit: 96
     networks: [browser_internal, browser_public]
