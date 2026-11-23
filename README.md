@@ -3,8 +3,9 @@
 TinyBot is a self-hosted Rust agent for Telegram. Each invited user has a Chief
 that can delegate to helpers, resume tasks, connect MCP tools, browse public
 websites, and run offline Python on task files. Telegram messages steer the
-current task. The Telegram widget lists tasks, requests, and schedules right
-in the chat. Settings & forms opens the Mini App for account setup, full
+current task. The Chief can send standalone Telegram widgets, and the
+Telegram panel lists tasks, requests, and schedules right in the chat.
+`/settings` opens the Mini App for account setup, full
 approval details, and private form inputs.
 
 ## Deploy
@@ -28,7 +29,7 @@ docker compose ps
 The TinyBot container runs as UID 1000. Make both mounted secret files
 readable by that UID, without granting access to other untrusted host users.
 Open the bot in a private chat with `/start`. Use `/panel` to reopen the
-widget, and tap Settings & forms to open the Mini App. Use `/invite` to invite
+widget or `/settings` to open the Mini App. Use `/invite` to invite
 another user, or create a read-only invitation from an agent’s Sharing settings.
 
 ### Dokploy
