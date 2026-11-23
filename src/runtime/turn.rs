@@ -1,5 +1,4 @@
-use super::delegation::delegate;
-use super::execution::{execute_approved, finish};
+use super::execution::{finish, resume_approval};
 use super::feedback::Feedback;
 use super::lookup::{self, Lookup};
 use super::review::{Verdict, review};
@@ -47,44 +46,8 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
         connectors,
         allowed_tools,
     };
-    let mut waiting = store::claim_approval(&app.db, task).await?;
-    if let Some(pending) = waiting.take() {
-        let payload: Value = serde_json::from_str(&pending.payload)?;
-        let (result, announce) = match pending.kind.as_str() {
-            "form-submit" => {
-                audit::record("tool", "form_submission", "approved", Value::Null).await;
-                audit::tool_started("form_submission", &Value::Null).await;
-                let result = async {
-                    ensure!(
-                        ctx.still_allows("request_form").await?,
-                        "task or authorization changed"
-                    );
-                    let values = app.forms.submission(&pending.id).await?;
-                    app.workers.browser("submit", &values).await
-                }
-                .await;
-                let result = result.map(Outcome::Continue);
-                audit::tool_finished("form_submission", &result).await;
-                (result, true)
-            }
-            "agent-spec" => {
-                audit::record("tool", "propose_agent", "approved", Value::Null).await;
-                (
-                    Ok(Outcome::Continue(json!({"agent_saved":payload["name"]}))),
-                    false,
-                )
-            }
-            "chief-delegate" => (delegate(&ctx, &payload).await.map(Outcome::Continue), false),
-            _ => {
-                let call: Call = serde_json::from_value(payload["call"].clone())?;
-                audit::record("approval", "external_action", "approved", Value::Null).await;
-                (execute_approved(&ctx, call).await, true)
-            }
-        };
-        finish(&ctx, &pending.id, result, announce).await?;
-        if !store::current(&app.db, task).await? {
-            return store::settle(&app.db, task, "idle", None).await;
-        }
+    if !resume_approval(&ctx).await? {
+        return store::settle(&app.db, task, "idle", None).await;
     }
     let memory: Vec<String> = if let Some(agent) = &agent {
         sqlx::query_scalar(
