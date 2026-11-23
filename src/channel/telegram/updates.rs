@@ -1,6 +1,6 @@
 use super::Telegram;
 use crate::{
-    channel::{Inbound, callback, voice, widget},
+    channel::{Inbound, attachment, callback, voice, widget},
     security::clip,
     store,
 };
@@ -63,6 +63,10 @@ struct Message {
     chat: Chat,
     from: Option<User>,
     text: Option<String>,
+    caption: Option<String>,
+    #[serde(default)]
+    photo: Vec<attachment::Photo>,
+    document: Option<attachment::Document>,
     voice: Option<voice::Note>,
     reply_to_message: Option<RepliedMessage>,
     quote: Option<TextQuote>,
@@ -166,6 +170,16 @@ impl Telegram {
                         note,
                         reply,
                     )));
+                }
+                if let Some(source) = attachment::Source::select(message.photo, message.document) {
+                    return Some(Inbound::Attachment(attachment::Received {
+                        external_id: update.update_id,
+                        user: user.id.to_string(),
+                        message_id: message.message_id,
+                        input: message.caption.unwrap_or_default(),
+                        source,
+                        reply,
+                    }));
                 }
                 Some(Inbound::Message {
                     external_id: update.update_id,

@@ -1,4 +1,4 @@
-use super::{Card, ChannelAdapter, Inbound, MessageDelivery, callback, voice, widget};
+use super::{Card, ChannelAdapter, Inbound, MessageDelivery, attachment, callback, voice, widget};
 use crate::{forms, security::now, store};
 use anyhow::Result;
 use sqlx::SqlitePool;
@@ -47,6 +47,9 @@ pub async fn listen(
                     }
                     Inbound::Voice(received) => {
                         voice::handle(&app, &operator, &*adapter, &received).await?;
+                    }
+                    Inbound::Attachment(received) => {
+                        attachment::handle(&app, &operator, &*adapter, received).await?;
                     }
                     Inbound::Widget(query) => {
                         let data = widget::answer(db, &query).await;

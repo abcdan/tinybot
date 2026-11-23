@@ -1,3 +1,4 @@
+use super::attachments::{self, SealedAttachment};
 use crate::{
     audit::{self, ModelCall},
     security::{clip, hash, id, now, token},
@@ -23,6 +24,7 @@ struct TelegramInput<'a> {
     literal: bool,
     reaction: bool,
     transcription: Option<(&'a ModelCall, u64)>,
+    attachment: Option<SealedAttachment>,
 }
 
 pub async fn latest_reply_context(db: &SqlitePool, task: &str) -> Result<Option<ReplyContext>> {
@@ -57,6 +59,7 @@ pub async fn ingest(
     .await
 }
 
+#[cfg(test)]
 pub async fn ingest_telegram(
     db: &SqlitePool,
     operator: &str,
@@ -115,6 +118,34 @@ pub async fn ingest_telegram_voice(
             reply,
             literal: true,
             transcription,
+            ..TelegramInput::default()
+        },
+    )
+    .await
+}
+
+pub(crate) async fn ingest_telegram_attachment(
+    db: &SqlitePool,
+    operator: &str,
+    external_id: i64,
+    user: &str,
+    input: &str,
+    message_id: i64,
+    reply: Option<ReplyContext>,
+    attachment: SealedAttachment,
+) -> Result<()> {
+    ingest_message(
+        db,
+        operator,
+        "telegram",
+        external_id,
+        user,
+        input,
+        TelegramInput {
+            message_id: Some(message_id),
+            reply,
+            literal: true,
+            attachment: Some(attachment),
             ..TelegramInput::default()
         },
     )
@@ -370,9 +401,21 @@ async fn ingest_message(
                 .bind("This task is unavailable. Use /new to start another task.")
                 .execute(&mut *tx)
                 .await?;
-        } else if let Some((usage, duration_ms)) = telegram.transcription {
-            audit::ingress_model_call(&mut tx, &task, "voice_transcription", usage, duration_ms)
+        } else {
+            if let Some((usage, duration_ms)) = telegram.transcription {
+                audit::ingress_model_call(
+                    &mut tx,
+                    &task,
+                    "voice_transcription",
+                    usage,
+                    duration_ms,
+                )
                 .await?;
+            }
+            if let (Some(message_id), Some(attachment)) = (telegram.message_id, telegram.attachment)
+            {
+                attachments::save(&mut tx, &task, message_id, attachment).await?;
+            }
         }
     }
     tx.commit().await?;

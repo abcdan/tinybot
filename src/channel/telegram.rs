@@ -1,7 +1,7 @@
 mod api;
 mod updates;
 
-use super::{Card, ChannelAdapter, Inbound, MessageDelivery, formatting, voice};
+use super::{Card, ChannelAdapter, Inbound, MessageDelivery, formatting, media};
 use crate::{forms::WidgetChoice, security::clip, store};
 use anyhow::{Context, Result, ensure};
 pub(super) use api::suggested_keyboard;
@@ -55,8 +55,8 @@ impl ChannelAdapter for Telegram {
         Ok(retry.map(|delay| delay.as_secs() as i64))
     }
 
-    async fn download_voice(&self, file_id: &str) -> Result<Vec<u8>> {
-        voice::download(self, file_id).await
+    async fn download_file(&self, file_id: &str, limit: usize) -> Result<Vec<u8>> {
+        media::download(self, file_id, limit).await
     }
 
     async fn receive(&self, offset: i64) -> Result<(Vec<Inbound>, i64)> {

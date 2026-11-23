@@ -1,3 +1,4 @@
+pub mod attachments;
 mod ingress;
 pub mod memory;
 mod queue;
@@ -5,10 +6,12 @@ mod reactions;
 mod replies;
 mod requests;
 
+#[cfg(test)]
+pub use ingress::ingest_telegram;
+pub(crate) use ingress::ingest_telegram_attachment;
 pub use ingress::ingest_telegram_voice;
 pub use ingress::{
-    ReplyContext, ingest, ingest_telegram, ingest_telegram_reaction, ingest_telegram_reply,
-    latest_reply_context,
+    ReplyContext, ingest, ingest_telegram_reaction, ingest_telegram_reply, latest_reply_context,
 };
 pub use queue::{
     append, claim, compact, compaction_batch, current, expire, has_access, history, list_tasks,
