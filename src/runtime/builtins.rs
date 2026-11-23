@@ -1,4 +1,4 @@
-use super::{Intent, Outcome, Risk, Tool, ToolContext, effects, string};
+use super::{Intent, MAX_HANDOFF_CHARS, Outcome, Risk, Tool, ToolContext, effects, string};
 use crate::{mcp, net, schedules, security::now};
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
@@ -96,7 +96,7 @@ impl Tool for Builtin {
             }
             Self::SetGoal => "Record the current task goal. Args: text.",
             Self::Delegate => {
-                "Ask another agent to carry out a self-contained brief and return findings to you. Choose a matching saved agent by ID when available. Include a handoff: one short first-person message in the user's language saying what you're asking the helper and that you'll follow up. Include the helper's name if you selected one."
+                "Ask another agent to carry out a self-contained brief and return findings to you. Choose a matching saved agent by ID when available. Write the handoff as one short, casual sentence in the user's language saying who will do what. Name the selected helper. Speak as yourself or make the helper the subject. Skip the detailed plan and any promise to report back. In Dutch, for example, 'Ik ga het via de research bot opzoeken' or 'Research gaat de vacatures uitzoeken'."
             }
             Self::Discover => "Find official remote MCP endpoints. Args: name.",
             Self::Connect => {
@@ -156,7 +156,7 @@ impl Tool for Builtin {
             Self::RecallMemory => (json!({"query":text,"agent":text}), &["query"]),
             Self::SetGoal => (json!({"text":text}), &["text"]),
             Self::Delegate => (
-                json!({"brief":text,"agent":text,"handoff":{"type":"string","maxLength":180}}),
+                json!({"brief":text,"agent":text,"handoff":{"type":"string","maxLength":MAX_HANDOFF_CHARS}}),
                 &["brief"],
             ),
             Self::Discover => (json!({"name":text}), &["name"]),
