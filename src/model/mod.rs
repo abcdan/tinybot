@@ -1,5 +1,8 @@
 mod codex;
+mod connections;
 mod openrouter;
+
+pub use connections::OpenRouterSettingsError;
 
 use self::{codex::Codex, openrouter::OpenRouter};
 use crate::{
@@ -111,24 +114,11 @@ impl Models {
     }
 
     async fn configured_openrouter_key(&self, user: &str) -> Result<Option<String>> {
-        let (auxiliary, task): (Option<String>, Option<String>) = sqlx::query_as(
-            "SELECT openrouter_key,
-            CASE WHEN provider='openrouter' THEN credential END FROM users WHERE id=?",
-        )
-        .bind(user)
-        .fetch_one(&self.db)
-        .await?;
-        if let Some(key) = auxiliary {
-            return Ok(Some(String::from_utf8(
-                self.vault.open(&format!("openrouter:{user}"), &key)?,
-            )?));
-        }
-        if let Some(key) = task {
-            return Ok(Some(String::from_utf8(
-                self.vault.open(&format!("model:{user}"), &key)?,
-            )?));
-        }
-        Ok(self.review_key.clone())
+        Ok(self
+            .user_openrouter_key(user)
+            .await?
+            .map(|key| key.plaintext)
+            .or_else(|| self.review_key.clone()))
     }
 
     async fn openrouter_key(&self, user: &str) -> Result<String> {
@@ -205,22 +195,28 @@ impl Models {
         }
         let _refresh = self.refresh.lock().await;
         let (kind, model, credential): (Option<String>, Option<String>, Option<String>) =
-            sqlx::query_as("SELECT provider,model,credential FROM users WHERE id=?")
-                .bind(user)
-                .fetch_one(&self.db)
-                .await?;
+            sqlx::query_as(
+                "SELECT provider,model,COALESCE(codex_credential,credential) FROM users WHERE id=?",
+            )
+            .bind(user)
+            .fetch_one(&self.db)
+            .await?;
         let kind = kind.context("Choose a provider in the Mini App first.")?;
         let model = model.context("Choose a model in the Mini App first.")?;
-        let binding = format!("model:{user}");
-        let credential = credential.context("model credential missing")?;
-        let secret = self.vault.open(&binding, &credential)?;
         if kind == "openrouter" {
+            let key = self
+                .user_openrouter_key(user)
+                .await?
+                .context(OpenRouterSettingsError::MissingKey)?;
             return Ok(Arc::new(OpenRouter {
-                key: String::from_utf8(secret)?,
+                key: key.plaintext,
                 model,
             }));
         }
         ensure!(kind == "codex", "unknown model provider");
+        let binding = format!("model:{user}");
+        let credential = credential.context("model credential missing")?;
+        let secret = self.vault.open(&binding, &credential)?;
         let mut profile: Profile = serde_json::from_slice(&secret)?;
         if profile.expires <= now() + 90 {
             profile
@@ -229,11 +225,13 @@ impl Models {
                 .context("Reconnect ChatGPT in the Mini App.")?;
             let enc = self.vault.seal(&binding, &serde_json::to_vec(&profile)?)?;
             sqlx::query(
-                "UPDATE users SET credential=? WHERE id=? AND provider='codex' AND credential=?",
+                "UPDATE users SET codex_credential=?, codex_model=COALESCE(codex_model,model), credential=NULL
+                 WHERE id=? AND (codex_credential=? OR (codex_credential IS NULL AND provider='codex' AND credential=?))",
             )
             .bind(enc)
             .bind(user)
-            .bind(credential)
+            .bind(&credential)
+            .bind(&credential)
             .execute(&self.db)
             .await?;
         }
