@@ -16,6 +16,26 @@ use tokio::sync::Mutex;
 
 pub type TextDelta<'a> = dyn FnMut(&str) + Send + 'a;
 
+pub struct ToolDefinition {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub input_schema: Value,
+}
+
+fn native_tool_proposal(tools: &[ToolDefinition], name: &str, args: Value) -> Result<String> {
+    ensure!(
+        tools.iter().any(|tool| tool.name == name),
+        "unavailable native tool"
+    );
+    ensure!(args.is_object(), "invalid native tool arguments");
+    let args = serde_json::to_string(&args)?;
+    ensure!(args.len() < 30_000, "oversized native tool arguments");
+    Ok(format!(
+        r#"{{"kind":"tool","name":{},"args":{args}}}"#,
+        serde_json::to_string(name)?
+    ))
+}
+
 #[async_trait]
 pub trait ModelProvider: Send + Sync {
     async fn complete(&self, system: &str, input: &str) -> Result<String>;
@@ -27,6 +47,19 @@ pub trait ModelProvider: Send + Sync {
         _delta: &mut TextDelta<'_>,
     ) -> Result<String> {
         self.complete(system, input).await
+    }
+
+    async fn complete_turn(
+        &self,
+        system: &str,
+        input: &str,
+        _tools: &[ToolDefinition],
+        delta: Option<&mut TextDelta<'_>>,
+    ) -> Result<String> {
+        match delta {
+            Some(delta) => self.complete_streaming(system, input, delta).await,
+            None => self.complete(system, input).await,
+        }
     }
 }
 
@@ -94,18 +127,25 @@ impl Models {
         )
     }
 
+    pub async fn mercury(&self, user: &str) -> Result<Option<Arc<dyn ModelProvider>>> {
+        let Some(key) = self.configured_openrouter_key(user).await? else {
+            return Ok(None);
+        };
+        Ok(Some(Arc::new(OpenRouter {
+            key,
+            model: "inception/mercury-3".into(),
+        })))
+    }
+
     pub async fn forms(&self, user: &str) -> Result<Arc<dyn ModelProvider>> {
         #[cfg(test)]
         if let Some(model) = &self.fixture {
             return Ok(model.clone());
         }
-        let Some(key) = self.configured_openrouter_key(user).await? else {
-            return self.provider(user, false).await;
-        };
-        Ok(Arc::new(OpenRouter {
-            key,
-            model: "inception/mercury-3".into(),
-        }))
+        match self.mercury(user).await? {
+            Some(mercury) => Ok(mercury),
+            None => self.provider(user, false).await,
+        }
     }
 
     pub async fn decisions(&self, user: &str, input: &Value) -> Result<Option<Value>> {

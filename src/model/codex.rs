@@ -1,4 +1,4 @@
-use super::{ModelProvider, TextDelta};
+use super::{ModelProvider, TextDelta, ToolDefinition, native_tool_proposal};
 use anyhow::{Context, Result, anyhow, ensure};
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -17,7 +17,7 @@ pub(super) struct Codex {
 #[async_trait]
 impl ModelProvider for Codex {
     async fn complete(&self, system: &str, input: &str) -> Result<String> {
-        tokio::time::timeout(Duration::from_secs(100), self.run(system, input, None)).await?
+        self.complete_turn(system, input, &[], None).await
     }
 
     async fn complete_streaming(
@@ -26,9 +26,19 @@ impl ModelProvider for Codex {
         input: &str,
         delta: &mut TextDelta<'_>,
     ) -> Result<String> {
+        self.complete_turn(system, input, &[], Some(delta)).await
+    }
+
+    async fn complete_turn(
+        &self,
+        system: &str,
+        input: &str,
+        tools: &[ToolDefinition],
+        delta: Option<&mut TextDelta<'_>>,
+    ) -> Result<String> {
         tokio::time::timeout(
             Duration::from_secs(100),
-            self.run(system, input, Some(delta)),
+            self.run(system, input, tools, delta),
         )
         .await?
     }
@@ -39,6 +49,7 @@ impl Codex {
         &self,
         system: &str,
         input: &str,
+        tools: &[ToolDefinition],
         mut delta: Option<&mut TextDelta<'_>>,
     ) -> Result<String> {
         let mut command = Command::new(&self.binary);
@@ -97,7 +108,18 @@ impl Codex {
         rpc(&mut child, json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"tinybot","title":"TinyBot","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}})).await?;
         wait_result(&mut lines, 1).await?;
         rpc(&mut child, json!({"method":"initialized"})).await?;
-        rpc(&mut child,json!({"id":2,"method":"thread/start","params":{"model":self.model,"ephemeral":true,"environments":[],"baseInstructions":system,"approvalPolicy":"never","sandbox":"read-only"}})).await?;
+        let mut thread_params = json!({
+            "model":self.model,"ephemeral":true,"environments":[],"baseInstructions":system,
+            "approvalPolicy":"never","sandbox":"read-only"
+        });
+        if !tools.is_empty() {
+            thread_params["dynamicTools"] = dynamic_tools(tools);
+        }
+        rpc(
+            &mut child,
+            json!({"id":2,"method":"thread/start","params":thread_params}),
+        )
+        .await?;
         let thread = wait_result(&mut lines, 2).await?;
         let thread = thread["thread"]["id"]
             .as_str()
@@ -105,15 +127,27 @@ impl Codex {
         rpc(&mut child,json!({"id":3,"method":"turn/start","params":{"threadId":thread,"environments":[],"input":[{"type":"text","text":input}]}})).await?;
         let mut result = String::new();
         let mut preview = AnswerItem::default();
+        let mut turn_id = None;
         while let Some(line) = lines.next_line().await? {
             let value: Value = serde_json::from_str(&line)?;
-            if value.get("method").is_some() && value.get("id").is_some() {
-                rpc(&mut child,json!({"id":value["id"],"error":{"code":-32601,"message":"Native tools are disabled in TinyBot"}})).await?;
+            if value.get("id").is_some() {
+                if value.get("method").is_some() {
+                    if value["method"] == "item/tool/call" && !tools.is_empty() {
+                        // This process only proposes calls. The broker executes them after this
+                        // ephemeral turn ends and supplies the result in the next turn's history.
+                        return dynamic_tool_call(
+                            tools,
+                            thread,
+                            turn_id.as_deref(),
+                            &value["params"],
+                        );
+                    }
+                    rpc(&mut child,json!({"id":value["id"],"error":{"code":-32601,"message":"This Codex tool is unavailable in TinyBot"}})).await?;
+                } else if value["id"] == 3 {
+                    ensure!(value.get("error").is_none(), "Codex rejected the turn");
+                    turn_id = value["result"]["turn"]["id"].as_str().map(str::to_owned);
+                }
             }
-            ensure!(
-                value["id"] != 3 || value.get("error").is_none(),
-                "Codex rejected the turn"
-            );
             if let Some(delta) = delta.as_deref_mut()
                 && let Some(text) = preview.update(thread, &value)
             {
@@ -142,6 +176,40 @@ impl Codex {
             "Codex App Server stopped before completing the turn"
         ))
     }
+}
+
+fn dynamic_tools(tools: &[ToolDefinition]) -> Value {
+    Value::Array(
+        tools
+            .iter()
+            .map(|tool| {
+                json!({
+                    "type":"function",
+                    "name":tool.name,
+                    "description":tool.description,
+                    "inputSchema":tool.input_schema
+                })
+            })
+            .collect(),
+    )
+}
+
+fn dynamic_tool_call(
+    tools: &[ToolDefinition],
+    thread: &str,
+    turn: Option<&str>,
+    params: &Value,
+) -> Result<String> {
+    ensure!(
+        params["threadId"] == thread
+            && params["turnId"].as_str().is_some()
+            && turn.is_none_or(|id| params["turnId"] == id)
+            && params["callId"].as_str().is_some_and(|id| !id.is_empty())
+            && params["namespace"].is_null(),
+        "unexpected Codex tool request"
+    );
+    let name = params["tool"].as_str().context("missing Codex tool name")?;
+    native_tool_proposal(tools, name, params["arguments"].clone())
 }
 
 #[derive(Default)]
