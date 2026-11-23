@@ -79,6 +79,7 @@ pub struct Call {
 #[derive(Clone, PartialEq)]
 pub enum Risk {
     Local,
+    PublicRead,
     Read,
     Write,
 }

@@ -22,6 +22,12 @@ pub(super) enum Verdict {
 }
 
 pub(super) async fn review(ctx: &ToolContext<'_>, intent: &Intent) -> Result<ActionReview> {
+    if intent.risk == Risk::PublicRead {
+        return Ok(ActionReview {
+            verdict: Verdict::Allow,
+            reason: "This tool reads public web content within fixed network limits.".into(),
+        });
+    }
     let state = json!({"operation":intent.detail,"destination":intent.destination,
         "external_write":intent.risk==Risk::Write,"member_of_shared_agent":!ctx.owner});
     let result: ActionReview =
