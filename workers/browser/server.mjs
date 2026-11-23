@@ -13,13 +13,33 @@ export function allowsRead(method, resource, render) {
         (resource === 'document' || (render && readResources.has(resource)));
 }
 
-export async function visit(page, url, waitUntil = 'domcontentloaded') {
-    const response = await page.goto(url.href, {waitUntil});
+export function readableUrl(value) {
+    requireInput(typeof value === 'string' && value.length <= 2048, 'Expected a public HTTPS URL.');
+    const fragmentStart = value.indexOf('#');
+    if (fragmentStart === -1) return publicUrl(value);
+    const url = publicUrl(value.slice(0, fragmentStart));
+    url.hash = value.slice(fragmentStart);
+    return url;
+}
+
+export async function visit(page, url, {waitUntil = 'domcontentloaded', validate = publicUrl} = {}) {
+    let response;
+    try {
+        response = await page.goto(url.href, {waitUntil});
+    } catch (error) {
+        if (error instanceof errors.TimeoutError) {
+            throw new InputError('The website took too long to respond.');
+        }
+        if (/\bnet::ERR_(?:TUNNEL_CONNECTION_FAILED|CONNECTION_(?:REFUSED|RESET)|CERT_[A-Z_]+|SSL_PROTOCOL_ERROR)\b/.test(error.message)) {
+            throw new InputError('The browser could not establish an HTTPS connection to the website.');
+        }
+        throw error;
+    }
     requireInput(response, 'The website did not return an HTTPS response.');
     requireInput(response.headers()['cf-mitigated'] !== 'challenge',
         'Cloudflare requires verification before this website can be read.');
     requireInput(response.ok(), `The website returned HTTP ${response.status()}.`);
-    return publicUrl(page.url());
+    return validate(page.url());
 }
 
 export function indexedUrl(raw, host) {
@@ -81,7 +101,7 @@ async function operate(browser, route, data) {
         await context.route('**/*', async intercepted => {
             const request = intercepted.request();
             let url;
-            try { url = publicUrl(request.url()); }
+            try { url = render ? readableUrl(request.url()) : publicUrl(request.url()); }
             catch { await intercepted.abort(); return; }
             if (permit) {
                 if (!posted && request.method() === 'POST' && request.isNavigationRequest() && url.href === permit) {
@@ -101,7 +121,7 @@ async function operate(browser, route, data) {
         });
         if (route === '/search') return await search(page, data.query);
         if (route === '/browse') {
-            await visit(page, publicUrl(data.url), 'commit');
+            await visit(page, readableUrl(data.url), {waitUntil: 'commit', validate: readableUrl});
             await page.waitForLoadState('domcontentloaded');
             try { await page.waitForLoadState('load', {timeout: 3000}); }
             catch (error) { if (!(error instanceof errors.TimeoutError)) throw error; }
@@ -113,7 +133,7 @@ async function operate(browser, route, data) {
                     .map(anchor => ({text: anchor.textContent.trim().slice(0, 90), url: anchor.href.slice(0, 500)}))
                     .filter(anchor => anchor.text && anchor.url.startsWith('https://')).slice(0, 16),
             }));
-            return {url: publicUrl(page.url()).href, ...content};
+            return {url: readableUrl(page.url()).href, ...content};
         }
         if (route === '/inspect') {
             const index = data.index ?? 0;
