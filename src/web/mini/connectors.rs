@@ -1,5 +1,5 @@
 use super::text;
-use crate::{App, mcp::Candidate};
+use crate::{App, mcp::Candidate, store};
 use anyhow::{Result, ensure};
 use serde_json::{Value, json};
 
@@ -57,6 +57,13 @@ pub(super) async fn disconnect(app: &App, user: &str, data: &Value) -> Result<()
         .bind(user)
         .execute(&app.db)
         .await?;
+    Ok(())
+}
+
+pub(super) async fn revoke_approval(app: &App, user: &str, data: &Value) -> Result<()> {
+    let connector = text(data, "connector", 64)?;
+    let tool = text(data, "tool", 128)?;
+    store::revoke_mcp_approval(&app.db, user, connector, tool).await?;
     Ok(())
 }
 

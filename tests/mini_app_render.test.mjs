@@ -22,6 +22,53 @@ async function mockMiniApp(context, respond, bridge) {
     });
 }
 
+test('MCP approvals show a plain explanation and can be revoked for the exact connector tool', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 360, height: 720}});
+        const page = await context.newPage();
+        const scope = {connector: 'notes', tool: 'search_and_read'};
+        const explanation = 'Search project notes for the latest release.';
+        const state = {
+            user: '1', provider: 'codex', tasks: [], mcp_approvals: [],
+            connectors: [{id: 'notes', name: 'Notes', endpoint: 'https://notes.example/mcp', auth: 'oauth'}],
+            requests: [{id: 'request-1', kind: 'approve', content: {
+                operation: 'MCP tool search_and_read', destination: 'https://notes.example',
+                explanation, mcp: true, rememberable: true
+            }}],
+        };
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return state;
+            if (action === 'always-approve-mcp') {
+                assert.deepEqual(data, {id: 'request-1'});
+                state.requests = [];
+                state.mcp_approvals = [scope];
+                return {ok: true};
+            }
+            if (action === 'revoke-mcp-approval') {
+                assert.deepEqual(data, scope);
+                state.mcp_approvals = [];
+                return {ok: true};
+            }
+            assert.fail(`Unexpected Mini App action ${action}`);
+        });
+        await page.goto('https://tinybot.test/');
+        await page.getByText(explanation, {exact: true}).waitFor();
+        assert.equal(await page.locator('#view pre').count(), 0);
+        assert.equal(await page.getByRole('button', {name: 'Approve once', exact: true}).count(), 1);
+        assert.equal(await page.getByRole('button', {name: 'Deny', exact: true}).count(), 1);
+        await page.getByRole('button', {name: 'Always approve', exact: true}).click();
+        await page.getByText('Approval saved for this tool.', {exact: true}).waitFor();
+        await page.getByRole('button', {name: 'Connectors', exact: true}).click();
+        await page.getByRole('heading', {name: 'Always approved tools', exact: true}).waitFor();
+        await page.getByRole('button', {name: 'Revoke approval for search_and_read', exact: true}).click();
+        await page.getByText('Approval revoked.', {exact: true}).waitFor();
+        assert.equal(await page.getByRole('heading', {name: 'Always approved tools', exact: true}).count(), 0);
+    } finally {
+        await browser.close();
+    }
+});
+
 test('a Telegram profile launch requests fullscreen after verification and can fall back to expansion', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
     try {

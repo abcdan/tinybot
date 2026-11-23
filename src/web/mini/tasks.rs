@@ -62,3 +62,13 @@ pub(super) async fn cancel_schedule(app: &App, user: &str, data: &Value) -> Resu
 pub(super) async fn respond(app: &App, user: &str, data: &Value, approve: bool) -> Result<()> {
     store::respond(&app.db, user, text(data, "id", 64)?, approve).await
 }
+
+pub(super) async fn always_approve_mcp(app: &App, user: &str, data: &Value) -> Result<()> {
+    store::respond_mcp(
+        &app.db,
+        user,
+        text(data, "id", 64)?,
+        store::McpApprovalDecision::Always,
+    )
+    .await
+}

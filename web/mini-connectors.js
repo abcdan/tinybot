@@ -28,6 +28,15 @@ export function connectors(state) {
     for (const connector of state.connectors) {
         const item = card(connector.name, connector.endpoint);
         item.append(node('p', connector.auth === 'pending' ? 'Authorization needed' : 'Connected using ' + connector.auth));
+        const approvals = (state.mcp_approvals || []).filter(approval => approval.connector === connector.id);
+        if (approvals.length) {
+            item.append(node('h4', 'Always approved tools'));
+            for (const {tool} of approvals) {
+                const revoke = action('Revoke approval', 'revoke-mcp-approval', {connector: connector.id, tool}, 'Approval revoked.', true);
+                revoke.setAttribute('aria-label', `Revoke approval for ${tool}`);
+                item.append(row(node('p', tool), revoke));
+            }
+        }
         const consent = node('div');
         const openConsent = async data => {
             const result = await api('mcp-oauth', {...data, id: connector.id});
