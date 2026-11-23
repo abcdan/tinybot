@@ -1,4 +1,8 @@
-use super::{ModelProvider, TextDelta, ToolDefinition, native_reply, native_tool_proposal};
+use super::{
+    AttachmentInput, AttachmentRead, ModelProvider, TextDelta, ToolDefinition,
+    media::{READ_ATTACHMENT, data_url, read_report},
+    native_reply, native_tool_proposal,
+};
 use crate::{
     audit::{self, ModelCall},
     net,
@@ -43,6 +47,21 @@ impl ModelProvider for OpenRouter {
         self.complete_turn(system, input, &[], None).await
     }
 
+    async fn read_attachment(
+        &self,
+        input: &str,
+        attachment: AttachmentInput<'_>,
+    ) -> Result<Option<AttachmentRead>> {
+        audit::provider_call("openrouter", &self.model, async |call| {
+            let request = attachment_request(&self.model, input, attachment);
+            let deadline = Instant::now() + Duration::from_secs(60);
+            let response = timeout_at(deadline, self.send(request)).await??;
+            let reply = read_buffered(response, &[], call, deadline).await?;
+            Ok(Some(read_report(&reply)?))
+        })
+        .await
+    }
+
     async fn complete_streaming(
         &self,
         system: &str,
@@ -65,17 +84,23 @@ impl ModelProvider for OpenRouter {
             let response = timeout_at(deadline, self.send(req)).await??;
             match delta {
                 Some(delta) => stream_response(response, tools, delta, call, deadline).await,
-                None => {
-                    let body =
-                        timeout_at(deadline, net::body(response, MAX_STREAM_BYTES)).await??;
-                    let reply: Value = serde_json::from_slice(&body)
-                        .context("invalid OpenRouter completion response")?;
-                    buffered_response(&reply, tools, call)
-                }
+                None => read_buffered(response, tools, call, deadline).await,
             }
         })
         .await
     }
+}
+
+async fn read_buffered(
+    response: reqwest::Response,
+    tools: &[ToolDefinition],
+    call: &mut ModelCall,
+    deadline: Instant,
+) -> Result<String> {
+    let body = timeout_at(deadline, net::body(response, MAX_STREAM_BYTES)).await??;
+    let reply: Value =
+        serde_json::from_slice(&body).context("invalid OpenRouter completion response")?;
+    buffered_response(&reply, tools, call)
 }
 
 fn buffered_response(
@@ -226,6 +251,21 @@ fn chat_request(
     body
 }
 
+fn attachment_request(model: &str, input: &str, attachment: AttachmentInput<'_>) -> Value {
+    let mut body = chat_request(model, READ_ATTACHMENT, input, &[], false);
+    let part = match attachment {
+        AttachmentInput::Image { mime, bytes } => {
+            json!({"type":"image_url","image_url":{"url":data_url(mime, bytes)}})
+        }
+        AttachmentInput::Pdf { name, bytes } => json!({"type":"file","file":{
+            "filename":name,"file_data":data_url("application/pdf", bytes)
+        }}),
+    };
+    body["messages"][1]["content"] = json!([{"type":"text","text":input}, part]);
+    body["max_tokens"] = json!(MAX_TOKENS);
+    body
+}
+
 #[derive(Default)]
 struct StreamCall {
     id: String,
@@ -346,6 +386,41 @@ mod tests {
         assert_eq!(auxiliary["usage"]["include"], true);
         assert!(auxiliary.get("tools").is_none());
         assert!(auxiliary.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn attachment_requests_use_native_parts_without_tools() {
+        let image = attachment_request(
+            "provider/model",
+            "Read the sign",
+            AttachmentInput::Image {
+                mime: "image/png",
+                bytes: b"fixture",
+            },
+        );
+        assert_eq!(image["messages"][1]["content"][0]["text"], "Read the sign");
+        assert_eq!(
+            image["messages"][1]["content"][1],
+            json!({
+                "type":"image_url","image_url":{"url":"data:image/png;base64,Zml4dHVyZQ=="}
+            })
+        );
+        assert!(image.get("tools").is_none());
+        let file = attachment_request(
+            "provider/model",
+            "Review this file",
+            AttachmentInput::Pdf {
+                name: "fixture.pdf",
+                bytes: b"fixture",
+            },
+        );
+        assert_eq!(
+            file["messages"][1]["content"][1],
+            json!({"type":"file","file":{
+                "filename":"fixture.pdf","file_data":"data:application/pdf;base64,Zml4dHVyZQ=="
+            }})
+        );
+        assert!(file.get("tools").is_none());
     }
 
     #[tokio::test]

@@ -73,6 +73,12 @@ existing account. TinyBot allows the configured operator and invited users.
   message prefixed with `Voice message:`, including when Codex is your active
   task model. TinyBot sends the audio to OpenRouter for transcription and
   keeps the transcript in task history.
+- **Photos and files** can be sent in a private chat with a question as the
+  caption. TinyBot accepts JPEG, PNG, WebP, PDF and UTF-8 text such as CSV or
+  Markdown up to 8 MB per file. Images require a vision-capable task model.
+  OpenRouter can read PDFs through its file input. With Codex, TinyBot extracts
+  text from up to the first 12 pages locally. Reply directly to an earlier
+  upload to use it again in the same task. Stored attachment bytes are encrypted.
 - **Codex** pairing uses a code from the Mini App. Run `tinybot codex connect
   https://your-domain` on a computer with a browser. Build the local command
   with `cargo build --locked --release` and use the binary in the build output.

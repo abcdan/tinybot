@@ -10,7 +10,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 
 FROM node:24-bookworm-slim AS core
 ARG CODEX_VERSION=0.171.0
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates poppler-utils \
     && rm -rf /var/lib/apt/lists/* \
     && npm install --global --omit=dev "@openai/codex@${CODEX_VERSION}" \
     && mkdir -p /data /browser /sandbox /mcp-stdio \

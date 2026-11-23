@@ -1,4 +1,8 @@
-use super::{ModelProvider, TextDelta, ToolDefinition, native_reply, native_tool_proposal};
+use super::{
+    AttachmentInput, AttachmentRead, ModelProvider, TextDelta, ToolDefinition,
+    media::{READ_ATTACHMENT, data_url, read_pdf_text, read_report},
+    native_reply, native_tool_proposal,
+};
 use crate::audit::{self, ModelCall};
 use anyhow::{Context, Result, anyhow, ensure};
 use async_trait::async_trait;
@@ -21,6 +25,27 @@ impl ModelProvider for Codex {
         self.complete_turn(system, input, &[], None).await
     }
 
+    async fn read_attachment(
+        &self,
+        input: &str,
+        attachment: AttachmentInput<'_>,
+    ) -> Result<Option<AttachmentRead>> {
+        let url = match attachment {
+            AttachmentInput::Image { mime, bytes } => data_url(mime, bytes),
+            AttachmentInput::Pdf { bytes, .. } => return Ok(Some(read_pdf_text(bytes).await?)),
+        };
+        audit::provider_call("codex", &self.model, async |call| {
+            let input = turn_input(input, Some(url));
+            let reply = tokio::time::timeout(
+                Duration::from_secs(60),
+                self.run(READ_ATTACHMENT, input, &[], None, call),
+            )
+            .await??;
+            Ok(Some(read_report(&reply)?))
+        })
+        .await
+    }
+
     async fn complete_streaming(
         &self,
         system: &str,
@@ -40,7 +65,7 @@ impl ModelProvider for Codex {
         audit::provider_call("codex", &self.model, async |call| {
             tokio::time::timeout(
                 Duration::from_secs(100),
-                self.run(system, input, tools, delta, call),
+                self.run(system, turn_input(input, None), tools, delta, call),
             )
             .await?
         })
@@ -52,7 +77,7 @@ impl Codex {
     async fn run(
         &self,
         system: &str,
-        input: &str,
+        input: Vec<Value>,
         tools: &[ToolDefinition],
         mut delta: Option<&mut TextDelta<'_>>,
         call: &mut ModelCall,
@@ -134,7 +159,7 @@ impl Codex {
         let thread = thread["thread"]["id"]
             .as_str()
             .context("Codex did not create a thread")?;
-        rpc(&mut child,json!({"id":3,"method":"turn/start","params":{"threadId":thread,"environments":[],"input":[{"type":"text","text":input}]}})).await?;
+        rpc(&mut child,json!({"id":3,"method":"turn/start","params":{"threadId":thread,"environments":[],"input":input}})).await?;
         let mut result = String::new();
         let mut preview = AnswerItem::default();
         let mut turn_id = None;
@@ -202,6 +227,14 @@ impl Codex {
             "Codex App Server stopped before completing the turn"
         ))
     }
+}
+
+fn turn_input(text: &str, image: Option<String>) -> Vec<Value> {
+    let mut input = vec![json!({"type":"text","text":text})];
+    if let Some(url) = image {
+        input.push(json!({"type":"image","url":url}));
+    }
+    input
 }
 
 fn observe_turn(call: &mut ModelCall, thread: &str, turn: Option<&str>, value: &Value) {
@@ -318,6 +351,17 @@ async fn wait_result(lines: &mut Lines<BufReader<ChildStdout>>, id: u64) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_turns_carry_images_as_inline_user_input() {
+        assert_eq!(
+            turn_input("Find the code", Some("data:image/png;base64,cG5n".into())),
+            vec![
+                json!({"type":"text","text":"Find the code"}),
+                json!({"type":"image","url":"data:image/png;base64,cG5n"}),
+            ]
+        );
+    }
 
     #[tokio::test]
     async fn codex_end_of_turn_usage_is_cumulative_and_keeps_cost_unknown() {

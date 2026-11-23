@@ -1,10 +1,12 @@
 mod codex;
 mod connections;
 mod decisions;
+mod media;
 mod openrouter;
 mod transcription;
 
 pub use connections::OpenRouterSettingsError;
+pub use media::{AttachmentInput, AttachmentRead};
 pub(crate) use transcription::MAX_VOICE_BYTES;
 
 use self::{codex::Codex, openrouter::OpenRouter};
@@ -15,7 +17,7 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
-use serde_json::{Value, json};
+use serde_json::Value;
 use sqlx::SqlitePool;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -55,6 +57,14 @@ fn native_reply(response: String) -> Result<String> {
 #[async_trait]
 pub trait ModelProvider: Send + Sync {
     async fn complete(&self, system: &str, input: &str) -> Result<String>;
+
+    async fn read_attachment(
+        &self,
+        _input: &str,
+        _attachment: AttachmentInput<'_>,
+    ) -> Result<Option<AttachmentRead>> {
+        Ok(None)
+    }
 
     async fn complete_streaming(
         &self,
@@ -242,6 +252,7 @@ pub fn parse_json_reply<T: DeserializeOwned>(response: &str) -> Result<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[tokio::test]
     async fn codex_can_generate_forms_without_an_openrouter_key() {
