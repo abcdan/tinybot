@@ -24,7 +24,7 @@ pub(super) async fn save(ctx: &ToolContext<'_>, args: &Value) -> Result<Value> {
     let text = string(args, "text", 1200)?;
     let helper = worker(ctx, args)?;
     let group = match args.get("scope") {
-        None => false,
+        None | Some(Value::Null) => false,
         Some(value) if value == "private" => false,
         Some(value) if value == "group" => true,
         _ => anyhow::bail!("choose private or group memory"),

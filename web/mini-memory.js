@@ -92,8 +92,10 @@ function memoryScope(scope, dates) {
 
 function memoryEntry(entry, dates, remove) {
     const item = card();
-    const date = dates.format(new Date(entry.created_at * 1000));
-    item.append(node('p', entry.body, 'memory-note'), node('p', date, 'meta'),
-        button('Delete memory', () => remove(entry.id), true));
+    item.append(node('p', entry.body, 'memory-note'));
+    if (entry.created_at > 0) {
+        item.append(node('p', dates.format(new Date(entry.created_at * 1000)), 'meta'));
+    }
+    item.append(button('Delete memory', () => remove(entry.id), true));
     return item;
 }

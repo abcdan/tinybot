@@ -19,6 +19,7 @@ pub(super) async fn list(app: &App, user: &str, data: &Value) -> Result<Value> {
     let (scope, agent) = selection(data)?;
     let before = data
         .get("before")
+        .filter(|value| !value.is_null())
         .map(|value| {
             value
                 .as_i64()

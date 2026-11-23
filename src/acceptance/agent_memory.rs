@@ -136,3 +136,86 @@ async fn chief_and_helper_use_durable_memory_tools_across_conversations() {
         "Librarian saved its label. Reports are due Thursdays."
     );
 }
+use super::signed_mini_init;
+use crate::web;
+#[tokio::test]
+async fn signed_memory_settings_are_scoped_to_the_owner() {
+    let db = super::fixture().await;
+    let app = Arc::new(super::app_with_model(&db, Arc::new(super::WidgetChief)));
+    sqlx::query("INSERT INTO agents VALUES('writer','1','Writer','Help write notes.','[]')")
+        .execute(&db)
+        .await
+        .unwrap();
+    let owner = signed_mini_init(&app, 1);
+    let guest = signed_mini_init(&app, 2);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/api/mini", listener.local_addr().unwrap());
+    let origin = app.origin.clone();
+    let server =
+        tokio::spawn(async move { axum::serve(listener, web::router(app)).await.unwrap() });
+    let client = reqwest::Client::new();
+    let post = |init: &str, action: &str, data: Value| {
+        client
+            .post(&endpoint)
+            .header("origin", &origin)
+            .json(&json!({"init":init,"action":action,"data":data}))
+            .send()
+    };
+
+    let helper = json!({"scope":"agent","agent":"writer","body":"Use plain words."});
+    assert_eq!(
+        post(&owner, "save-memory", helper.clone())
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert_eq!(
+        post(&guest, "save-memory", helper.clone())
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    let rows: Value = post(&owner, "list-memories", helper.clone())
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(rows["entries"][0]["scope"], "agent");
+    assert_eq!(rows["entries"][0]["body"], "Use plain words.");
+    let id = rows["entries"][0]["id"].as_str().unwrap();
+    let foreign: Value = post(&guest, "list-memories", helper.clone())
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(foreign["entries"], json!([]));
+    post(&guest, "delete-memory", json!({"id":id}))
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let unchanged: Value = post(&owner, "list-memories", helper.clone())
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(unchanged["entries"], rows["entries"]);
+    post(&owner, "delete-memory", json!({"id":id}))
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let cleared: Value = post(&owner, "list-memories", helper)
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(cleared["entries"], json!([]));
+    server.abort();
+}
