@@ -1,7 +1,10 @@
 use super::review::{Verdict, review};
-use super::{ENGINE, Outcome, Risk, Step, ToolContext, connector_context, descriptions, string};
+use super::{
+    ENGINE, Outcome, Risk, Step, ToolContext, connector_context, descriptions, string,
+    tool_definitions,
+};
 use crate::{
-    model::json_reply,
+    model::parse_json_reply,
     security::clip,
     store::{self, Agent},
 };
@@ -46,24 +49,25 @@ pub(super) async fn delegate(ctx: &ToolContext<'_>, args: &Value) -> Result<Valu
     );
     let mut history = Vec::new();
     let model = ctx.app.models.provider(&ctx.task.user, false).await?;
+    let definitions = tool_definitions(&allowed);
     for _ in 0..4 {
         ensure!(
             store::current(&ctx.app.db, ctx.task).await?,
             "task was updated during delegation"
         );
-        let step: Step = json_reply(
-            &*model,
-            &instruction,
-            &json!({"brief":brief,"tools":descriptions(&allowed),
-            "connectors":connector_context(ctx),"observations":history}),
-        )
-        .await?;
+        let input = json!({"brief":brief,"tools":descriptions(&allowed),
+            "connectors":connector_context(ctx),"observations":history})
+        .to_string();
+        let output = model
+            .complete_turn(&instruction, &input, &definitions, None)
+            .await?;
+        let step: Step = parse_json_reply(&output)?;
         ensure!(
             store::current(&ctx.app.db, ctx.task).await?,
             "task was updated during delegation"
         );
         match step {
-            Step::Reply { text, .. } | Step::Widget { text, .. } => {
+            Step::Reply { text, .. } => {
                 return Ok(json!({"helper_reply":clip(&text,6000)}));
             }
             Step::Tool { name, args } => {
