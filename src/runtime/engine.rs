@@ -38,6 +38,15 @@ pub async fn run(app: Arc<App>, channel: Arc<dyn ChannelAdapter>) {
                         let app=app.clone();
                         let channel=channel.clone();
                         jobs.spawn(async move {
+                            let acknowledgement = tokio::spawn({
+                                let app = app.clone();
+                                let task = task.clone();
+                                async move {
+                                    if super::acknowledgement::send(&app, &task).await.is_err() {
+                                        tracing::debug!(task=%task.id, "Mercury acknowledgement unavailable");
+                                    }
+                                }
+                            });
                             let feedback=Feedback::default();
                             let processing=work_task(&app,&task,Some(&feedback));
                             tokio::pin!(processing);
@@ -46,10 +55,11 @@ pub async fn run(app: Arc<App>, channel: Arc<dyn ChannelAdapter>) {
                                 result=&mut processing=>result,
                                 ()=feedback.show(&app.db,&task,&*channel)=>processing.await,
                             };
+                            acknowledgement.abort();
                             if let Err(error)=result {
                                 tracing::warn!(task=%task.id,error_category=%error,"task paused");
                                 let _=store::settle(&app.db,&task,"blocked",Some(
-                                    "I paused this task because a model or tool could not finish. Check the Mini App configuration, then send a message to continue."
+                                    "I couldn’t finish this turn. Your task is saved. Send a follow-up to try again."
                                 )).await;
                             }
                         });
