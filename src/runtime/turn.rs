@@ -9,7 +9,7 @@ use super::{
 };
 use crate::{
     App, audit,
-    model::{json_reply, parse_json_reply},
+    model::{ModelProvider, json_reply, parse_json_reply},
     schedules,
     security::{clip, id, now},
     store::{self, Agent, Task},
@@ -17,7 +17,7 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 const TOOL_STEP_LIMIT: usize = 14;
 
@@ -82,15 +82,16 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
         })
         .collect();
     let definitions = tool_definitions(&tools);
-    let latest_request: Option<String> = sqlx::query_scalar(
-        "SELECT body FROM events WHERE task=? AND role='user' ORDER BY id DESC LIMIT 1",
+    let latest_request: Option<(i64, String)> = sqlx::query_as(
+        "SELECT id,body FROM events WHERE task=? AND role='user' ORDER BY id DESC LIMIT 1",
     )
     .bind(&task.id)
     .fetch_optional(&app.db)
     .await?;
     let mut summary = task.summary.clone();
     let mut goal = task.goal.clone();
-    let mut lookups = BTreeMap::new();
+    let mut lookups = BTreeSet::new();
+    let mut consulted_helper = false;
     let mut repeated_lookup = false;
     let mut finish_lookup = false;
     for step_number in 0..=TOOL_STEP_LIMIT {
@@ -98,6 +99,13 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
             return store::settle(&app.db, task, "idle", None).await;
         }
         let mut records = store::history(&app.db, &task.id).await?;
+        if let Some((event, _)) = &latest_request {
+            consulted_helper |= records
+                .iter()
+                .rev()
+                .take_while(|(id, _, _)| id > event)
+                .any(|(_, role, _)| role == "handoff");
+        }
         let size: usize = records.iter().map(|(_, _, text)| text.len()).sum();
         if (size > 32000 || records.len() == 180) && records.len() > 6 {
             let old =
@@ -141,36 +149,37 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
             .collect::<Vec<_>>();
         let zone = schedules::timezone(&app.db, &task.user).await?;
         let input = json!({
-            "goal":goal,"summary":summary,"latest_request":latest_request.as_deref().map(|text|clip(text,8000)),"history":history,"memory":memory,
+            "goal":goal,"summary":summary,"latest_request":latest_request.as_ref().map(|(_,text)|clip(text,8000)),"history":history,"memory":memory,
             "local_time":schedules::local_iso(now(),zone),"time_zone":zone.name(),
             "shared_helper_scope":agent.as_ref().filter(|_|!owner).map(|agent|&agent.id),
             "telegram_reply":store::latest_reply_context(&app.db, &task.id).await?,
             "saved_agents":saved,"tools":descriptions(&tools),"connectors":connector_context(&ctx)
         });
+        let has_research = consulted_helper || !lookups.is_empty();
         if finish_lookup || step_number == TOOL_STEP_LIMIT {
-            if lookups.is_empty() {
+            if !has_research {
                 break;
             }
-            let text = lookup::reply(&*model, &input, &lookups).await;
-            let _delivery = match feedback {
-                Some(feedback) => Some(feedback.delivery.lock().await),
-                None => None,
-            };
-            return store::settle_reply(&app.db, task, clip(&text, MAX_REPLY_BYTES), &[]).await;
+            return finish_research(app, task, feedback, &*model, &input).await;
         }
-        let step: Step = if let Some(feedback) = feedback {
-            let Some(step) = feedback.complete(&*model, &input, &definitions).await? else {
-                return store::settle(&app.db, task, "idle", None).await;
-            };
-            step
+        let step = if let Some(feedback) = feedback {
+            feedback.complete(&*model, &input, &definitions).await
         } else {
             audit::model("agent_turn", async {
                 let response = model
                     .complete_turn(ENGINE, &input.to_string(), &definitions, None)
                     .await?;
-                parse_json_reply(&response)
+                parse_json_reply(&response).map(Some)
             })
-            .await?
+            .await
+        };
+        let step = match step {
+            Ok(Some(step)) => step,
+            Ok(None) => return store::settle(&app.db, task, "idle", None).await,
+            Err(_) if has_research => {
+                return finish_research(app, task, feedback, &*model, &input).await;
+            }
+            Err(error) => return Err(error),
         };
         if !store::current(&app.db, task).await? {
             return store::settle(&app.db, task, "idle", None).await;
@@ -189,6 +198,9 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                 )
                 .await;
                 if text.trim().is_empty() {
+                    if consulted_helper {
+                        return finish_research(app, task, feedback, &*model, &input).await;
+                    }
                     return store::settle(&app.db, task, "idle", None).await;
                 }
                 // Wait for any in-flight draft before queuing the durable reply.
@@ -240,7 +252,7 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                 };
                 if lookup
                     .as_ref()
-                    .is_some_and(|lookup| lookups.contains_key(lookup))
+                    .is_some_and(|lookup| lookups.contains(lookup))
                 {
                     audit::record(
                         "tool",
@@ -254,11 +266,12 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                     } else {
                         repeated_lookup = true;
                         store::append(&app.db, &task.id, "tool",
-                            "That lookup already ran in this turn. Use its recorded result. If it failed and the user needs an alternative, use a different public source or a search query. Otherwise provide the final answer now.",
+                            "That exact lookup already ran in this turn. Use its recorded result if relevant. If it did not answer the question, try a different public source or query that matches the user's request. Otherwise write the final answer.",
                         ).await?;
                     }
                     continue;
                 }
+                repeated_lookup = false;
                 let mut requires_confirmation = intent.risk == Risk::Write;
                 if intent.risk != Risk::Local {
                     let review = review(&ctx, &intent)
@@ -334,7 +347,8 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                     match result {
                         Ok(Outcome::Pause) => return Ok(()),
                         Ok(Outcome::Continue(value)) => {
-                            store::append(&app.db, &task.id, "tool", &value.to_string()).await?
+                            store::append(&app.db, &task.id, "tool", &value.to_string()).await?;
+                            consulted_helper |= name == "delegate";
                         }
                         Err(error) => {
                             if !store::current(&app.db, task).await? {
@@ -367,7 +381,7 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                     let observation = lookup.observe(result);
                     store::finish_action(&app.db, task, &action, &observation.to_string(), false)
                         .await?;
-                    lookups.insert(lookup, observation);
+                    lookups.insert(lookup);
                 } else {
                     finish(&ctx, &action, result, false).await?;
                 }
@@ -387,6 +401,27 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
         Some("I reached the task’s step limit. Send a follow-up to continue."),
     )
     .await
+}
+
+async fn finish_research(
+    app: &App,
+    task: &Task,
+    feedback: Option<&Feedback>,
+    model: &dyn ModelProvider,
+    input: &Value,
+) -> Result<()> {
+    if !store::current(&app.db, task).await? {
+        return store::settle(&app.db, task, "idle", None).await;
+    }
+    let text = lookup::reply(model, input).await;
+    let _delivery = match feedback {
+        Some(feedback) => Some(feedback.delivery.lock().await),
+        None => None,
+    };
+    if !store::current(&app.db, task).await? {
+        return store::settle(&app.db, task, "idle", None).await;
+    }
+    store::settle_reply(&app.db, task, clip(&text, MAX_REPLY_BYTES), &[]).await
 }
 
 async fn bind_shared_delegation(db: &sqlx::SqlitePool, task: &Task, args: &Value) -> Result<bool> {
