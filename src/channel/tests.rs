@@ -1,5 +1,5 @@
 use super::{
-    dispatch::send_outbound,
+    dispatch::{handle_callback, send_outbound},
     telegram::{suggested_keyboard, widget_rejection},
     *,
 };
@@ -22,6 +22,150 @@ async fn record(
     let mut mock = mock.lock().await;
     mock.0.push((method, data));
     Json(mock.1.pop_front().expect("unexpected Telegram request"))
+}
+
+#[tokio::test]
+async fn mcp_approval_buttons_resume_only_the_owners_waiting_request() {
+    let db = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&db).await.unwrap();
+    for user in ["42", "43"] {
+        store::seed(&db, user).await.unwrap();
+    }
+    sqlx::query("UPDATE users SET provider='codex' WHERE id='42'")
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO connectors(id,owner,name,endpoint,auth) VALUES('docs','42','Docs','https://example.test','public')")
+        .execute(&db)
+        .await
+        .unwrap();
+    store::ingest_telegram(&db, "42", 1, "42", "Find the roadmap", 70)
+        .await
+        .unwrap();
+    let task = store::claim(&db).await.unwrap().unwrap();
+    let request = crate::security::id();
+    let body = "Search Docs for the roadmap. This sends your search query to Docs.";
+    store::pause(
+        &db,
+        &task,
+        "approve",
+        &json!({
+            "call":{"name":"call_mcp","args":{"connector":"docs","tool":"search","arguments":{"query":"roadmap"}}},
+            "mcp_approval":{"connector":"docs","tool":"search","epoch":0}
+        }),
+        body,
+        Some(&format!("mcp-approval/{request}")),
+        900,
+        &request,
+    )
+    .await
+    .unwrap();
+
+    let update = |id: i64, user: i64, kind: &str, decision: &str| {
+        json!({
+            "update_id":id,
+            "callback_query":{
+                "id":format!("callback-{id}"),
+                "from":{"id":user,"is_bot":false},
+                "message":{"message_id":71,"chat":{"id":user,"type":kind}},
+                "data":format!("mcp-approval/{request}/{decision}")
+            }
+        })
+    };
+    let updates = json!({"ok":true,"result":[
+        update(2,43,"private","always"),
+        update(3,42,"group","deny"),
+        update(4,42,"private","always"),
+        update(5,42,"private","deny")
+    ]});
+    let accepted = json!({"ok":true,"result":true});
+    let mock: Mock = Arc::new(Mutex::new((
+        Vec::new(),
+        VecDeque::from([
+            json!({"ok":false,"error_code":429,"parameters":{"retry_after":3}}),
+            json!({"ok":true,"result":{"message_id":71}}),
+            updates,
+            accepted.clone(),
+            accepted.clone(),
+            json!({"ok":false,"error_code":400,"description":"Bad Request: message to edit not found"}),
+            accepted,
+        ]),
+    )));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let telegram = Telegram {
+        client: reqwest::Client::new(),
+        api: format!("http://{}/botTEST", listener.local_addr().unwrap()),
+        origin: "https://example.test".into(),
+    };
+    let app = Router::new()
+        .route("/botTEST/{method}", post(record))
+        .with_state(mock.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let item = store::claim_outbox(&db).await.unwrap().unwrap();
+    assert!(store::can_deliver(&db, &item).await.unwrap());
+    assert_eq!(
+        send_outbound(&db, &telegram, &item).await.unwrap(),
+        MessageDelivery::Retry(3)
+    );
+    assert_eq!(
+        send_outbound(&db, &telegram, &item).await.unwrap(),
+        MessageDelivery::Sent(Some(71))
+    );
+    let (updates, offset) = telegram.receive(0).await.unwrap();
+    assert_eq!(offset, 6);
+    assert_eq!(updates.len(), 3);
+    for update in updates {
+        let Inbound::Callback(query) = update else {
+            panic!("expected a private callback");
+        };
+        handle_callback(&db, &telegram, &query).await.unwrap();
+    }
+    assert!(!store::can_deliver(&db, &item).await.unwrap());
+    let next = store::claim(&db).await.unwrap().unwrap();
+    assert_eq!(next.id, task.id);
+    assert_eq!(next.revision, task.revision);
+    assert_eq!(
+        store::claim_approval(&db, &next).await.unwrap().unwrap().id,
+        request
+    );
+
+    let mock = mock.lock().await;
+    let calls = &mock.0;
+    assert_eq!(calls[0], calls[1]);
+    assert_eq!(
+        calls[1],
+        (
+            "sendMessage".into(),
+            json!({
+                "chat_id":42,"text":body,"link_preview_options":{"is_disabled":true},
+                "reply_markup":{"inline_keyboard":[
+                    [
+                        {"text":"Approve once","callback_data":format!("mcp-approval/{request}/once")},
+                        {"text":"Always approve","callback_data":format!("mcp-approval/{request}/always")}
+                    ],
+                    [{"text":"Deny","callback_data":format!("mcp-approval/{request}/deny")}]
+                ]}
+            })
+        )
+    );
+    assert_eq!(calls[3].1["text"], "This option is no longer available.");
+    assert_eq!(calls[4].1["text"], "Always approved for this tool.");
+    assert_eq!(
+        calls[5],
+        (
+            "editMessageReplyMarkup".into(),
+            json!({
+                "chat_id":42,"message_id":71,"reply_markup":{"inline_keyboard":[]}
+            })
+        )
+    );
+    assert_eq!(calls[6].1["text"], "This option is no longer available.");
+    server.abort();
 }
 
 #[tokio::test]

@@ -1,7 +1,7 @@
 mod api;
 mod updates;
 
-use super::{Card, ChannelAdapter, Inbound, MessageDelivery, formatting, media};
+use super::{Card, ChannelAdapter, Inbound, MessageDelivery, callback, formatting, media};
 use crate::{forms::WidgetChoice, security::clip, store};
 use anyhow::{Context, Result, ensure};
 pub(super) use api::suggested_keyboard;
@@ -90,6 +90,17 @@ impl ChannelAdapter for Telegram {
                 }
             }
             Some("mini") => data["reply_markup"] = self.settings_keyboard(),
+            Some(button) if button.starts_with(callback::MCP_APPROVAL_PREFIX) => {
+                let id = uuid::Uuid::parse_str(&button[callback::MCP_APPROVAL_PREFIX.len()..])?;
+                let prefix = callback::MCP_APPROVAL_PREFIX;
+                data["reply_markup"] = json!({"inline_keyboard":[
+                    [
+                        {"text":"Approve once","callback_data":format!("{prefix}{id}/once")},
+                        {"text":"Always approve","callback_data":format!("{prefix}{id}/always")}
+                    ],
+                    [{"text":"Deny","callback_data":format!("{prefix}{id}/deny")}]
+                ]});
+            }
             Some(button) if button.starts_with("form/") => {
                 let id = uuid::Uuid::parse_str(&button["form/".len()..])?;
                 data["reply_markup"] = json!({"inline_keyboard":[[{
@@ -124,6 +135,24 @@ impl ChannelAdapter for Telegram {
         ensure!(
             feedback.is_none(),
             "Telegram rate-limited the callback answer"
+        );
+        Ok(())
+    }
+
+    async fn clear_inline_keyboard(&self, chat_id: i64, message_id: i64) -> Result<()> {
+        let feedback = self
+            .feedback(
+                "editMessageReplyMarkup",
+                json!({
+                    "chat_id":chat_id,
+                    "message_id":message_id,
+                    "reply_markup":{"inline_keyboard":[]}
+                }),
+            )
+            .await?;
+        ensure!(
+            feedback.is_none(),
+            "Telegram rate-limited the keyboard update"
         );
         Ok(())
     }

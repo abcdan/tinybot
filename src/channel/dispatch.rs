@@ -58,10 +58,7 @@ pub async fn listen(
                         }
                     }
                     Inbound::Callback(query) => {
-                        let text = callback::answer(db, &query).await?;
-                        if adapter.answer_callback(&query.id, text).await.is_err() {
-                            tracing::debug!("callback answer expired or could not be delivered");
-                        }
+                        handle_callback(db, &*adapter, &query).await?;
                     }
                     Inbound::Reaction {
                         external_id,
@@ -92,6 +89,30 @@ pub async fn listen(
             }
         }
     }
+}
+
+pub(super) async fn handle_callback(
+    db: &SqlitePool,
+    adapter: &dyn ChannelAdapter,
+    query: &callback::Query,
+) -> Result<()> {
+    let answer = callback::answer(db, query).await?;
+    if adapter
+        .answer_callback(&query.id, answer.text)
+        .await
+        .is_err()
+    {
+        tracing::debug!("Telegram callback answer expired or could not be delivered");
+    }
+    if let Some((chat_id, message_id)) = answer.clear_keyboard
+        && adapter
+            .clear_inline_keyboard(chat_id, message_id)
+            .await
+            .is_err()
+    {
+        tracing::debug!("Telegram approval buttons could not be removed");
+    }
+    Ok(())
 }
 
 pub async fn outbox(db: SqlitePool, adapter: std::sync::Arc<dyn ChannelAdapter>) {
