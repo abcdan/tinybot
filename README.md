@@ -64,6 +64,11 @@ after adding the domain. Then check `https://your-domain/health` and send
   Mini App to load the models available to your account, then choose a task
   model. The same key enables Mercury for forms and acknowledgements, including
   when Codex is the active task model.
+- **Voice notes** in private Telegram chats use your saved OpenRouter key to
+  transcribe recordings up to 10 MB. Chief receives the transcript as a chat
+  message prefixed with `Voice message:`, including when Codex is your active
+  task model. TinyBot sends the audio to OpenRouter for transcription and
+  keeps the transcript in task history.
 - **Codex** pairing uses a code from the Mini App. Run `tinybot codex connect
   https://your-domain` on a computer with a browser. Build the local command
   with `cargo build --locked --release` and use the binary in the build output.

@@ -1,6 +1,7 @@
 mod callback;
 mod card;
 mod formatting;
+mod voice;
 mod widget;
 
 pub use card::Card;
@@ -28,6 +29,7 @@ pub enum Inbound {
         text: String,
         telegram_message_id: Option<i64>,
     },
+    Voice(voice::Received),
     Widget(widget::Query),
     Callback(callback::Query),
 }
@@ -49,6 +51,10 @@ pub trait ChannelAdapter: Send + Sync {
     fn name(&self) -> &'static str;
     async fn receive(&self, offset: i64) -> Result<(Vec<Inbound>, i64)>;
     async fn send(&self, user: &str, body: &str, button: Option<&str>) -> Result<Option<i64>>;
+    async fn download_voice(&self, _file_id: &str) -> Result<Vec<u8>> {
+        anyhow::bail!("channel does not support voice downloads")
+    }
+
     async fn answer_widget(&self, _query: &str, _data: &str) -> Result<()> {
         Ok(())
     }
@@ -300,6 +306,7 @@ struct Message {
     chat: Chat,
     from: Option<User>,
     text: Option<String>,
+    voice: Option<voice::Note>,
 }
 #[derive(Deserialize)]
 struct Chat {
@@ -352,6 +359,10 @@ impl ChannelAdapter for Telegram {
         Ok(retry.map(|delay| delay.as_secs() as i64))
     }
 
+    async fn download_voice(&self, file_id: &str) -> Result<Vec<u8>> {
+        voice::download(self, file_id).await
+    }
+
     async fn receive(&self, offset: i64) -> Result<(Vec<Inbound>, i64)> {
         let output = self
             .call(
@@ -378,6 +389,14 @@ impl ChannelAdapter for Telegram {
                 let user = message.from?;
                 if !message.chat.is_private_with(&user) {
                     return None;
+                }
+                if let Some(note) = message.voice {
+                    return Some(Inbound::Voice(voice::Received::new(
+                        update.update_id,
+                        user.id.to_string(),
+                        message.message_id,
+                        note,
+                    )));
                 }
                 Some(Inbound::Message {
                     external_id: update.update_id,
@@ -519,7 +538,12 @@ impl Telegram {
     }
 }
 
-pub async fn listen(db: SqlitePool, operator: String, adapter: std::sync::Arc<dyn ChannelAdapter>) {
+pub async fn listen(
+    app: std::sync::Arc<crate::App>,
+    operator: String,
+    adapter: std::sync::Arc<dyn ChannelAdapter>,
+) {
+    let db = &app.db;
     let mut offset = 0;
     loop {
         let result = async {
@@ -534,7 +558,7 @@ pub async fn listen(db: SqlitePool, operator: String, adapter: std::sync::Arc<dy
                     } => {
                         if let Some(message_id) = telegram_message_id {
                             store::ingest_telegram(
-                                &db,
+                                db,
                                 &operator,
                                 external_id,
                                 &user,
@@ -543,25 +567,21 @@ pub async fn listen(db: SqlitePool, operator: String, adapter: std::sync::Arc<dy
                             )
                             .await?;
                         } else {
-                            store::ingest(
-                                &db,
-                                &operator,
-                                adapter.name(),
-                                external_id,
-                                &user,
-                                &text,
-                            )
-                            .await?;
+                            store::ingest(db, &operator, adapter.name(), external_id, &user, &text)
+                                .await?;
                         }
                     }
+                    Inbound::Voice(received) => {
+                        voice::handle(&app, &operator, &*adapter, &received).await?;
+                    }
                     Inbound::Widget(query) => {
-                        let data = widget::answer(&db, &query).await;
+                        let data = widget::answer(db, &query).await;
                         if adapter.answer_widget(&query.id, &data).await.is_err() {
                             tracing::debug!("widget answer expired or could not be delivered");
                         }
                     }
                     Inbound::Callback(query) => {
-                        let text = callback::answer(&db, &query).await?;
+                        let text = callback::answer(db, &query).await?;
                         if adapter.answer_callback(&query.id, text).await.is_err() {
                             tracing::debug!("callback answer expired or could not be delivered");
                         }
