@@ -165,3 +165,78 @@ test('one OpenRouter key lists task models while retaining Codex pairing', async
         await browser.close();
     }
 });
+
+test('audit log retries, pages by message, and reveals chronological calls and results', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    const started = Math.floor(Date.now() / 1000) - 60;
+    const recent = {
+        id: 42, task: 'task-42', agent: null, message: 'Find the weather', status: 'completed',
+        started_at: started, finished_at: started + 5, entry_count: 3
+    };
+    const older = {
+        id: 21, task: 'task-21', agent: 'Research assistant', message: 'Earlier message',
+        status: 'waiting', started_at: started - 120, finished_at: null, entry_count: 0
+    };
+    const requests = [];
+    await mockMiniApp(context, ({action, data}) => {
+        requests.push({action, data});
+        switch (action) {
+            case 'status': return {user: '1', requests: [], tasks: [], time_zone: 'UTC'};
+            case 'audit-sessions':
+                return data.before === 42
+                    ? {sessions: [older], next_before: null}
+                    : {sessions: [recent], next_before: 42};
+            case 'audit-session':
+                assert.equal(data.id, 42);
+                if (data.after === 2) return {session: recent, next_after: null, entries: [
+                    {id: 3, at: started + 4, kind: 'tool', name: 'search_web', status: 'completed',
+                        detail: {result: 'Sunny <script>safe text</script>'}}
+                ]};
+                return {session: recent, next_after: 2, entries: [
+                    {id: 1, at: started, kind: 'model', name: 'fixture/model', status: 'started', detail: null},
+                    {id: 2, at: started + 1, kind: 'tool', name: 'search_web', status: 'started',
+                        detail: {arguments: {query: 'Weather forecast'}}}
+                ]};
+            default: assert.fail('Unexpected Mini App action ' + action);
+        }
+    });
+    let failFirstList = true;
+    await page.route('**/api/mini', route => {
+        if (failFirstList && route.request().postDataJSON()?.action === 'audit-sessions') {
+            failFirstList = false;
+            return route.fulfill({status: 503, json: {error: 'Audit log unavailable.'}});
+        }
+        return route.fallback();
+    });
+    try {
+        await page.goto('https://tinybot.test/mini');
+        await page.getByRole('button', {name: 'Audit', exact: true}).click();
+        await page.getByText('Audit log unavailable.', {exact: true}).waitFor();
+        await page.getByRole('button', {name: 'Retry loading audit log'}).click();
+        await page.getByText('Find the weather', {exact: true}).waitFor();
+        assert.equal(await page.getByText('Message runs and their model and tool calls are kept for 7 days.').count(), 1);
+        assert.equal(requests.some(({action}) => action === 'audit-session'), false);
+        await page.getByText('Find the weather', {exact: true}).click();
+        await page.getByRole('button', {name: 'Load more entries'}).click();
+        await page.getByText('Sunny <script>safe text</script>', {exact: true}).waitFor();
+        const entries = await page.locator('.audit-timeline > li').allTextContents();
+        assert.equal(entries.length, 3);
+        assert.match(entries[0], /Model · fixture\/model.*Started/s);
+        assert.match(entries[1], /Tool · search_web.*Started.*Arguments.*Weather forecast/s);
+        assert.match(entries[2], /Tool · search_web.*Completed.*Result.*Sunny/s);
+        assert.equal(await page.locator('.audit-timeline script').count(), 0);
+        assert.deepEqual(requests.filter(({action}) => action === 'audit-session').map(({data}) => data), [
+            {id: 42}, {id: 42, after: 2}
+        ]);
+        await page.getByRole('button', {name: 'Load older messages'}).click();
+        await page.getByText('Earlier message', {exact: true}).waitFor();
+        assert.deepEqual(requests.filter(({action}) => action === 'audit-sessions').map(({data}) => data), [
+            {}, {before: 42}
+        ]);
+        assert.equal(await page.getByRole('button', {name: 'Load older messages'}).count(), 0);
+    } finally {
+        await browser.close();
+    }
+});
