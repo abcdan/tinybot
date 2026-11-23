@@ -1,6 +1,6 @@
 use super::text;
-use crate::{App, mcp::Candidate, store};
-use anyhow::{Result, ensure};
+use crate::{App, mcp::Candidate, security::clip, store};
+use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 
 pub(super) async fn search_mcp(app: &App, data: &Value) -> Result<Value> {
@@ -19,6 +19,35 @@ pub(super) async fn add_mcp(app: &App, user: &str, data: &Value) -> Result<Value
         "confirm this connector destination"
     );
     Ok(json!({"id":app.mcp.prepare(user,&candidate).await?}))
+}
+
+pub(super) async fn add_anything_mcp(app: &App, user: &str, data: &Value) -> Result<Value> {
+    let endpoint = text(data, "endpoint", 2048)?;
+    let id = app.mcp.prepare_anything_mcp(user, endpoint).await?;
+    Ok(json!({"id":id}))
+}
+
+pub(super) async fn list_tools(app: &App, user: &str, data: &Value) -> Result<Value> {
+    let connector = app.mcp.owned(user, text(data, "id", 64)?).await?;
+    ensure!(
+        connector.auth != "pending",
+        "authorize this connection first"
+    );
+    let source = app.mcp.list_tools(&connector).await?;
+    let tools: Vec<_> = source
+        .as_array()
+        .context("invalid MCP tool list")?
+        .iter()
+        .filter_map(|tool| {
+            let name = tool["name"]
+                .as_str()
+                .filter(|name| !name.trim().is_empty())?;
+            let description = tool["description"].as_str().unwrap_or_default();
+            Some(json!({"name":clip(name,128),"description":clip(description,350)}))
+        })
+        .take(250)
+        .collect();
+    Ok(json!({"tools":tools,"total":tools.len()}))
 }
 
 pub(super) async fn oauth_start(app: &App, user: &str, data: &Value) -> Result<Value> {

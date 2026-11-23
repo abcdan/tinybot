@@ -8,7 +8,7 @@ pub use discovery::Candidate;
 
 use crate::{
     net,
-    security::{Vault, clip, id, now},
+    security::{Vault, clip, hash, id, now},
 };
 use anyhow::{Context, Result, ensure};
 use oauth::{OAuthToken, exchange};
@@ -33,6 +33,7 @@ pub struct Connector {
     pub endpoint: String,
     pub auth: String,
     pub transport: String,
+    pub kind: String,
     #[serde(skip)]
     pub approval_epoch: i64,
     #[serde(skip)]
@@ -59,11 +60,50 @@ impl Mcp {
     }
 
     pub async fn prepare(&self, user: &str, candidate: &Candidate) -> Result<String> {
+        self.prepare_as(user, candidate, "mcp").await
+    }
+
+    pub async fn prepare_anything_mcp(&self, user: &str, endpoint: &str) -> Result<String> {
+        let mut url = net::https(endpoint)?;
+        ensure!(url.query().is_none(), "MCP endpoint cannot contain a query");
+        // AnythingMCP advertises the endpoint without a trailing slash in its OAuth metadata.
+        let path = url.path().trim_end_matches('/').to_owned();
+        url.set_path(&path);
+        let host = url.host_str().context("missing MCP hostname")?;
+        let host_without_final_dot = host.trim_end_matches('.');
+        ensure!(
+            host_without_final_dot != "anythingmcp.com"
+                && !host_without_final_dot.ends_with(".anythingmcp.com"),
+            "Use the HTTPS endpoint of your own AnythingMCP gateway"
+        );
+        let path = url.path();
+        let name = if path == "/mcp" {
+            format!("AnythingMCP · {host}")
+        } else {
+            format!("AnythingMCP · {host}{path}")
+        };
+        let name = if name.len() > 100 {
+            format!("{} · {}", clip(&name, 80), &hash(url.as_str())[..12])
+        } else {
+            name
+        };
+        let candidate = Candidate {
+            name,
+            endpoint: url.to_string(),
+            transport: discovery::HTTP.into(),
+            publisher: None,
+        };
+        self.prepare_as(user, &candidate, "anythingmcp").await
+    }
+
+    async fn prepare_as(&self, user: &str, candidate: &Candidate, kind: &str) -> Result<String> {
         let endpoint = candidate.endpoint()?;
         let created = id();
-        let value: (String,) = sqlx::query_as("INSERT INTO connectors(id,owner,name,endpoint,auth,transport) VALUES(?,?,?,?,'pending',?)
-            ON CONFLICT(owner,name) DO UPDATE SET name=excluded.name WHERE connectors.endpoint=excluded.endpoint RETURNING id")
-            .bind(&created).bind(user).bind(clip(&candidate.name,100)).bind(endpoint).bind(&candidate.transport).fetch_one(&self.db).await?;
+        let value: (String,) = sqlx::query_as("INSERT INTO connectors(id,owner,name,endpoint,auth,transport,kind) VALUES(?,?,?,?,'pending',?,?)
+            ON CONFLICT(owner,name) DO UPDATE SET kind=CASE WHEN excluded.kind='anythingmcp' THEN excluded.kind ELSE connectors.kind END
+            WHERE connectors.endpoint=excluded.endpoint RETURNING id")
+            .bind(&created).bind(user).bind(clip(&candidate.name,100)).bind(endpoint).bind(&candidate.transport).bind(kind)
+            .fetch_one(&self.db).await?;
         Ok(value.0)
     }
 
@@ -139,6 +179,10 @@ impl Mcp {
 
     pub async fn save_public(&self, user: &str, id: &str) -> Result<()> {
         let connector = self.owned(user, id).await?;
+        ensure!(
+            connector.kind != "anythingmcp",
+            "Sign in or use a personal MCP API key"
+        );
         if connector.transport == discovery::STDIO {
             stdio::call(&connector, None, "tools/list", json!({})).await?;
         } else {

@@ -17,6 +17,8 @@ pub(super) struct OAuthFlow {
     verifier: String,
     resource: String,
     #[serde(default)]
+    callback_issuer: Option<String>,
+    #[serde(default)]
     client_auth: String,
 }
 
@@ -77,6 +79,12 @@ impl Mcp {
                 .as_str()
                 .context("missing authorization server")?,
         )?;
+        if connector.kind == "anythingmcp" {
+            ensure!(
+                issuer.origin() == endpoint.origin(),
+                "AnythingMCP must authorize on its self-hosted gateway"
+            );
+        }
         let mut metadata = issuer.clone();
         metadata.set_path(&format!(
             "/.well-known/oauth-authorization-server{}",
@@ -92,12 +100,9 @@ impl Mcp {
                 get_json(&metadata).await?
             }
         };
+        let advertised_issuer = auth["issuer"].as_str().context("missing OAuth issuer")?;
         ensure!(
-            auth["issuer"]
-                .as_str()
-                .and_then(|s| net::https(s).ok())
-                .as_ref()
-                == Some(&issuer),
+            net::https(advertised_issuer)? == issuer,
             "OAuth issuer mismatch"
         );
         ensure!(
@@ -201,6 +206,8 @@ impl Mcp {
             token_url: token_url.to_string(),
             verifier,
             resource: resource_url.to_string(),
+            callback_issuer: (auth["authorization_response_iss_parameter_supported"] == true)
+                .then(|| advertised_issuer.to_owned()),
             client_auth: client_auth.into(),
         };
         let state_hash = hash(&state);
@@ -219,7 +226,12 @@ impl Mcp {
         Ok(authorize.to_string())
     }
 
-    pub async fn oauth_finish(&self, state: &str, code: Option<&str>) -> Result<()> {
+    pub async fn oauth_finish(
+        &self,
+        state: &str,
+        code: Option<&str>,
+        issuer: Option<&str>,
+    ) -> Result<()> {
         let state_hash = hash(state);
         let (user, payload): (String, String) = sqlx::query_as(
             "DELETE FROM pending WHERE id=? AND kind='mcp-oauth'
@@ -230,6 +242,14 @@ impl Mcp {
         .fetch_optional(&self.db)
         .await?
         .context("OAuth state expired or was consumed")?;
+        let flow: OAuthFlow =
+            serde_json::from_slice(&self.vault.open(&format!("oauth:{state_hash}"), &payload)?)?;
+        ensure!(
+            flow.callback_issuer
+                .as_deref()
+                .is_none_or(|expected| issuer == Some(expected)),
+            "OAuth callback issuer mismatch"
+        );
         let Some(code) = code else {
             crate::store::notify(
                 &self.db,
@@ -240,8 +260,6 @@ impl Mcp {
             .await?;
             return Ok(());
         };
-        let flow: OAuthFlow =
-            serde_json::from_slice(&self.vault.open(&format!("oauth:{state_hash}"), &payload)?)?;
         let redirect = self.origin.join("/oauth/mcp")?;
         let next = exchange(
             &flow,
@@ -353,4 +371,64 @@ pub(super) async fn exchange(flow: &OAuthFlow, grant: &[(&str, &str)]) -> Result
         refresh_token: value["refresh_token"].as_str().map(str::to_owned),
         expires: now() + value["expires_in"].as_i64().unwrap_or(3600).clamp(1, 86400),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Mcp, OAuthFlow};
+    use crate::security::{Vault, hash, now, token};
+    use sqlx::sqlite::SqlitePoolOptions;
+    use url::Url;
+
+    #[tokio::test]
+    async fn oauth_rejects_an_issuer_mismatch_before_redeeming_the_code() {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!().run(&db).await.unwrap();
+        crate::store::seed(&db, "1").await.unwrap();
+        let vault = Vault::new(&"f0".repeat(32)).unwrap();
+        let mcp = Mcp::new(
+            db.clone(),
+            vault.clone(),
+            Url::parse("https://tinybot.example").unwrap(),
+        );
+        let expected = "https://gateway.example";
+        let flow = OAuthFlow {
+            connector: "unused-connector".into(),
+            client_id: "test-client".into(),
+            client_secret: None,
+            token_url: "https://127.0.0.1/token".into(),
+            verifier: token(),
+            resource: format!("{expected}/mcp"),
+            callback_issuer: Some(expected.into()),
+            client_auth: "none".into(),
+        };
+        for issuer in [None, Some("https://different.example")] {
+            let state = token();
+            let state_hash = hash(&state);
+            let payload = vault
+                .seal(
+                    &format!("oauth:{state_hash}"),
+                    &serde_json::to_vec(&flow).unwrap(),
+                )
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO pending(id,user,kind,payload,expires) VALUES(?,'1','mcp-oauth',?,?)",
+            )
+            .bind(state_hash)
+            .bind(payload)
+            .bind(now() + 600)
+            .execute(&db)
+            .await
+            .unwrap();
+            let error = mcp
+                .oauth_finish(&state, Some("test-code"), issuer)
+                .await
+                .unwrap_err();
+            assert_eq!(error.to_string(), "OAuth callback issuer mismatch");
+        }
+    }
 }
