@@ -95,6 +95,17 @@ summary { cursor: pointer; font-size: .87rem; font-weight: 650; }
 .audit-timeline { list-style: none; margin: 12px 0 0; padding: 0; }
 .audit-timeline > li { border-top: 1px solid var(--line); padding-block: 10px; }
 .audit-timeline pre { margin: 4px 0 8px; }
+.audit-run-usage { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 12px; }
+.audit-run-usage h4 { margin: 0; font-size: .92rem; }
+.audit-usage-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(105px, 100%), 1fr)); gap: 6px 12px; margin: 8px 0 4px; }
+.audit-usage-metrics dt { color: var(--secondary); font-size: .75rem; }
+.audit-usage-metrics dd { font-size: .85rem; font-weight: 650; font-variant-numeric: tabular-nums; margin: 2px 0 0; overflow-wrap: anywhere; }
+.audit-usage-provider { border-top: 1px solid var(--line); margin: 10px 0 0; padding-top: 10px; }
+.audit-usage-provider > summary { min-height: 0; }
+.audit-usage-models { list-style: none; margin: 6px 0 0; padding: 0 0 0 10px; border-inline-start: 2px solid var(--line); }
+.audit-usage-models > li { overflow-wrap: anywhere; font-size: .84rem; }
+.audit-usage-models > li + li { margin-top: 8px; }
+.audit-usage-coverage { margin: 4px 0 0; }
 .app-footer { margin-top: 18px; }
 .app-footer a {
   display: flex;

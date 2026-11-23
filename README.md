@@ -125,6 +125,12 @@ summaries, including work that resumes after an approval or form submission.
 The log keeps seven days of activity. Entries summarize sensitive tool
 payloads and omit private form values, credentials, and raw model prompts.
 
+**Model usage** shows reported costs in USD and input, output, and total
+tokens by provider and model for the last seven days. Open a run to see its
+totals and individual calls, including successful voice transcriptions.
+Usage is recorded for new calls as providers supply it. Missing values are
+marked **Not reported**.
+
 ## Agent memory
 
 Ask your Chief to remember a preference across conversations. You can name
