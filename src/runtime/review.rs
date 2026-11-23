@@ -1,5 +1,5 @@
 use super::{Intent, Risk, ToolContext};
-use crate::model::json_reply;
+use crate::{audit, model::json_reply};
 use anyhow::{Result, ensure};
 use serde::Deserialize;
 use serde_json::json;
@@ -23,6 +23,13 @@ pub(super) enum Verdict {
 
 pub(super) async fn review(ctx: &ToolContext<'_>, intent: &Intent) -> Result<ActionReview> {
     if intent.risk == Risk::PublicRead {
+        audit::record(
+            "review",
+            "action_review",
+            "allow",
+            json!({"source":"public_read_policy"}),
+        )
+        .await;
         return Ok(ActionReview {
             verdict: Verdict::Allow,
             reason: "This tool reads public web content within fixed network limits.".into(),
@@ -30,16 +37,32 @@ pub(super) async fn review(ctx: &ToolContext<'_>, intent: &Intent) -> Result<Act
     }
     let state = json!({"operation":intent.detail,"destination":intent.destination,
         "external_write":intent.risk==Risk::Write,"member_of_shared_agent":!ctx.owner});
-    let result: ActionReview =
-        if let Some(answer) = ctx.app.models.decisions(&ctx.task.user, &state).await? {
-            serde_json::from_value(answer)?
-        } else {
-            let model = ctx.app.models.provider(&ctx.task.user, true).await?;
-            json_reply(&*model, REVIEW, &state).await?
-        };
-    ensure!(
-        !result.reason.trim().is_empty() && result.reason.len() <= 360,
-        "invalid action review"
-    );
+    let (result, source) = audit::model("action_review", async {
+        let (result, source): (ActionReview, _) =
+            if let Some(answer) = ctx.app.models.decisions(&ctx.task.user, &state).await? {
+                (serde_json::from_value(answer)?, "typed_decisions")
+            } else {
+                let model = ctx.app.models.provider(&ctx.task.user, true).await?;
+                (json_reply(&*model, REVIEW, &state).await?, "model")
+            };
+        ensure!(
+            !result.reason.trim().is_empty() && result.reason.len() <= 360,
+            "invalid action review"
+        );
+        Ok((result, source))
+    })
+    .await?;
+    let verdict = match result.verdict {
+        Verdict::Allow => "allow",
+        Verdict::Confirm => "confirm",
+        Verdict::Deny => "deny",
+    };
+    audit::record(
+        "review",
+        "action_review",
+        verdict,
+        json!({"source":source,"external_write":intent.risk==Risk::Write}),
+    )
+    .await;
     Ok(result)
 }
