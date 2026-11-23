@@ -41,10 +41,10 @@ body { margin: 0; background: var(--background); color: var(--text); }
 .shell {
   max-width: 780px;
   margin: 0 auto;
-  padding: max(16px, env(safe-area-inset-top), var(--tg-content-safe-area-inset-top, 0px))
-    max(14px, env(safe-area-inset-right), var(--tg-content-safe-area-inset-right, 0px))
-    max(28px, env(safe-area-inset-bottom), var(--tg-content-safe-area-inset-bottom, 0px))
-    max(14px, env(safe-area-inset-left), var(--tg-content-safe-area-inset-left, 0px));
+  padding: calc(16px + max(env(safe-area-inset-top, 0px), var(--tg-safe-area-inset-top, 0px)) + var(--tg-content-safe-area-inset-top, 0px))
+    calc(14px + max(env(safe-area-inset-right, 0px), var(--tg-safe-area-inset-right, 0px)) + var(--tg-content-safe-area-inset-right, 0px))
+    calc(28px + max(env(safe-area-inset-bottom, 0px), var(--tg-safe-area-inset-bottom, 0px)) + var(--tg-content-safe-area-inset-bottom, 0px))
+    calc(14px + max(env(safe-area-inset-left, 0px), var(--tg-safe-area-inset-left, 0px)) + var(--tg-content-safe-area-inset-left, 0px));
 }
 .shell.narrow { max-width: 520px; }
 .shell.narrow .app-footer { display: none; }

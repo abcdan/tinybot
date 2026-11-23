@@ -15,12 +15,84 @@ async function mockMiniApp(context, respond, bridge) {
             assert.equal(request.init, 'fixture');
             return route.fulfill({json: respond(request)});
         }
-        const file = path === '/mini' ? 'mini.html' : path.slice(1);
+        const file = path === '/' || path === '/mini' ? 'mini.html' : path.slice(1);
         if (!/^[a-z0-9-]+\.(html|css|js)$/.test(file)) return route.abort();
         const type = file.endsWith('.css') ? 'text/css' : file.endsWith('.html') ? 'text/html' : 'application/javascript';
         return route.fulfill({contentType: type, body: await readFile('/opt/tinybot/web/' + file, 'utf8')});
     });
 }
+
+test('a Telegram profile launch requests fullscreen after verification and can fall back to expansion', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        for (const [mode, expected] of [
+            ['fullscreen', ['ready', 'fullscreen']],
+            ['unsupported', ['ready', 'fullscreen', 'expand']],
+            ['throws', ['ready', 'fullscreen', 'expand']],
+            ['older', ['ready', 'expand']],
+        ]) {
+            const context = await browser.newContext({viewport: {width: 360, height: 720}});
+            const page = await context.newPage();
+            await mockMiniApp(context, () => ({user: '1', provider: 'codex', requests: [], tasks: []}), `
+                const mode = ${JSON.stringify(mode)};
+                const events = new Map();
+                window.calls = [];
+                window.Telegram = {WebApp: {
+                    initData: new URLSearchParams(location.hash.slice(1)).get('tgWebAppData'),
+                    onEvent(name, callback) { events.set(name, callback); },
+                    isVersionAtLeast(version) { return version === '8.0' && mode !== 'older'; },
+                    ready() { window.calls.push('ready'); },
+                    requestFullscreen() {
+                        window.calls.push('fullscreen');
+                        if (mode === 'unsupported') events.get('fullscreenFailed')({error: 'UNSUPPORTED'});
+                        if (mode === 'throws') throw new Error('Fullscreen unavailable');
+                    },
+                    expand() { window.calls.push('expand'); },
+                }};
+                document.documentElement.style.setProperty('--tg-safe-area-inset-top', '20px');
+                document.documentElement.style.setProperty('--tg-content-safe-area-inset-top', '32px');
+            `);
+            await page.goto('https://tinybot.test/#tgWebAppData=fixture');
+            await page.getByRole('heading', {name: 'Requests', exact: true}).waitFor();
+            assert.deepEqual(await page.evaluate(() => window.calls), expected);
+            assert.equal(await page.locator('.shell').evaluate(element => getComputedStyle(element).paddingTop), '68px');
+            await page.getByRole('button', {name: 'Refresh', exact: true}).click();
+            await page.getByRole('heading', {name: 'Requests', exact: true}).waitFor();
+            assert.deepEqual(await page.evaluate(() => window.calls), expected);
+            await context.close();
+        }
+    } finally {
+        await browser.close();
+    }
+});
+
+test('a launch without accepted Telegram data shows instructions and leaves settings closed', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        for (const init of ['', 'fixture']) {
+            const context = await browser.newContext();
+            const page = await context.newPage();
+            await mockMiniApp(context, () => assert.fail('Unverified API request'), `
+                window.Telegram = {WebApp: {
+                    initData: ${JSON.stringify(init)},
+                    ready() {},
+                    expand() { window.expanded = true; },
+                }};
+            `);
+            if (init) {
+                await page.route('**/api/mini', route => route.fulfill({status: 403, json: {error: 'Forbidden'}}));
+            }
+            await page.goto('https://tinybot.test/');
+            await page.getByText('Open TinyBot from its Telegram profile', {exact: false}).waitFor();
+            assert.equal(await page.getByRole('navigation', {name: 'TinyBot settings'}).count(), 0);
+            assert.equal(await page.getByRole('button', {name: 'Refresh', exact: true}).count(), 0);
+            assert.equal(await page.evaluate(() => window.expanded), undefined);
+            await context.close();
+        }
+    } finally {
+        await browser.close();
+    }
+});
 
 test('settings follow live Telegram colors and open the GitHub source in Telegram', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});

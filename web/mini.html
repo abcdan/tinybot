@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>TinyBot</title>
   <link rel="stylesheet" href="/app.css">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
@@ -13,9 +13,9 @@
     <header class="masthead">
       <span class="mark" aria-hidden="true"><i></i><i></i></span>
       <div><h1>TinyBot</h1><p>Your Chief</p></div>
-      <button id="refresh" class="quiet" type="button">Refresh</button>
+      <button id="refresh" class="quiet" type="button" hidden>Refresh</button>
     </header>
-    <nav aria-label="TinyBot settings" id="tabs">
+    <nav aria-label="TinyBot settings" id="tabs" hidden>
       <button type="button" data-tab="home" aria-current="page">Overview</button>
       <button type="button" data-tab="agents">Helpers</button>
       <button type="button" data-tab="memories">Memory</button>
@@ -27,7 +27,7 @@
     </nav>
     <div id="status" class="notice" role="status" aria-live="polite" hidden></div>
     <section id="view" aria-label="Settings"><p>Opening TinyBot…</p></section>
-    <footer class="app-footer">
+    <footer class="app-footer" hidden>
       <a id="source-link" href="https://github.com/abcdan/tinybot" target="_blank" rel="noopener noreferrer">
         Source on GitHub <span aria-hidden="true">↗</span>
       </a>
