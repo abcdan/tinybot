@@ -30,17 +30,25 @@ pub(super) struct Lookup {
 
 impl Lookup {
     pub(super) fn new(tool: &str, args: &Value) -> Result<Option<Self>> {
-        let (tool, target) = match tool {
-            "browse" => ("browse", net::website(string(args, "url", 2048)?)?.into()),
-            "search_web" => (
-                "search_web",
-                string(args, "query", 240)?
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .to_lowercase(),
-            ),
+        let tool = match tool {
+            "browse" => "browse",
+            "openrouter_web_fetch" => "openrouter_web_fetch",
+            "search_web" => "search_web",
+            "openrouter_web_search" => "openrouter_web_search",
             _ => return Ok(None),
+        };
+        let target = if matches!(tool, "browse" | "openrouter_web_fetch") {
+            let mut url = net::website(string(args, "url", 2048)?)?;
+            if tool == "openrouter_web_fetch" {
+                url.set_fragment(None);
+            }
+            url.into()
+        } else {
+            string(args, "query", 240)?
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase()
         };
         Ok(Some(Self { tool, target }))
     }

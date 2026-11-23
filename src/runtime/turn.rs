@@ -74,11 +74,13 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
     let model = app.models.provider(&task.user, false).await?;
     let profile = app.models.onboarding_profile(&task.user).await?;
     let profile = json!({"display_name":profile.display_name,"chief_name":profile.chief_name});
+    let hosted = super::openrouter_tools::available(&ctx).await?;
     let tools: Vec<_> = app
         .tools
         .iter()
         .filter(|tool| {
             ctx.allows(tool.name())
+                && (!tool.name().starts_with("openrouter_") || hosted.contains(&tool.name()))
                 && (owner || matches!(tool.name(), "delegate" | "send_reply" | "react_to_message"))
         })
         .collect();

@@ -102,6 +102,11 @@ Configured accounts can continue using their existing connection.
 
 ## Public websites
 
+In **Model → OpenRouter tools**, toggle Web search, Web fetch, Date and time,
+and Search models individually. They are enabled by default when OpenRouter
+is the active task provider. Hosted search and fetch are unavailable while
+a browser proxy is configured. The local browser and search still work.
+
 The Chief can read public websites from a domain or HTTPS link and search for
 public sources. Set `TINYBOT_BRAVE_SEARCH_KEY` to use Brave Search. Without a
 key, searches run through the browser worker. Sites may require verification

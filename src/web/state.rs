@@ -71,6 +71,7 @@ pub(super) async fn status(app: &App, user: &str) -> Result<Value> {
     let schedules = crate::schedules::list(&app.db, user).await?;
     let zone = crate::schedules::timezone(&app.db, user).await?;
     let connections = app.models.connections(user).await?;
+    let openrouter_server_tools = app.models.server_tool_settings(user).await?;
     let onboarding = app.models.onboarding_profile(user).await?;
     let browser_proxy = if user == app.operator {
         match proxy::browser_proxy_status() {
@@ -97,6 +98,7 @@ pub(super) async fn status(app: &App, user: &str) -> Result<Value> {
         json!({"user":user,"provider":profile.0,"model":profile.1,"active_task":profile.2,
         "agents":agents,"tasks":tasks,"requests":requests,"connectors":connectors,"members":members,"memory":memory,"grants":grants,
         "schedules":schedules,"time_zone":zone.name(),"openrouter_connected":connections.openrouter_key,
+        "openrouter_server_tools":openrouter_server_tools,
         "codex_model":connections.codex_model,"read_tools":read_tools,"browser_proxy":browser_proxy,
         "onboarding_required":onboarding.required,"display_name":onboarding.display_name,"chief_name":onboarding.chief_name,
         "mcp_approvals":mcp_approvals}),
