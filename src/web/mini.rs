@@ -101,6 +101,17 @@ async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<
         "openrouter-key" => return models::save_openrouter_key(app, user, data).await,
         "openrouter-models" => return models::openrouter_models(app, user).await,
         "openrouter-model" => models::select_openrouter_model(app, user, data).await?,
+        "openrouter-server-tool" => {
+            app.models
+                .set_server_tool(
+                    user,
+                    text(data, "tool", 32)?,
+                    data["enabled"]
+                        .as_bool()
+                        .context("invalid enabled setting")?,
+                )
+                .await?
+        }
         "disconnect-openrouter" => app.models.disconnect_openrouter(user).await?,
         "codex-pair" => return models::pair_codex(app, user, data).await,
         "codex-select" => app.models.select_codex(user).await?,

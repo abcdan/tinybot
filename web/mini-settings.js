@@ -62,7 +62,35 @@ export function model(state) {
         current.append(action('Disconnect task model', 'disconnect-model', {}, 'Task model disconnected.', true));
         content.append(current);
     }
-    content.append(openRouter(state), codexSettings(state));
+    content.append(openRouter(state));
+    if (state.openrouter_server_tools) content.append(openRouterTools(state.openrouter_server_tools));
+    content.append(codexSettings(state));
+}
+
+function openRouterTools(settings) {
+    const options = card('OpenRouter tools', 'Available when OpenRouter is the task model. TinyBot uses its local browser and search when a browser proxy is configured.');
+    for (const [tool, name] of Object.entries({
+        web_search: 'Web search', web_fetch: 'Web fetch', datetime: 'Date and time', search_models: 'Search models'
+    })) {
+        const label = node('label');
+        const toggle = node('input');
+        toggle.type = 'checkbox';
+        toggle.checked = settings[tool] === true;
+        label.append(toggle, document.createTextNode(name));
+        options.append(label);
+        toggle.addEventListener('change', async () => {
+            toggle.disabled = true;
+            try {
+                await api('openrouter-server-tool', {tool, enabled: toggle.checked});
+                settings[tool] = toggle.checked;
+                show(`${name} ${toggle.checked ? 'enabled' : 'disabled'}.`);
+            } catch (error) {
+                toggle.checked = settings[tool] === true;
+                show(error.message, true);
+            } finally { toggle.disabled = false; }
+        });
+    }
+    return options;
 }
 
 let prefetchedModels;

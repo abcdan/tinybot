@@ -840,3 +840,42 @@ test('audit usage shows provider, model and run totals without treating missing 
         await browser.close();
     }
 });
+test('OpenRouter server tool toggles save independently and restore on rejection', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 620}});
+        const page = await context.newPage();
+        const enabled = {web_search: true, web_fetch: true, datetime: true, search_models: true};
+        const saved = [];
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return {user: '1', requests: [], tasks: [], openrouter_server_tools: enabled};
+            assert.equal(action, 'openrouter-server-tool');
+            saved.push(data);
+            enabled[data.tool] = data.enabled;
+            return {ok: true};
+        });
+        await page.route('**/api/mini', async route => {
+            const {action, data} = route.request().postDataJSON();
+            if (action !== 'openrouter-server-tool' || data.tool !== 'web_fetch') return route.fallback();
+            return route.fulfill({status: 503, json: {error: 'Could not save this setting.'}});
+        });
+        await page.goto('https://tinybot.test/mini');
+        await page.getByRole('button', {name: 'Model', exact: true}).click();
+        const search = page.getByRole('checkbox', {name: 'Web search', exact: true});
+        const fetch = page.getByRole('checkbox', {name: 'Web fetch', exact: true});
+        await search.uncheck();
+        await page.getByText('Web search disabled.').waitFor();
+        assert.deepEqual(saved, [{tool: 'web_search', enabled: false}]);
+        await fetch.uncheck();
+        await page.getByText('Could not save this setting.').waitFor();
+        assert.equal(await fetch.isChecked(), true);
+        assert.equal(await page.getByRole('checkbox', {name: 'Date and time'}).isChecked(), true);
+        assert.equal(await page.getByRole('checkbox', {name: 'Search models'}).isChecked(), true);
+        await page.reload();
+        await page.getByRole('button', {name: 'Model', exact: true}).click();
+        assert.equal(await search.isChecked(), false);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
+    } finally {
+        await browser.close();
+    }
+});
