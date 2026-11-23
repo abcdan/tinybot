@@ -1,9 +1,52 @@
+use super::delegation::delegate;
 use super::{Call, Outcome, ToolContext};
 use crate::{audit, security::clip, store};
 use anyhow::{Context, Result, ensure};
-use serde_json::Value;
+use serde_json::{Value, json};
 
-pub(super) async fn execute_approved(ctx: &ToolContext<'_>, payload: Call) -> Result<Outcome> {
+/// Runs a pending approval, if present, and reports whether the turn can continue.
+pub(super) async fn resume_approval(ctx: &ToolContext<'_>) -> Result<bool> {
+    let app = ctx.app;
+    let Some(pending) = store::claim_approval(&app.db, ctx.task).await? else {
+        return Ok(true);
+    };
+    let payload: Value = serde_json::from_str(&pending.payload)?;
+    let (result, announce) = match pending.kind.as_str() {
+        "form-submit" => {
+            audit::record("tool", "form_submission", "approved", Value::Null).await;
+            audit::tool_started("form_submission", &Value::Null).await;
+            let result = async {
+                ensure!(
+                    ctx.still_allows("request_form").await?,
+                    "task or authorization changed"
+                );
+                let values = app.forms.submission(&pending.id).await?;
+                app.workers.browser("submit", &values).await
+            }
+            .await;
+            let result = result.map(Outcome::Continue);
+            audit::tool_finished("form_submission", &result).await;
+            (result, true)
+        }
+        "agent-spec" => {
+            audit::record("tool", "propose_agent", "approved", Value::Null).await;
+            (
+                Ok(Outcome::Continue(json!({"agent_saved":payload["name"]}))),
+                false,
+            )
+        }
+        "chief-delegate" => (delegate(ctx, &payload).await.map(Outcome::Continue), false),
+        _ => {
+            let call: Call = serde_json::from_value(payload["call"].clone())?;
+            audit::record("approval", "external_action", "approved", Value::Null).await;
+            (execute_approved(ctx, call).await, true)
+        }
+    };
+    finish(ctx, &pending.id, result, announce).await?;
+    store::current(&app.db, ctx.task).await
+}
+
+async fn execute_approved(ctx: &ToolContext<'_>, payload: Call) -> Result<Outcome> {
     ensure!(
         ctx.owner && ctx.still_allows(&payload.name).await?,
         "approval access changed"
