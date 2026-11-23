@@ -63,7 +63,7 @@ pub async fn redeem_reply(db: &SqlitePool, user: &str, token: &str) -> Result<bo
     let Some((outbox, task, body, has_provider)) = choice else {
         return Ok(false);
     };
-    if !enqueue_input(&mut tx, user, &task, &body, has_provider).await? {
+    if !enqueue_input(&mut tx, user, &task, &body, has_provider, None).await? {
         return Ok(false);
     }
     sqlx::query("UPDATE users SET active_task=? WHERE id=?")

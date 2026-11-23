@@ -25,6 +25,7 @@ pub enum Inbound {
         external_id: i64,
         user: String,
         text: String,
+        telegram_message_id: Option<i64>,
     },
     Widget(widget::Query),
     Callback(callback::Query),
@@ -84,6 +85,10 @@ pub trait ChannelAdapter: Send + Sync {
 
     async fn draft(&self, _user: &str, _id: i32, _text: &str) -> Result<Option<Duration>> {
         Ok(None)
+    }
+
+    async fn react(&self, _user: &str, _message_id: i64, _emoji: &str) -> Result<Option<i64>> {
+        anyhow::bail!("channel does not support reactions")
     }
 }
 
@@ -210,6 +215,7 @@ struct Update {
 }
 #[derive(Deserialize)]
 struct Message {
+    message_id: i64,
     chat: Chat,
     from: Option<User>,
     text: Option<String>,
@@ -253,6 +259,17 @@ impl ChannelAdapter for Telegram {
         .await
     }
 
+    async fn react(&self, user: &str, message_id: i64, emoji: &str) -> Result<Option<i64>> {
+        let user = user.parse::<i64>().context("invalid Telegram recipient")?;
+        let retry = self
+            .feedback(
+                "setMessageReaction",
+                json!({"chat_id":user,"message_id":message_id,"reaction":[{"type":"emoji","emoji":emoji}]}),
+            )
+            .await?;
+        Ok(retry.map(|delay| delay.as_secs() as i64))
+    }
+
     async fn receive(&self, offset: i64) -> Result<(Vec<Inbound>, i64)> {
         let output = self
             .call(
@@ -284,6 +301,7 @@ impl ChannelAdapter for Telegram {
                     external_id: update.update_id,
                     user: user.id.to_string(),
                     text: message.text.unwrap_or_default(),
+                    telegram_message_id: Some(message.message_id),
                 })
             })
             .collect();
@@ -430,9 +448,29 @@ pub async fn listen(db: SqlitePool, operator: String, adapter: std::sync::Arc<dy
                         external_id,
                         user,
                         text,
+                        telegram_message_id,
                     } => {
-                        store::ingest(&db, &operator, adapter.name(), external_id, &user, &text)
+                        if let Some(message_id) = telegram_message_id {
+                            store::ingest_telegram(
+                                &db,
+                                &operator,
+                                external_id,
+                                &user,
+                                &text,
+                                message_id,
+                            )
                             .await?;
+                        } else {
+                            store::ingest(
+                                &db,
+                                &operator,
+                                adapter.name(),
+                                external_id,
+                                &user,
+                                &text,
+                            )
+                            .await?;
+                        }
                     }
                     Inbound::Widget(query) => {
                         let data = widget::answer(&db, &query).await;
@@ -493,6 +531,12 @@ async fn send_outbound(
     adapter: &dyn ChannelAdapter,
     item: &store::Outbound,
 ) -> Result<Option<i64>> {
+    if item.reaction_event.is_some() {
+        return match store::reaction_target(db, item).await? {
+            Some(message_id) => adapter.react(&item.user, message_id, &item.body).await,
+            None => Ok(None),
+        };
+    }
     let button = item.button.as_deref();
     if let Some(request) = button.and_then(|button| button.strip_prefix("choice/")) {
         let choice = forms::widget_choice(db, &item.user, request).await?;
@@ -534,6 +578,104 @@ mod tests {
         let mut mock = mock.lock().await;
         mock.0.push((method, data));
         Json(mock.1.pop_front().expect("unexpected Telegram request"))
+    }
+
+    #[tokio::test]
+    async fn reactions_use_the_latest_private_telegram_message_id() {
+        let updates = json!({"ok":true,"result":[
+            {"update_id":800,"message":{"message_id":51,"chat":{"id":42,"type":"private"},
+                "from":{"id":42,"is_bot":false},"text":"Start a task"}},
+            {"update_id":801,"message":{"message_id":52,"chat":{"id":-42,"type":"group"},
+                "from":{"id":42,"is_bot":false},"text":"Ignore group messages"}}
+        ]});
+        let callback = json!({"ok":false,"error_code":429,"parameters":{"retry_after":3}});
+        let mock: Mock = Arc::new(Mutex::new((
+            Vec::new(),
+            VecDeque::from([updates, callback, json!({"ok":true,"result":true})]),
+        )));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let telegram = Telegram {
+            client: reqwest::Client::new(),
+            api: format!("http://{}/botTEST", listener.local_addr().unwrap()),
+            origin: "https://example.test".into(),
+        };
+        let app = Router::new()
+            .route("/botTEST/{method}", post(record))
+            .with_state(mock.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (updates, offset) = telegram.receive(0).await.unwrap();
+        assert_eq!(offset, 802);
+        let [
+            Inbound::Message {
+                external_id,
+                user,
+                text,
+                telegram_message_id: Some(message_id),
+            },
+        ] = updates.as_slice()
+        else {
+            panic!("expected one private Telegram message")
+        };
+        assert_eq!((*external_id, *message_id), (800, 51));
+
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!().run(&db).await.unwrap();
+        store::seed(&db, user).await.unwrap();
+        sqlx::query("UPDATE users SET provider='codex' WHERE id=?")
+            .bind(user)
+            .execute(&db)
+            .await
+            .unwrap();
+        store::ingest_telegram(&db, user, *external_id, user, text, *message_id)
+            .await
+            .unwrap();
+        let task = store::claim(&db).await.unwrap().unwrap();
+
+        assert!(store::REACTION_EMOJIS.contains(&"👍"));
+        assert!(store::queue_reaction(&db, &task, "✅").await.is_err());
+        let mut other = task.clone();
+        other.user = "43".into();
+        assert!(!store::queue_reaction(&db, &other, "👀").await.unwrap());
+        assert!(store::queue_reaction(&db, &task, "❤️").await.unwrap());
+        assert!(!store::queue_reaction(&db, &task, "🔥").await.unwrap());
+        let item = store::claim_outbox(&db).await.unwrap().unwrap();
+        assert_eq!(send_outbound(&db, &telegram, &item).await.unwrap(), Some(3));
+        store::recover(&db).await.unwrap();
+        let recovered = store::claim_outbox(&db).await.unwrap().unwrap();
+        assert_eq!(recovered.id, item.id);
+        let task = store::claim(&db).await.unwrap().unwrap();
+        assert_eq!(
+            send_outbound(&db, &telegram, &recovered).await.unwrap(),
+            None
+        );
+        sqlx::query("DELETE FROM outbox WHERE id=?")
+            .bind(item.id)
+            .execute(&db)
+            .await
+            .unwrap();
+        assert!(!store::queue_reaction(&db, &task, "🔥").await.unwrap());
+
+        store::ingest(&db, user, "mock", 1, user, "Synthetic follow-up")
+            .await
+            .unwrap();
+        assert!(!store::queue_reaction(&db, &task, "👍").await.unwrap());
+        assert_eq!(store::reaction_target(&db, &item).await.unwrap(), None);
+        store::settle(&db, &task, "idle", None).await.unwrap();
+        let next = store::claim(&db).await.unwrap().unwrap();
+        assert!(!store::queue_reaction(&db, &next, "👍").await.unwrap());
+        assert!(store::claim_outbox(&db).await.unwrap().is_none());
+
+        let mock = mock.lock().await;
+        let calls = &mock.0;
+        let reaction =
+            json!({"chat_id":42,"message_id":51,"reaction":[{"type":"emoji","emoji":"❤"}]});
+        assert_eq!(calls[1], ("setMessageReaction".into(), reaction));
+        assert_eq!(calls[1], calls[2]);
+        server.abort();
     }
 
     #[tokio::test]
