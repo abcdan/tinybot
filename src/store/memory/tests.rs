@@ -253,6 +253,151 @@ async fn memory_writes_require_the_persisted_running_revision_and_access() {
 }
 
 #[tokio::test]
+async fn automatic_memory_can_merge_and_retire_only_its_own_active_notes() {
+    let db = fixture().await;
+    let task = running(&db, "owner", None).await;
+    for text in ["Preferred plan is Basic", "Preferred plan is Monthly"] {
+        assert!(
+            apply_automatic(&db, &task, None, false, Some(text), &[])
+                .await
+                .unwrap()
+        );
+    }
+    let originals = candidates(&db, &task, None, "preferred plan")
+        .await
+        .unwrap();
+    assert!(originals.iter().all(|note| note.automatic));
+    let ids: Vec<_> = originals.into_iter().map(|note| note.id).collect();
+    let merged = "Preferred plan is Basic Monthly";
+    assert!(
+        apply_automatic(&db, &task, None, false, Some(merged), &ids)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !apply_automatic(&db, &task, None, false, Some("Stale replacement"), &ids)
+            .await
+            .unwrap()
+    );
+    assert_eq!(recall(&db, &task, None, "plan").await.unwrap(), [merged]);
+    let (visible, _) = entries(&db, "owner", MemoryScope::Chief, None, None)
+        .await
+        .unwrap();
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].body, merged);
+    let merged_id = visible[0].id.clone();
+    assert!(
+        !apply_automatic(&db, &task, Some("one"), false, None, &[merged_id.clone()])
+            .await
+            .unwrap()
+    );
+    assert!(
+        !apply_automatic(&db, &task, None, true, None, &[merged_id.clone()])
+            .await
+            .unwrap()
+    );
+    assert!(
+        apply_automatic(&db, &task, None, false, None, &[merged_id])
+            .await
+            .unwrap()
+    );
+    assert!(chief_context(&db, &task).await.unwrap().is_empty());
+
+    assert!(
+        apply_automatic(&db, &task, None, false, Some(merged), &[])
+            .await
+            .unwrap()
+    );
+    let saved = remember(&db, &task, None, false, merged).await.unwrap();
+    let notes = candidates(&db, &task, None, "plan").await.unwrap();
+    assert_eq!(notes[0].id, saved.id);
+    assert!(!notes[0].automatic);
+    assert!(
+        !apply_automatic(&db, &task, None, false, None, &[saved.id])
+            .await
+            .unwrap()
+    );
+    assert_eq!(chief_context(&db, &task).await.unwrap(), [merged]);
+    let archived_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM agent_memory WHERE archived_at IS NOT NULL")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(archived_count, 3);
+}
+
+#[tokio::test]
+async fn memory_candidates_prioritize_older_matches_without_expanding_access() {
+    let db = fixture().await;
+    let task = running(&db, "owner", None).await;
+    remember(&db, &task, None, false, "Raspberry pastry preference")
+        .await
+        .unwrap();
+    for index in 0..30 {
+        remember(&db, &task, None, false, &format!("Recent note {index}"))
+            .await
+            .unwrap();
+    }
+    remember(&db, &task, Some("one"), false, "Raspberry helper private")
+        .await
+        .unwrap();
+    remember(&db, &task, None, true, "Raspberry group")
+        .await
+        .unwrap();
+    let notes = candidates(&db, &task, None, "What raspberry pastry?")
+        .await
+        .unwrap();
+    assert_eq!(notes.len(), CANDIDATE_LIMIT as usize);
+    assert_eq!(notes[0].body, "Raspberry pastry preference");
+    assert_eq!(notes[1].scope, Some(MemoryScope::Group));
+    assert!(
+        notes
+            .iter()
+            .all(|note| note.scope != Some(MemoryScope::Helper))
+    );
+
+    sqlx::query("INSERT INTO memory VALUES('published','owner','one','Shared Raspberry')")
+        .execute(&db)
+        .await
+        .unwrap();
+    let guest = running(&db, "guest", Some("one")).await;
+    let notes = candidates(&db, &guest, Some("one"), "Raspberry")
+        .await
+        .unwrap();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].body, "Shared Raspberry");
+    assert_eq!(notes[0].scope, None);
+    assert!(
+        !apply_automatic(
+            &db,
+            &guest,
+            Some("one"),
+            false,
+            Some("Injected preference"),
+            &[]
+        )
+        .await
+        .unwrap()
+    );
+    sqlx::query("UPDATE tasks SET revision=revision+1 WHERE id=?")
+        .bind(&task.id)
+        .execute(&db)
+        .await
+        .unwrap();
+    assert!(
+        candidates(&db, &task, None, "Raspberry")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !apply_automatic(&db, &task, None, false, Some("Stale preference"), &[])
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
 async fn migration_preserves_private_notes_and_the_published_revocation_path() {
     let db = database().await;
     let migrator = sqlx::migrate!();
@@ -279,11 +424,12 @@ async fn migration_preserves_private_notes_and_the_published_revocation_path() {
     .await
     .unwrap();
     let guest = running(&db, "guest", Some("one")).await;
-    let migration = migrator
+    for migration in migrator
         .iter()
-        .find(|migration| migration.version == 14)
-        .unwrap();
-    sqlx::raw_sql(&migration.sql).execute(&db).await.unwrap();
+        .filter(|migration| (14..=15).contains(&migration.version))
+    {
+        sqlx::raw_sql(&migration.sql).execute(&db).await.unwrap();
+    }
 
     let (notes, _) = entries(&db, "owner", MemoryScope::Chief, None, None)
         .await

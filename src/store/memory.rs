@@ -2,6 +2,7 @@ use super::Task;
 use crate::security::{id, now};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sqlx::{FromRow, SqliteConnection, SqlitePool};
 
 #[cfg(test)]
@@ -10,6 +11,8 @@ mod tests;
 const PAGE_SIZE: i64 = 30;
 const CONTEXT_LIMIT: i64 = 16;
 const RECALL_LIMIT: i64 = 8;
+const CANDIDATE_LIMIT: i64 = 24;
+const ARCHIVE_LIMIT: usize = 8;
 const MAX_NOTE_BYTES: usize = 1200;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize, sqlx::Type)]
@@ -32,6 +35,14 @@ pub struct MemoryEntry {
     pub created_at: i64,
 }
 
+#[derive(Debug, FromRow, Serialize)]
+pub(crate) struct MemoryCandidate {
+    pub id: String,
+    pub body: String,
+    pub scope: Option<MemoryScope>,
+    pub automatic: bool,
+}
+
 pub async fn entries(
     db: &SqlitePool,
     owner: &str,
@@ -42,7 +53,8 @@ pub async fn entries(
     validate_scope(scope, agent)?;
     let mut notes: Vec<MemoryEntry> = sqlx::query_as(
         "SELECT sequence,id,scope,agent,body,created_at FROM agent_memory
-         WHERE owner=? AND scope=? AND agent IS ? AND (? IS NULL OR sequence < ?)
+         WHERE owner=? AND scope=? AND agent IS ? AND archived_at IS NULL
+         AND (? IS NULL OR sequence < ?)
          ORDER BY sequence DESC LIMIT ?",
     )
     .bind(owner)
@@ -111,6 +123,27 @@ pub async fn helper_context(
     read(db, parent, Some(helper), "", CONTEXT_LIMIT).await
 }
 
+pub(crate) async fn candidates(
+    db: &SqlitePool,
+    task: &Task,
+    helper: Option<&str>,
+    request: &str,
+) -> Result<Vec<MemoryCandidate>> {
+    let mut keywords = Vec::new();
+    for word in request.split(|character: char| !character.is_alphanumeric()) {
+        if (3..=64).contains(&word.len()) {
+            let word = word.to_lowercase();
+            if !keywords.contains(&word) {
+                keywords.push(word);
+                if keywords.len() == 12 {
+                    break;
+                }
+            }
+        }
+    }
+    read_notes(db, task, helper, "", &keywords, CANDIDATE_LIMIT).await
+}
+
 pub async fn recall(
     db: &SqlitePool,
     task: &Task,
@@ -147,6 +180,85 @@ pub async fn remember(
     Ok(entry)
 }
 
+pub(crate) async fn apply_automatic(
+    db: &SqlitePool,
+    task: &Task,
+    helper: Option<&str>,
+    group: bool,
+    body: Option<&str>,
+    archive_ids: &[String],
+) -> Result<bool> {
+    ensure!(
+        archive_ids.len() <= ARCHIVE_LIMIT,
+        "too many memory updates"
+    );
+    ensure!(
+        !group || helper.is_none(),
+        "group memory requires the Chief"
+    );
+    let body = body.map(validated_body).transpose()?;
+    if body.is_none() && archive_ids.is_empty() {
+        return Ok(false);
+    }
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+    let (scope, agent) = match audience(&mut tx, task, helper).await? {
+        Some(Audience::Chief) if group => (MemoryScope::Group, None),
+        Some(Audience::Chief) => (MemoryScope::Chief, None),
+        Some(Audience::OwnedHelper(agent)) => (MemoryScope::Helper, Some(agent)),
+        _ => return Ok(false),
+    };
+    let ids = json!(archive_ids).to_string();
+    let time = now();
+    if !archive_ids.is_empty() {
+        let candidates: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM agent_memory
+             WHERE owner=? AND scope=? AND agent IS ? AND automatic=1 AND archived_at IS NULL
+               AND id IN (SELECT value FROM json_each(?))",
+        )
+        .bind(&task.user)
+        .bind(scope)
+        .bind(agent)
+        .bind(&ids)
+        .fetch_one(&mut *tx)
+        .await?;
+        if candidates != archive_ids.len() as i64 {
+            return Ok(false);
+        }
+    }
+    let mut changed = false;
+    if let Some(body) = body {
+        changed = sqlx::query(
+            "INSERT INTO agent_memory(id,owner,scope,agent,body,created_at,automatic)
+             VALUES (?,?,?,?,?,?,1) ON CONFLICT DO NOTHING",
+        )
+        .bind(id())
+        .bind(&task.user)
+        .bind(scope)
+        .bind(agent)
+        .bind(body)
+        .bind(time)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            == 1;
+    }
+    if !archive_ids.is_empty() {
+        changed |= sqlx::query(
+            "UPDATE agent_memory SET archived_at=?
+             WHERE id IN (SELECT value FROM json_each(?)) AND body IS NOT ?",
+        )
+        .bind(time)
+        .bind(ids)
+        .bind(body)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            > 0;
+    }
+    tx.commit().await?;
+    Ok(changed)
+}
+
 async fn save_entry(
     connection: &mut SqliteConnection,
     owner: &str,
@@ -154,14 +266,12 @@ async fn save_entry(
     agent: Option<&str>,
     body: &str,
 ) -> Result<MemoryEntry> {
-    let body = body.trim();
-    ensure!(
-        !body.is_empty() && body.len() <= MAX_NOTE_BYTES && !body.contains('\0'),
-        "memory needs text of up to {MAX_NOTE_BYTES} bytes"
-    );
-    sqlx::query(
-        "INSERT INTO agent_memory(id,owner,scope,agent,body,created_at)
-         VALUES (?,?,?,?,?,?) ON CONFLICT DO NOTHING",
+    let body = validated_body(body)?;
+    Ok(sqlx::query_as(
+        "INSERT INTO agent_memory(id,owner,scope,agent,body,created_at) VALUES (?,?,?,?,?,?)
+         ON CONFLICT(owner,scope,coalesce(agent,''),body) WHERE archived_at IS NULL
+         DO UPDATE SET automatic=0
+         RETURNING sequence,id,scope,agent,body,created_at",
     )
     .bind(id())
     .bind(owner)
@@ -169,18 +279,17 @@ async fn save_entry(
     .bind(agent)
     .bind(body)
     .bind(now())
-    .execute(&mut *connection)
-    .await?;
-    Ok(sqlx::query_as(
-        "SELECT sequence,id,scope,agent,body,created_at FROM agent_memory
-         WHERE owner=? AND scope=? AND agent IS ? AND body=?",
-    )
-    .bind(owner)
-    .bind(scope)
-    .bind(agent)
-    .bind(body)
     .fetch_one(connection)
     .await?)
+}
+
+fn validated_body(body: &str) -> Result<&str> {
+    let body = body.trim();
+    ensure!(
+        !body.is_empty() && body.len() <= MAX_NOTE_BYTES && !body.contains('\0'),
+        "memory needs text of up to {MAX_NOTE_BYTES} bytes"
+    );
+    Ok(body)
 }
 
 fn validate_scope(scope: MemoryScope, agent: Option<&str>) -> Result<()> {
@@ -246,6 +355,21 @@ async fn read(
     query: &str,
     limit: i64,
 ) -> Result<Vec<String>> {
+    Ok(read_notes(db, task, helper, query, &[], limit)
+        .await?
+        .into_iter()
+        .map(|candidate| candidate.body)
+        .collect())
+}
+
+async fn read_notes(
+    db: &SqlitePool,
+    task: &Task,
+    helper: Option<&str>,
+    query: &str,
+    keywords: &[String],
+    limit: i64,
+) -> Result<Vec<MemoryCandidate>> {
     let mut tx = db.begin().await?;
     let Some(audience) = audience(&mut tx, task, helper).await? else {
         return Ok(Vec::new());
@@ -259,15 +383,16 @@ async fn read(
         ),
         Audience::Guest { agent, owner } => (None, Some(*agent), Some(owner.as_str())),
     };
-    let notes = sqlx::query_scalar(
+    let notes = sqlx::query_as(
         "WITH notes AS (
-             SELECT body,sequence,0 AS published FROM agent_memory
-             WHERE owner=? AND ((scope=? AND agent IS ?) OR (? AND scope='group'))
+             SELECT id,body,scope,automatic,sequence,0 AS published FROM agent_memory
+             WHERE owner=? AND archived_at IS NULL AND ((scope=? AND agent IS ?) OR (? AND scope='group'))
              UNION ALL
-             SELECT body,rowid,1 AS published FROM memory WHERE owner=? AND agent=?
+             SELECT id,body,NULL,0,rowid,1 AS published FROM memory WHERE owner=? AND agent=?
          )
-         SELECT body FROM notes WHERE instr(lower(body), lower(?))>0
-         ORDER BY published, sequence DESC LIMIT ?",
+         SELECT id,body,scope,automatic FROM notes WHERE instr(lower(body), lower(?))>0
+         ORDER BY (SELECT COUNT(*) FROM json_each(?) WHERE instr(lower(notes.body), value)>0) DESC,
+                  published, sequence DESC LIMIT ?",
     )
     .bind(&task.user)
     .bind(scope)
@@ -276,6 +401,7 @@ async fn read(
     .bind(published_owner)
     .bind(agent)
     .bind(query)
+    .bind(json!(keywords).to_string())
     .bind(limit)
     .fetch_all(&mut *tx)
     .await?;
