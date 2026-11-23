@@ -1,4 +1,5 @@
 use super::{ModelProvider, TextDelta, ToolDefinition, native_reply, native_tool_proposal};
+use crate::audit::{self, ModelCall};
 use anyhow::{Context, Result, anyhow, ensure};
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -36,11 +37,14 @@ impl ModelProvider for Codex {
         tools: &[ToolDefinition],
         delta: Option<&mut TextDelta<'_>>,
     ) -> Result<String> {
-        tokio::time::timeout(
-            Duration::from_secs(100),
-            self.run(system, input, tools, delta),
-        )
-        .await?
+        audit::provider_call("codex", &self.model, async |call| {
+            tokio::time::timeout(
+                Duration::from_secs(100),
+                self.run(system, input, tools, delta, call),
+            )
+            .await?
+        })
+        .await
     }
 }
 
@@ -51,6 +55,7 @@ impl Codex {
         input: &str,
         tools: &[ToolDefinition],
         mut delta: Option<&mut TextDelta<'_>>,
+        call: &mut ModelCall,
     ) -> Result<String> {
         let mut command = Command::new(&self.binary);
         command.args([
@@ -125,6 +130,7 @@ impl Codex {
         )
         .await?;
         let thread = wait_result(&mut lines, 2).await?;
+        call.model(&thread["model"]);
         let thread = thread["thread"]["id"]
             .as_str()
             .context("Codex did not create a thread")?;
@@ -139,12 +145,23 @@ impl Codex {
                     if value["method"] == "item/tool/call" && !tools.is_empty() {
                         // This process only proposes calls. The broker executes them after this
                         // ephemeral turn ends and supplies the result in the next turn's history.
-                        return dynamic_tool_call(
-                            tools,
-                            thread,
-                            turn_id.as_deref(),
-                            &value["params"],
-                        );
+                        let params = &value["params"];
+                        let result = dynamic_tool_call(tools, thread, turn_id.as_deref(), params);
+                        if result.is_ok() && !call.has_tokens() {
+                            let tool_turn = params["turnId"].as_str();
+                            let _ = tokio::time::timeout(Duration::from_millis(500), async {
+                                while let Ok(Some(line)) = lines.next_line().await {
+                                    if let Ok(note) = serde_json::from_str(&line) {
+                                        observe_turn(call, thread, tool_turn, &note);
+                                        if call.has_tokens() {
+                                            break;
+                                        }
+                                    }
+                                }
+                            })
+                            .await;
+                        }
+                        return result;
                     }
                     rpc(&mut child,json!({"id":value["id"],"error":{"code":-32601,"message":"This Codex tool is unavailable in TinyBot"}})).await?;
                 } else if value["id"] == 3 {
@@ -152,6 +169,7 @@ impl Codex {
                     turn_id = value["result"]["turn"]["id"].as_str().map(str::to_owned);
                 }
             }
+            observe_turn(call, thread, turn_id.as_deref(), &value);
             if let Some(delta) = delta.as_deref_mut()
                 && let Some(text) = preview.update(thread, &value)
             {
@@ -183,6 +201,26 @@ impl Codex {
         Err(anyhow!(
             "Codex App Server stopped before completing the turn"
         ))
+    }
+}
+
+fn observe_turn(call: &mut ModelCall, thread: &str, turn: Option<&str>, value: &Value) {
+    let params = &value["params"];
+    if params["threadId"] != thread
+        || !params["turnId"]
+            .as_str()
+            .is_some_and(|id| turn.is_none_or(|turn| id == turn))
+    {
+        return;
+    }
+    match value["method"].as_str() {
+        Some("thread/tokenUsage/updated") => {
+            // Each app server runs one turn in a fresh ephemeral thread. Usage
+            // updates are cumulative snapshots for that call, not increments.
+            call.codex(&params["tokenUsage"]["total"]);
+        }
+        Some("model/rerouted") => call.model(&params["toModel"]),
+        _ => {}
     }
 }
 
@@ -280,6 +318,45 @@ async fn wait_result(lines: &mut Lines<BufReader<ChildStdout>>, id: u64) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn codex_end_of_turn_usage_is_cumulative_and_keeps_cost_unknown() {
+        audit::provider_call("codex", "fixture-requested", async |call| {
+            let snapshot = |turn: &str, count: i64| {
+                json!({
+                    "method":"thread/tokenUsage/updated","params":{
+                        "threadId":"thread","turnId":turn,"tokenUsage":{
+                            "last":{"inputTokens":1,"outputTokens":1,"totalTokens":2},
+                            "total":{"inputTokens":count,"outputTokens":count,"totalTokens":count*2}
+                        }
+                    }
+                })
+            };
+            observe_turn(call, "thread", Some("valid"), &snapshot("valid", 6));
+            observe_turn(call, "thread", Some("valid"), &snapshot("valid", 8));
+            observe_turn(call, "thread", Some("valid"), &snapshot("invalid", 99));
+            observe_turn(
+                call,
+                "thread",
+                Some("valid"),
+                &json!({
+                    "method":"model/rerouted","params":{
+                        "threadId":"thread","turnId":"valid","toModel":"fixture-actual"
+                    }
+                }),
+            );
+            assert_eq!(
+                json!(call),
+                json!({
+                    "provider":"codex","model":"fixture-actual",
+                    "usage":{"input_tokens":8,"output_tokens":8,"total_tokens":16,"cost_usd":null}
+                })
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
 
     #[test]
     fn codex_dynamic_tool_request_requires_the_registered_function_and_active_turn() {
