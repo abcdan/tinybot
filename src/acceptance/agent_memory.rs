@@ -138,6 +138,126 @@ async fn chief_and_helper_use_durable_memory_tools_across_conversations() {
 }
 use super::signed_mini_init;
 use crate::web;
+
+const DUTCH: &str = "The user prefers Dutch replies.";
+const ENGLISH: &str = "The user prefers English replies.";
+const LEARN_DUTCH: &str = "I prefer all replies to be in Dutch.";
+const LEARN_ENGLISH: &str = "I now prefer all replies in English.";
+const ASK_LANGUAGE: &str = "Which language do I prefer for replies?";
+const REMOVE_LANGUAGE: &str = "I no longer have a preferred reply language.";
+const UNRELATED_MEMORY: &str = "The site palette is navy.";
+
+struct SmartMemoryDecisions;
+
+#[async_trait]
+impl ModelProvider for SmartMemoryDecisions {
+    async fn complete(&self, system: &str, input: &str) -> Result<String> {
+        assert_eq!(system, "Jev memory decisions");
+        let input: Value = serde_json::from_str(input)?;
+        let message = input["state"]["message"].as_str().unwrap();
+        assert!(!message.contains("sk-or-"));
+        let questions = input["questions"].as_object().unwrap();
+        let notes = input["state"]["notes"].as_object().unwrap();
+        let mut answers = serde_json::Map::new();
+        for name in questions.keys() {
+            let answer = if name == "learn" {
+                json!({"type":"noul","noul":if matches!(message, LEARN_DUTCH | LEARN_ENGLISH) {0.99} else {0.1}})
+            } else {
+                let (kind, index) = name.rsplit_once('_').unwrap();
+                let note = &notes[&format!("note_{index}")];
+                match kind {
+                    "relevant" => {
+                        json!({"type":"noul","noul":if message == ASK_LANGUAGE && note == DUTCH {0.99} else {0.1}})
+                    }
+                    "change" => {
+                        let choice = match message {
+                            LEARN_ENGLISH if note == DUTCH => "replace",
+                            REMOVE_LANGUAGE if note == ENGLISH => "retire",
+                            _ => "keep",
+                        };
+                        json!({"type":"choice","choice":choice,"probabilities":{(choice):0.99}})
+                    }
+                    _ => panic!("unexpected memory question {name}"),
+                }
+            };
+            answers.insert(name.clone(), answer);
+        }
+        Ok(Value::Object(answers).to_string())
+    }
+}
+
+struct SmartMemoryChief;
+
+#[async_trait]
+impl ModelProvider for SmartMemoryChief {
+    async fn complete(&self, system: &str, input: &str) -> Result<String> {
+        let input: Value = serde_json::from_str(input)?;
+        if system.starts_with("Extract one short durable user fact") {
+            let note = match input["message"].as_str().unwrap() {
+                LEARN_DUTCH => DUTCH,
+                LEARN_ENGLISH => ENGLISH,
+                _ => panic!("extracted a note from an unrelated or sensitive message"),
+            };
+            return Ok(json!({"text":note}).to_string());
+        }
+        if input["latest_request"] == ASK_LANGUAGE {
+            assert_eq!(input["memory"], json!([DUTCH]));
+        }
+        Ok(json!({"kind":"reply","text":"Got it."}).to_string())
+    }
+}
+
+#[tokio::test]
+async fn jev_retrieves_and_retires_automatic_memories_from_telegram_messages() {
+    let db = fixture().await;
+    let mut app = app_with_model(&db, Arc::new(SmartMemoryChief));
+    app.models = app
+        .models
+        .with_memory_decisions(Arc::new(SmartMemoryDecisions));
+    let manual = store::memory::save(
+        &db,
+        "1",
+        store::memory::MemoryScope::Chief,
+        None,
+        UNRELATED_MEMORY,
+    )
+    .await
+    .unwrap();
+    for (index, text) in [
+        LEARN_DUTCH,
+        ASK_LANGUAGE,
+        LEARN_ENGLISH,
+        REMOVE_LANGUAGE,
+        "My API key is sk-or-synthetic",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let message_id = index as i64 + 1;
+        store::ingest_telegram(&db, "1", message_id, "1", text, message_id + 50)
+            .await
+            .unwrap();
+        let task = store::claim(&db).await.unwrap().unwrap();
+        runtime::work(&app, &task).await.unwrap();
+    }
+    let rows: Vec<(String, bool, bool)> = sqlx::query_as(
+        "SELECT body,automatic,archived_at IS NOT NULL FROM agent_memory WHERE owner='1' ORDER BY sequence",
+    ).fetch_all(&db).await.unwrap();
+    assert_eq!(
+        rows,
+        [
+            (UNRELATED_MEMORY.into(), false, false),
+            (DUTCH.into(), true, true),
+            (ENGLISH.into(), true, true)
+        ]
+    );
+    let (active, _) =
+        store::memory::entries(&db, "1", store::memory::MemoryScope::Chief, None, None)
+            .await
+            .unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].id, manual.id);
+}
 #[tokio::test]
 async fn signed_memory_settings_are_scoped_to_the_owner() {
     let db = super::fixture().await;

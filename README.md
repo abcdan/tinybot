@@ -143,6 +143,12 @@ for the group” to share a note with your Chief and all your owned helpers.
 Manage each scope under **Settings & forms → Memory**. Invited members retain
 access to the notes you explicitly publish for their shared helper.
 
+With your saved OpenRouter key, Jev picks relevant notes for each turn and
+checks whether a new Telegram message contains a lasting fact or preference.
+TinyBot saves a short private note when appropriate and can retire older
+automatic notes when you correct them. Explicitly saved notes stay available
+until you remove them.
+
 ## MCP connectors
 
 Send a message such as **Connect the Atlassian MCP**. TinyBot searches the MCP

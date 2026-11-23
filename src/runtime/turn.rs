@@ -50,7 +50,6 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
     if !resume_approval(&ctx).await? {
         return store::settle(&app.db, task, "idle", None).await;
     }
-    let memory = store::memory::chief_context(&app.db, task).await?;
     let saved: Vec<(String, String, Option<String>)> = sqlx::query_as(
         "SELECT a.id,a.name,CASE WHEN a.owner=? THEN a.instructions END FROM agents a
          WHERE (a.owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=?))
@@ -82,11 +81,21 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
         })
         .collect();
     let definitions = tool_definitions(&tools);
-    let latest_request: Option<(i64, String)> = sqlx::query_as(
-        "SELECT id,body FROM events WHERE task=? AND role='user' ORDER BY id DESC LIMIT 1",
+    let latest_request: Option<(i64, String, Option<i64>)> = sqlx::query_as(
+        "SELECT id,body,telegram_message_id FROM events WHERE task=? AND role='user' ORDER BY id DESC LIMIT 1",
     )
     .bind(&task.id)
     .fetch_optional(&app.db)
+    .await?;
+    let memory = super::memory::for_chief(
+        app,
+        task,
+        latest_request.as_ref().map_or("", |(_, text, _)| text),
+        owner
+            && latest_request
+                .as_ref()
+                .is_some_and(|(_, _, id)| id.is_some_and(|id| id > 0)),
+    )
     .await?;
     let mut summary = task.summary.clone();
     let mut goal = task.goal.clone();
@@ -99,7 +108,7 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
             return store::settle(&app.db, task, "idle", None).await;
         }
         let mut records = store::history(&app.db, &task.id).await?;
-        if let Some((event, _)) = &latest_request {
+        if let Some((event, _, _)) = &latest_request {
             consulted_helper |= records
                 .iter()
                 .rev()
@@ -149,7 +158,7 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
             .collect::<Vec<_>>();
         let zone = schedules::timezone(&app.db, &task.user).await?;
         let input = json!({
-            "goal":goal,"summary":summary,"latest_request":latest_request.as_ref().map(|(_,text)|clip(text,8000)),"history":history,"memory":memory,
+            "goal":goal,"summary":summary,"latest_request":latest_request.as_ref().map(|(_,text,_)|clip(text,8000)),"history":history,"memory":memory,
             "local_time":schedules::local_iso(now(),zone),"time_zone":zone.name(),
             "shared_helper_scope":agent.as_ref().filter(|_|!owner).map(|agent|&agent.id),
             "telegram_reply":store::latest_reply_context(&app.db, &task.id).await?,
