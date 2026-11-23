@@ -86,6 +86,7 @@ legend { font-size: .83rem; font-weight: 650; }
 .actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
 .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; justify-content: space-between; }
 .meta { font-size: .82rem; color: var(--secondary); }
+.memory-note { color: var(--text); white-space: pre-wrap; }
 pre { background: var(--background); border-radius: 8px; padding: 10px; font-size: .83rem; white-space: pre-wrap; overflow-wrap: anywhere; }
 details { margin-block: 12px; }
 summary { cursor: pointer; font-size: .87rem; font-weight: 650; }
