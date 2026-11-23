@@ -258,7 +258,10 @@ async fn ingest_message(
                 sqlx::query("UPDATE users SET active_task=NULL WHERE id=?").bind(user).execute(&mut *tx).await?;
                 response = Some("Send a message to start your new task.".into());
             }
-            "/new" => active = None,
+            "/new" => {
+                active = None;
+                telegram.reply = None;
+            }
             "/reconcile" => {
                 let resumed=sqlx::query("UPDATE tasks SET state='queued',revision=revision+1,updated=?
                     WHERE id=? AND user=? AND state='uncertain'").bind(now()).bind(&active).bind(user)
