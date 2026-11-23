@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     forms::{Field, FormSpec, WebsiteForm},
-    model::ModelProvider,
+    model::{ModelProvider, TextDelta, ToolDefinition},
     security::now,
     store::Task,
 };
@@ -79,14 +79,35 @@ struct WidgetChief;
 
 #[async_trait]
 impl ModelProvider for WidgetChief {
+    async fn complete_turn(
+        &self,
+        system: &str,
+        input: &str,
+        tools: &[ToolDefinition],
+        _delta: Option<&mut TextDelta<'_>>,
+    ) -> Result<String> {
+        for (name, field) in [
+            ("request_input", "fields"),
+            ("send_reply", "suggested_replies"),
+            ("send_card", "text"),
+            ("react_to_message", "emoji"),
+            ("browse", "url"),
+            ("search_web", "query"),
+        ] {
+            let tool = tools.iter().find(|tool| tool.name == name).unwrap();
+            assert!(tool.input_schema["properties"][field].is_object());
+        }
+        self.complete(system, input).await
+    }
+
     async fn complete(&self, system: &str, input: &str) -> Result<String> {
         assert!(system.starts_with("You are TinyBot."));
         let context: Value = serde_json::from_str(input)?;
         let history = context["history"].as_array().unwrap();
         let last = history.last().unwrap()["text"].as_str().unwrap();
         let step = if last == "Can you make a widget that says hello?" {
-            assert!(system.contains("TinyBot renders it natively."));
-            json!({"kind":"widget","text":"Hello!","suggested_replies":["Say it in Dutch"]})
+            assert!(system.contains("Call send_card"));
+            json!({"kind":"tool","name":"send_card","args":{"text":"Hello!","suggested_replies":["Say it in Dutch"]}})
         } else if last == "Create a Mini App form with one choice." {
             assert!(system.contains("surface=mini_app"));
             json!({"kind":"tool","name":"request_input","args":{
@@ -108,7 +129,14 @@ impl ModelProvider for WidgetChief {
         {
             json!({"kind":"reply","text":"I saved Weekend plans with high priority."})
         } else if last == "Give me the menu" {
-            json!({"kind":"reply","text":"1. Search online\n2. Try a simple widget"})
+            json!({"kind":"tool","name":"send_reply","args":{
+                "text":"1. Search online\n2. Try a simple widget",
+                "suggested_replies":["Search online", "Try a simple widget"]
+            }})
+        } else if last == "React with a thumbs-up." {
+            json!({"kind":"tool","name":"react_to_message","args":{"emoji":"👍"}})
+        } else if last == r#"{"queued":true}"# {
+            json!({"kind":"reply","text":""})
         } else if last == "2" {
             // The model can recover from an invalid field without blocking the whole turn.
             json!({"kind":"tool","name":"request_input","args":{
@@ -142,6 +170,8 @@ async fn replying_to_a_menu_opens_an_answerable_choice_without_a_second_model() 
     runtime::work(&app, &task).await.unwrap();
     let menu = store::claim_outbox(&db).await.unwrap().unwrap();
     assert!(menu.body.contains("2. Try a simple widget"));
+    let options = store::suggested_replies(&db, menu.id).await.unwrap();
+    assert_eq!(options[1].body, "Try a simple widget");
 
     message(&db, 2, "1", "2").await;
     let task = store::claim(&db).await.unwrap().unwrap();
@@ -164,6 +194,21 @@ async fn replying_to_a_menu_opens_an_answerable_choice_without_a_second_model() 
     runtime::work(&app, &resumed).await.unwrap();
     let reply = store::claim_outbox(&db).await.unwrap().unwrap();
     assert_eq!(reply.body, "You picked Cooking.");
+}
+
+#[tokio::test]
+async fn the_agent_can_react_without_sending_a_text_reply() {
+    let db = fixture().await;
+    let app = app_with_model(&db, Arc::new(WidgetChief));
+    store::ingest_telegram(&db, "1", 1, "1", "React with a thumbs-up.", 42)
+        .await
+        .unwrap();
+    let task = store::claim(&db).await.unwrap().unwrap();
+    runtime::work(&app, &task).await.unwrap();
+    let reaction = store::claim_outbox(&db).await.unwrap().unwrap();
+    assert_eq!(reaction.body, "👍");
+    assert!(reaction.reaction_event.is_some());
+    assert!(store::claim_outbox(&db).await.unwrap().is_none());
 }
 
 #[tokio::test]

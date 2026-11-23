@@ -1,4 +1,5 @@
 use super::review::{Verdict, review};
+use super::suggestions::valid_suggestions;
 use super::{Intent, Outcome, Risk, ToolContext, builtins::Builtin, delegation::delegate, string};
 use crate::{
     App,
@@ -52,6 +53,38 @@ pub(super) async fn execute(tool: Builtin, ctx: &ToolContext<'_>, args: Value) -
         Builtin::CancelSchedule => {
             schedules::cancel(&app.db, &task.user, string(&args, "id", 64)?).await?;
             json!({"cancelled":true})
+        }
+        Builtin::SendReply => {
+            let text = string(&args, "text", 12_000)?;
+            let suggestions = valid_suggestions(&args["suggested_replies"]);
+            store::settle_reply(
+                &app.db,
+                task,
+                clip(text, super::MAX_REPLY_BYTES),
+                &suggestions,
+            )
+            .await?;
+            return Ok(Outcome::Pause);
+        }
+        Builtin::SendCard => {
+            let items: Vec<String> = args
+                .get("items")
+                .map(|items| serde_json::from_value(items.clone()))
+                .transpose()?
+                .unwrap_or_default();
+            let card = crate::channel::Card::new(
+                args["title"].as_str().unwrap_or_default(),
+                args["text"].as_str().unwrap_or_default(),
+                &items,
+            )
+            .context("a card needs visible text")?;
+            let suggestions = valid_suggestions(&args["suggested_replies"]);
+            store::settle_widget(&app.db, task, &card, &suggestions).await?;
+            return Ok(Outcome::Pause);
+        }
+        Builtin::React => {
+            let queued = store::queue_reaction(&app.db, task, string(&args, "emoji", 24)?).await?;
+            json!({"queued":queued})
         }
         Builtin::Delegate => delegate(ctx, &args).await?,
         Builtin::Discover => serde_json::to_value(

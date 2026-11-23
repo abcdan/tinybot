@@ -1,7 +1,7 @@
 use super::{ENGINE, MAX_REPLY_BYTES, Step};
 use crate::{
     channel::ChannelAdapter,
-    model::{ModelProvider, parse_json_reply},
+    model::{ModelProvider, ToolDefinition, parse_json_reply},
     security::clip,
     store::{self, Task},
 };
@@ -28,6 +28,7 @@ impl Feedback {
         &self,
         model: &dyn ModelProvider,
         input: &Value,
+        tools: &[ToolDefinition],
     ) -> Result<Option<Step>> {
         self.source.lock().expect("draft buffer").clear();
         let input = input.to_string();
@@ -41,7 +42,7 @@ impl Feedback {
         let streamed = tokio::select! {
             biased;
             _ = self.stale.notified() => return Ok(None),
-            result = model.complete_streaming(ENGINE, &input, &mut append) => result,
+            result = model.complete_turn(ENGINE, &input, tools, Some(&mut append)) => result,
         };
         if let Ok(step) = streamed.and_then(|response| parse_json_reply(&response)) {
             return Ok(Some(step));
@@ -52,7 +53,7 @@ impl Feedback {
         let buffered = tokio::select! {
             biased;
             _ = self.stale.notified() => return Ok(None),
-            result = model.complete(ENGINE, &input) => result?,
+            result = model.complete_turn(ENGINE, &input, tools, None) => result?,
         };
         parse_json_reply(&buffered).map(Some)
     }
@@ -257,7 +258,7 @@ mod tests {
                 buffering: Notify::new(),
             };
             let feedback = Feedback::default();
-            let result = feedback.complete(&model, &json!({})).await.unwrap();
+            let result = feedback.complete(&model, &json!({}), &[]).await.unwrap();
             assert!(matches!(result, Some(Step::Reply { text, .. }) if text == "Recovered"));
             assert_eq!(model.calls.load(Ordering::Relaxed), 1);
             assert!(feedback.source.lock().unwrap().is_empty());
@@ -274,7 +275,7 @@ mod tests {
         };
         let feedback = Feedback::default();
         let input = json!({});
-        let complete = feedback.complete(&model, &input);
+        let complete = feedback.complete(&model, &input, &[]);
         let change_revision = async {
             model.buffering.notified().await;
             feedback.stale.notify_one();
@@ -374,7 +375,7 @@ mod tests {
         let ((), result, ()) = tokio::time::timeout(Duration::from_secs(8), async {
             tokio::join!(
                 feedback.show(&db, &task, &channel),
-                feedback.complete(&model, &input),
+                feedback.complete(&model, &input, &[]),
                 revise,
             )
         })

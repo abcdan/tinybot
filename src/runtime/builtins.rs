@@ -2,7 +2,7 @@ use super::{Intent, Outcome, Risk, Tool, ToolContext, effects, string};
 use crate::{mcp, net, schedules, security::now};
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 #[derive(Clone, Copy)]
 pub(super) enum Builtin {
@@ -23,6 +23,9 @@ pub(super) enum Builtin {
     CancelSchedule,
     Files,
     Python,
+    SendReply,
+    SendCard,
+    React,
 }
 
 pub fn tools() -> Vec<Box<dyn Tool>> {
@@ -44,6 +47,9 @@ pub fn tools() -> Vec<Box<dyn Tool>> {
         Builtin::CancelSchedule,
         Builtin::Files,
         Builtin::Python,
+        Builtin::SendReply,
+        Builtin::SendCard,
+        Builtin::React,
     ]
     .into_iter()
     .map(|tool| Box::new(tool) as Box<dyn Tool>)
@@ -71,6 +77,9 @@ impl Tool for Builtin {
             Self::CancelSchedule => "cancel_schedule",
             Self::Files => "task_files",
             Self::Python => "python",
+            Self::SendReply => "send_reply",
+            Self::SendCard => "send_card",
+            Self::React => "react_to_message",
         }
     }
 
@@ -115,7 +124,80 @@ impl Tool for Builtin {
             Self::Python => {
                 "Run offline Python on the current task's files. Args: code. Use filenames in the working directory."
             }
+            Self::SendReply => {
+                "Send the final text reply with optional tappable suggested replies."
+            }
+            Self::SendCard => {
+                "Send a Telegram card or widget to the current chat, using a title, text, list items, and optional tappable suggested replies."
+            }
+            Self::React => {
+                "Set one native Telegram emoji reaction on the latest user message. Use an emoji such as 👍, ❤️, 👀, 🎉, or 🙏."
+            }
         }
+    }
+
+    fn input_schema(&self) -> Value {
+        let text = json!({"type":"string"});
+        let suggestions =
+            json!({"type":"array","maxItems":3,"items":{"type":"string","maxLength":48}});
+        let (properties, required): (Value, &[&str]) = match self {
+            Self::Remember | Self::SetGoal => (json!({"text":text}), &["text"]),
+            Self::Delegate => (json!({"brief":text,"agent":text}), &["brief"]),
+            Self::Discover => (json!({"name":text}), &["name"]),
+            Self::Connect => (
+                json!({"name":text,"endpoint":text,"transport":{"type":"string","enum":["auto","streamable-http","sse","stdio"]}}),
+                &["name", "endpoint"],
+            ),
+            Self::ListMcp => (json!({"connector":text,"search":text}), &["connector"]),
+            Self::CallMcp => (
+                json!({"connector":text,"tool":text,"arguments":{"type":"object"}}),
+                &["connector", "tool", "arguments"],
+            ),
+            Self::Browse => (json!({"url":text}), &["url"]),
+            Self::SearchWeb => (json!({"query":text}), &["query"]),
+            Self::Form => (
+                json!({"url":text,"index":{"type":"integer","minimum":0}}),
+                &["url"],
+            ),
+            Self::Input => (
+                json!({
+                    "purpose":text,
+                    "surface":{"type":"string","enum":["auto","mini_app"]},
+                    "fields":{"type":"array","maxItems":8,"items":{
+                        "type":"object","required":["name","label","type"],"additionalProperties":false,
+                        "properties":{"name":text,"label":text,"hint":text,
+                            "type":{"type":"string","enum":["text","textarea","number","date","select","checkbox"]},
+                            "options":{"type":"array","items":text},"required":{"type":"boolean"}}
+                    }}
+                }),
+                &["purpose"],
+            ),
+            Self::AgentSpec => (
+                json!({"name":text,"instructions":text}),
+                &["name", "instructions"],
+            ),
+            Self::Schedule => (
+                json!({"kind":{"type":"string","enum":["reminder","task"]},"title":text,"input":text,"at":text,"cron":text}),
+                &["kind", "title", "input"],
+            ),
+            Self::ListSchedules => (json!({}), &[]),
+            Self::CancelSchedule => (json!({"id":text}), &["id"]),
+            Self::Files => (json!({"name":text}), &[]),
+            Self::Python => (json!({"code":text}), &["code"]),
+            Self::SendReply => (
+                json!({"text":text,"suggested_replies":suggestions}),
+                &["text"],
+            ),
+            Self::SendCard => (
+                json!({"text":text,"title":text,"items":{"type":"array","maxItems":4,"items":text},"suggested_replies":suggestions}),
+                &[],
+            ),
+            Self::React => (
+                json!({"emoji":{"type":"string","enum":crate::store::REACTION_EMOJIS}}),
+                &["emoji"],
+            ),
+        };
+        json!({"type":"object","properties":properties,"required":required,"additionalProperties":false})
     }
 
     async fn inspect(&self, ctx: &ToolContext<'_>, args: &Value) -> Result<Intent> {

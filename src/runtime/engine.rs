@@ -4,12 +4,12 @@ use super::review::{Verdict, review};
 use super::suggestions::valid_suggestions;
 use super::{
     Call, ENGINE, MAX_REPLY_BYTES, Outcome, Risk, Step, ToolContext, connector_context,
-    descriptions,
+    descriptions, tool_definitions,
 };
 use crate::{
     App,
     channel::ChannelAdapter,
-    model::json_reply,
+    model::{json_reply, parse_json_reply},
     schedules,
     security::{clip, id, now},
     store::{self, Agent, Task},
@@ -152,6 +152,7 @@ async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> Resul
         .iter()
         .filter(|tool| ctx.allows(tool.name()))
         .collect();
+    let definitions = tool_definitions(&tools);
     let mut summary = task.summary.clone();
     let mut goal = task.goal.clone();
     for _ in 0..14 {
@@ -208,12 +209,15 @@ async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> Resul
             "saved_agents":saved,"tools":descriptions(&tools),"connectors":connector_context(&ctx)
         });
         let step: Step = if let Some(feedback) = feedback {
-            let Some(step) = feedback.complete(&*model, &input).await? else {
+            let Some(step) = feedback.complete(&*model, &input, &definitions).await? else {
                 return store::settle(&app.db, task, "idle", None).await;
             };
             step
         } else {
-            json_reply(&*model, ENGINE, &input).await?
+            let response = model
+                .complete_turn(ENGINE, &input.to_string(), &definitions, None)
+                .await?;
+            parse_json_reply(&response)?
         };
         if !store::current(&app.db, task).await? {
             return store::settle(&app.db, task, "idle", None).await;
@@ -224,6 +228,9 @@ async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> Resul
                 suggested_replies,
             } => {
                 let suggestions = valid_suggestions(&suggested_replies);
+                if text.trim().is_empty() {
+                    return store::settle(&app.db, task, "idle", None).await;
+                }
                 // Wait for any in-flight draft before queuing the durable reply.
                 let _delivery = match feedback {
                     Some(feedback) => Some(feedback.delivery.lock().await),
@@ -236,20 +243,6 @@ async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> Resul
                     &suggestions,
                 )
                 .await;
-            }
-            Step::Widget {
-                title,
-                text,
-                items,
-                suggested_replies,
-            } => {
-                let Some(card) = crate::channel::Card::new(&title, &text, &items) else {
-                    store::append(&app.db, &task.id, "tool", "A widget needs visible text.")
-                        .await?;
-                    continue;
-                };
-                let suggestions = valid_suggestions(&suggested_replies);
-                return store::settle_widget(&app.db, task, &card, &suggestions).await;
             }
             Step::Tool { name, args } => {
                 let Some(tool) = tools.iter().find(|tool| tool.name() == name) else {
@@ -311,10 +304,16 @@ async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> Resul
                     return store::settle(&app.db, task, "idle", None).await;
                 }
                 tool.inspect(&ctx, &args).await?;
-                // Forms create their own pending record and must stay waiting for the user.
+                // These operations manage their own durable task state.
                 if matches!(
                     name.as_str(),
-                    "request_form" | "request_input" | "propose_agent" | "delegate" | "connect_mcp"
+                    "request_form"
+                        | "request_input"
+                        | "propose_agent"
+                        | "delegate"
+                        | "connect_mcp"
+                        | "send_reply"
+                        | "send_card"
                 ) {
                     match tool.execute(&ctx, args).await {
                         Ok(Outcome::Pause) => return Ok(()),
