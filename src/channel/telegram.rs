@@ -101,6 +101,20 @@ impl ChannelAdapter for Telegram {
                     [{"text":"Deny","callback_data":format!("{prefix}{id}/deny")}]
                 ]});
             }
+            Some(button) if button.starts_with(callback::MAIL_READ_PREFIX) => {
+                let id = uuid::Uuid::parse_str(&button[callback::MAIL_READ_PREFIX.len()..])?;
+                data["reply_markup"] = json!({"inline_keyboard":[[{
+                    "text":"Read more","callback_data":format!("{}{id}", callback::MAIL_READ_PREFIX)
+                }]]});
+            }
+            Some(button) if button.starts_with(callback::MAIL_SEND_PREFIX) => {
+                let id = uuid::Uuid::parse_str(&button[callback::MAIL_SEND_PREFIX.len()..])?;
+                let prefix = callback::MAIL_SEND_PREFIX;
+                data["reply_markup"] = json!({"inline_keyboard":[[
+                    {"text":"Approve once","callback_data":format!("{prefix}{id}/once")},
+                    {"text":"Deny","callback_data":format!("{prefix}{id}/deny")}
+                ]]});
+            }
             Some(button) if button.starts_with("form/") => {
                 let id = uuid::Uuid::parse_str(&button["form/".len()..])?;
                 data["reply_markup"] = json!({"inline_keyboard":[[{
@@ -110,6 +124,18 @@ impl ChannelAdapter for Telegram {
             None => {}
             _ => anyhow::bail!("unknown channel button"),
         }
+        self.send_message(data).await
+    }
+
+    async fn send_plain(
+        &self,
+        user: &str,
+        body: &str,
+        reply_to: Option<i64>,
+    ) -> Result<MessageDelivery> {
+        let user = user.parse::<i64>().context("invalid Telegram recipient")?;
+        let mut data = json!({"chat_id":user,"text":clip(body,3900),"link_preview_options":{"is_disabled":true}});
+        add_reply_anchor(&mut data, reply_to);
         self.send_message(data).await
     }
 

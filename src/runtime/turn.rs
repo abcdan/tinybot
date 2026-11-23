@@ -1,3 +1,4 @@
+use super::email;
 use super::execution::{finish, resume_approval};
 use super::feedback::Feedback;
 use super::lookup::{self, Lookup};
@@ -74,7 +75,23 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
     let model = app.models.provider(&task.user, false).await?;
     let profile = app.models.onboarding_profile(&task.user).await?;
     let profile = json!({"display_name":profile.display_name,"chief_name":profile.chief_name});
-    let hosted = super::openrouter_tools::available(&ctx).await?;
+    let incoming_mail = store::mail::task_context(&app.db, &app.vault, task).await?;
+    let automatic_mail = incoming_mail
+        .as_ref()
+        .is_some_and(|mail| mail.automated_turn);
+    let mail_accounts: Vec<_> =
+        if owner && task.agent.is_none() {
+            store::mail::smtp_accounts(&app.db, &task.user).await?.into_iter().map(|account| {
+            json!({"id":account.id,"label":account.label,"address":account.address})
+        }).collect()
+        } else {
+            Vec::new()
+        };
+    let hosted = if automatic_mail {
+        Vec::new()
+    } else {
+        super::openrouter_tools::available(&ctx).await?
+    };
     let tools: Vec<_> = app
         .tools
         .iter()
@@ -82,6 +99,12 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
             ctx.allows(tool.name())
                 && (!tool.name().starts_with("openrouter_") || hosted.contains(&tool.name()))
                 && (owner || matches!(tool.name(), "delegate" | "send_reply" | "react_to_message"))
+                && (tool.name() != "send_email" || !mail_accounts.is_empty())
+                && (!automatic_mail
+                    || matches!(
+                        tool.name(),
+                        "send_reply" | "send_card" | "request_input" | "send_email"
+                    ))
         })
         .collect();
     let definitions = tool_definitions(&tools);
@@ -187,7 +210,8 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
             "local_time":schedules::local_iso(now(),zone),"time_zone":zone.name(),
             "shared_helper_scope":agent.as_ref().filter(|_|!owner).map(|agent|&agent.id),
             "telegram_reply":store::latest_reply_context(&app.db, &task.id).await?,
-            "saved_agents":saved,"tools":descriptions(&tools),"connectors":connector_context(&ctx)
+            "saved_agents":saved,"tools":descriptions(&tools),"connectors":if automatic_mail { Vec::new() } else { connector_context(&ctx) },
+            "email":incoming_mail,"mail_accounts":mail_accounts
         });
         let has_work = consulted_helper
             || !lookups.is_empty()
@@ -317,6 +341,28 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                     continue;
                 }
                 repeated_lookup = false;
+                if name == "send_email" {
+                    match email::request(&ctx, &args, incoming_mail.as_ref()).await {
+                        Ok(true) => {
+                            audit::record("tool", tool.name(), "waiting_approval", Value::Null)
+                                .await;
+                            return Ok(());
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            if !store::current(&app.db, task).await? {
+                                return store::settle(&app.db, task, "idle", None).await;
+                            }
+                            audit::record("tool", tool.name(), "draft_rejected", Value::Null).await;
+                            let reason = error.downcast_ref::<email::DraftError>().map_or(
+                                "The email draft could not be saved. Nothing was sent.",
+                                |error| error.0,
+                            );
+                            store::append(&app.db, &task.id, "tool", reason).await?;
+                        }
+                    }
+                    continue;
+                }
                 let mcp = if name == "call_mcp" && ctx.owner {
                     let scope = mcp_approval::scope(&ctx, &args)?;
                     if store::mcp_denied_in_turn(&app.db, task, &scope, &args["arguments"]).await? {

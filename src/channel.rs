@@ -55,6 +55,16 @@ pub trait ChannelAdapter: Send + Sync {
         button: Option<&str>,
         reply_to: Option<i64>,
     ) -> Result<MessageDelivery>;
+
+    async fn send_plain(
+        &self,
+        user: &str,
+        body: &str,
+        reply_to: Option<i64>,
+    ) -> Result<MessageDelivery> {
+        self.send(user, body, None, reply_to).await
+    }
+
     async fn download_file(&self, _file_id: &str, _limit: usize) -> Result<Vec<u8>> {
         anyhow::bail!("channel does not support file downloads")
     }
