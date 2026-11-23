@@ -91,6 +91,49 @@ test('a generated focused form submits text and a selected option from Telegram'
     }
 });
 
+test('helpers can be managed while only Chief tasks can be selected in chat', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    const state = {
+        user: '1', provider: 'codex', requests: [], active_task: null,
+        tasks: [
+            {id: 'chief-task', agent: null, title: 'Chief research task', state: 'idle'},
+            {id: 'old-helper-task', agent: 'research', title: 'Ask the research helper', state: 'idle'}
+        ],
+        agents: [
+            {id: 'research', owner: '1', name: 'Research helper', instructions: 'Find sources.', tools: '[]'},
+            {id: 'writer', name: 'Shared writing helper'}
+        ],
+        members: [['research', '2']], memory: [], connectors: [], grants: []
+    };
+    await mockMiniApp(context, ({action, data}) => {
+        if (action === 'status') return state;
+        assert.equal(action, 'select-task');
+        assert.deepEqual(data, {task: 'chief-task'});
+        state.active_task = data.task;
+        return {ok: true};
+    });
+    try {
+        await page.goto('https://tinybot.test/mini');
+        await page.getByRole('heading', {name: 'Chief research task'}).waitFor();
+        assert.equal(await page.getByRole('heading', {name: 'Ask the research helper'}).count(), 0);
+        await page.getByRole('button', {name: 'Switch to task'}).click();
+        await page.getByText('Current Chief task', {exact: true}).waitFor();
+        await page.getByRole('button', {name: 'Helpers', exact: true}).click();
+        await page.getByRole('heading', {name: 'Research helper', exact: true}).waitFor();
+        assert.equal(await page.getByRole('heading', {name: 'Shared writing helper'}).count(), 1);
+        assert.equal(await page.getByRole('button', {name: 'Use in chat'}).count(), 0);
+        assert.equal(await page.getByRole('button', {name: 'Save helper'}).count(), 1);
+        await page.getByText('Edit helper', {exact: true}).click();
+        await page.getByRole('button', {name: 'Save changes'}).waitFor();
+        await page.getByText('Sharing', {exact: true}).click();
+        await page.getByRole('button', {name: 'Revoke', exact: true}).waitFor();
+    } finally {
+        await browser.close();
+    }
+});
+
 test('one OpenRouter key lists task models while retaining Codex pairing', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
     const context = await browser.newContext();
