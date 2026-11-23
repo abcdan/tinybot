@@ -29,6 +29,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/mini-connectors.js",get(||async{asset("application/javascript; charset=utf-8",include_str!("../../web/mini-connectors.js"))}))
         .route("/mini-settings.js",get(||async{asset("application/javascript; charset=utf-8",include_str!("../../web/mini-settings.js"))}))
         .route("/mini-audit.js",get(||async{asset("application/javascript; charset=utf-8",include_str!("../../web/mini-audit.js"))}))
+        .route("/mini-memory.js",get(||async{asset("application/javascript; charset=utf-8",include_str!("../../web/mini-memory.js"))}))
         .route("/api/mini",post(mini))
         .route("/api/codex/import",post(import_codex))
         .route("/oauth/mcp",get(oauth))

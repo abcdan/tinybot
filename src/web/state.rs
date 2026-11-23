@@ -57,7 +57,7 @@ pub(super) async fn status(app: &App, user: &str) -> Result<Value> {
     .fetch_all(&app.db)
     .await?;
     let memory: Vec<(String, Option<String>, String)> = sqlx::query_as(
-        "SELECT id,agent,body FROM memory WHERE owner=? ORDER BY rowid DESC LIMIT 50",
+        "SELECT id,agent,body FROM memory WHERE owner=? AND agent IS NOT NULL ORDER BY rowid DESC LIMIT 50",
     )
     .bind(user)
     .fetch_all(&app.db)
