@@ -267,7 +267,7 @@ impl Mcp {
             refresh_token: next.refresh_token,
             expires: next.expires,
         };
-        self.store_oauth(&connector, &oauth).await?;
+        self.store_oauth(&connector, &oauth, true).await?;
         self.wake_connected(&user, &connector.id).await?;
         crate::store::notify(
             &self.db,
@@ -286,12 +286,23 @@ impl Mcp {
         &self,
         connector: &Connector,
         oauth: &OAuthToken,
+        reauthorized: bool,
     ) -> Result<()> {
         let sealed = self
             .vault
             .seal(&binding(connector), &serde_json::to_vec(oauth)?)?;
-        let updated=sqlx::query("UPDATE connectors SET auth='oauth',credential=? WHERE id=? AND owner=? AND credential IS ?")
-            .bind(sealed).bind(&connector.id).bind(&connector.owner).bind(&connector.credential).execute(&self.db).await?;
+        let updated = sqlx::query(
+            "UPDATE connectors SET auth='oauth',credential=?,approval_epoch=approval_epoch+?
+            WHERE id=? AND owner=? AND credential IS ? AND approval_epoch=?",
+        )
+        .bind(sealed)
+        .bind(reauthorized)
+        .bind(&connector.id)
+        .bind(&connector.owner)
+        .bind(&connector.credential)
+        .bind(connector.approval_epoch)
+        .execute(&self.db)
+        .await?;
         ensure!(
             updated.rows_affected() == 1,
             "connector changed during authorization"
