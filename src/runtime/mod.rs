@@ -8,6 +8,7 @@ mod feedback;
 mod lookup;
 mod review;
 mod suggestions;
+mod turn;
 
 pub use builtins::tools;
 pub use engine::run;
