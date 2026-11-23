@@ -56,7 +56,7 @@ test('a generated Mini App uses shared controls and submits details for masked r
     }
 });
 
-test('a direct Mini App form submits text and a selected option from Telegram', async () => {
+test('a generated focused form submits text and a selected option from Telegram', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
     const context = await browser.newContext();
     const page = await context.newPage();
@@ -67,21 +67,21 @@ test('a direct Mini App form submits text and a selected option from Telegram', 
     ];
     await mockMiniApp(context, ({action, data}) => {
         requests.push({action, data});
-        if (action === 'get-form') return {id: 'sample-1', kind: 'elicitation', content: {fields}, test: true};
+        if (action === 'get-form') return {id: 'form-1', kind: 'elicitation', content: {fields}};
         assert.equal(action, 'answer-form');
         return {ok: true};
     });
     try {
-        await page.goto('https://tinybot.test/mini?form=sample-1');
-        await page.getByRole('heading', {name: 'Test form', exact: true}).waitFor();
+        await page.goto('https://tinybot.test/mini?form=form-1');
+        await page.getByRole('heading', {name: 'Answer a few questions', exact: true}).waitFor();
         assert.equal(await page.getByRole('navigation', {name: 'TinyBot settings'}).isVisible(), false);
-        await page.getByRole('textbox', {name: 'Project name'}).fill('Test project');
+        await page.getByRole('textbox', {name: 'Project name'}).fill('Weekend plans');
         await page.getByRole('combobox', {name: 'Priority'}).selectOption('High');
-        await page.getByRole('button', {name: 'Submit test'}).click();
-        await page.getByRole('heading', {name: 'Test submitted', exact: true}).waitFor();
+        await page.getByRole('button', {name: 'Send answers'}).click();
+        await page.getByRole('heading', {name: 'Answers sent', exact: true}).waitFor();
         assert.deepEqual(requests, [
-            {action: 'get-form', data: {id: 'sample-1'}},
-            {action: 'answer-form', data: {id: 'sample-1', values: {project: 'Test project', priority: 'High'}}},
+            {action: 'get-form', data: {id: 'form-1'}},
+            {action: 'answer-form', data: {id: 'form-1', values: {project: 'Weekend plans', priority: 'High'}}},
         ]);
         assert.equal(await page.getByRole('textbox', {name: 'Project name'}).count(), 0);
         await page.getByRole('button', {name: 'Back to chat'}).click();

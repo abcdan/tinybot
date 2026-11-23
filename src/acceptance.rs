@@ -94,6 +94,19 @@ impl ModelProvider for WidgetChief {
                 "surface":"mini_app",
                 "fields":[{"name":"topic","label":"Pick a topic","type":"select","options":["Travel","Cooking"]}]
             }})
+        } else if last == "Create a Mini App form for my project." {
+            json!({"kind":"tool","name":"request_input","args":{
+                "purpose":"Collect project details",
+                "surface":"mini_app",
+                "fields":[
+                    {"name":"project","label":"Project name","type":"text","required":true},
+                    {"name":"priority","label":"Priority","type":"select","required":true,"options":["Normal","High"]}
+                ]
+            }})
+        } else if last
+            == r#"My answers to your form: {"priority":"High","project":"Weekend plans"}"#
+        {
+            json!({"kind":"reply","text":"I saved Weekend plans with high priority."})
         } else if last == "Give me the menu" {
             json!({"kind":"reply","text":"1. Search online\n2. Try a simple widget"})
         } else if last == "2" {
@@ -183,7 +196,6 @@ async fn an_explicit_mini_app_form_keeps_a_single_select_in_the_mini_app() {
     assert_eq!(delivery.button, Some(format!("form/{id}")));
     assert!(forms::widget_choice(&db, "1", &id).await.is_err());
     let form = forms::input_request(&db, "1", &id).await.unwrap();
-    assert_eq!(form["test"], false);
     assert_eq!(
         form["content"]["fields"][0]["options"],
         json!(["Travel", "Cooking"])
@@ -191,24 +203,23 @@ async fn an_explicit_mini_app_form_keeps_a_single_select_in_the_mini_app() {
 }
 
 #[tokio::test]
-async fn testform_submits_through_the_signed_mini_app_api_without_a_model() {
+async fn generated_form_submits_through_the_signed_mini_app_api_and_resumes_the_task() {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
     let db = fixture().await;
-    sqlx::query("UPDATE users SET provider=NULL,model=NULL WHERE id='1'")
-        .execute(&db)
-        .await
-        .unwrap();
-    message(&db, 1, "1", "/testform").await;
+    let app = Arc::new(app_with_model(&db, Arc::new(WidgetChief)));
+    message(&db, 1, "1", "Create a Mini App form for my project.").await;
+    let task = store::claim(&db).await.unwrap().unwrap();
+    runtime::work(&app, &task).await.unwrap();
     let notice = store::claim_outbox(&db).await.unwrap().unwrap();
+    assert_eq!(notice.task.as_deref(), Some(task.id.as_str()));
     let form_id = notice
         .button
         .as_deref()
         .unwrap()
         .strip_prefix("form/")
         .unwrap();
-    let app = Arc::new(app_with_model(&db, Arc::new(WidgetChief)));
     let signed = |id: u64| {
         let date = now().to_string();
         let user = json!({"id":id}).to_string();
@@ -227,8 +238,8 @@ async fn testform_submits_through_the_signed_mini_app_api_without_a_model() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}/api/mini", listener.local_addr().unwrap());
     let origin = app.origin.clone();
-    let server =
-        tokio::spawn(async move { axum::serve(listener, web::router(app)).await.unwrap() });
+    let router = web::router(app.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let client = reqwest::Client::new();
     let post = |init: &str, action: &str, data: Value| {
         client
@@ -252,21 +263,27 @@ async fn testform_submits_through_the_signed_mini_app_api_without_a_model() {
         .unwrap();
     assert!(response.status().is_success());
     let result: Value = response.json().await.unwrap();
-    assert_eq!(result["test"], true);
     assert_eq!(result["content"]["fields"][0]["type"], "text");
     assert_eq!(result["content"]["fields"][1]["type"], "select");
     assert_eq!(
         post(
             &owner,
             "answer-form",
-            json!({"id":form_id,"values":{"topic":"Sample"}})
+            json!({"id":form_id,"values":{"project":"Weekend plans"}})
         )
         .await
         .unwrap()
         .status(),
         400,
     );
-    let values = json!({"id":form_id,"values":{"topic":"Sample","format":"Checklist"}});
+    let values = json!({"id":form_id,"values":{"project":"Weekend plans","priority":"High"}});
+    assert_eq!(
+        post(&other, "answer-form", values.clone())
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
     assert_eq!(
         post(&owner, "answer-form", values.clone())
             .await
@@ -278,13 +295,17 @@ async fn testform_submits_through_the_signed_mini_app_api_without_a_model() {
         post(&owner, "answer-form", values).await.unwrap().status(),
         400
     );
+    assert!(store::claim_outbox(&db).await.unwrap().is_none());
+    let resumed = store::claim(&db).await.unwrap().unwrap();
+    assert_eq!(resumed.id, task.id);
+    assert_eq!(resumed.revision, task.revision + 1);
+    runtime::work(&app, &resumed).await.unwrap();
     let confirmation = store::claim_outbox(&db).await.unwrap().unwrap();
     assert_eq!(
         confirmation.body,
-        "Mini App test passed. I received your sample answers."
+        "I saved Weekend plans with high priority."
     );
-    assert!(store::claim_outbox(&db).await.unwrap().is_none());
-    assert!(store::list_tasks(&db, "1").await.unwrap().is_empty());
+    assert_eq!(task_for(&db, &resumed.id).await.state, "idle");
     server.abort();
 }
 
