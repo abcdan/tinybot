@@ -306,6 +306,7 @@ mod tests {
             db: db.clone(),
             vault: vault.clone(),
             token: "unused".into(),
+            operator: "1".into(),
             origin: origin.origin().ascii_serialization(),
             models: model::Models::new(db.clone(), vault.clone(), "codex".into(), None, None)
                 .with_fixture(Arc::new(ChiefFixture(db.clone()))),

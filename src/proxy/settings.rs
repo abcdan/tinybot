@@ -1,11 +1,12 @@
 use super::upstream::{ProxyUrl, Upstream};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::{
     fs::{self, File, OpenOptions},
     io::{ErrorKind, Read, Write},
     net::SocketAddr,
-    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
 use tokio::net::TcpStream;
@@ -75,10 +76,11 @@ fn set(path: &Path, url: Option<&str>) -> Result<()> {
         .parent()
         .context("missing browser proxy settings directory")?;
     let scratch = parent.join(format!(".{}.tmp", Uuid::new_v4()));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
         .open(&scratch)
         .context("browser proxy settings storage is unavailable")?;
     let result = (|| -> Result<()> {
@@ -177,7 +179,7 @@ impl Routes {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

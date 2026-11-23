@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+mod browser;
 mod connectors;
 mod models;
 mod sharing;
@@ -50,6 +51,8 @@ pub(super) async fn mini(
                 )
             } else if action == "audit-session" {
                 ApiError(StatusCode::NOT_FOUND, "This audit session is no longer available.")
+            } else if let Some(error) = error.downcast_ref::<browser::SettingsError>() {
+                error.response()
             } else if let Some(error) = error.downcast_ref::<OpenRouterSettingsError>() {
                 match error {
                     OpenRouterSettingsError::MissingKey => ApiError(StatusCode::BAD_REQUEST, "Connect your OpenRouter key first."),
@@ -77,6 +80,9 @@ async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<
         "status" => return state::status(app, user).await,
         "audit-sessions" => return tasks::audit_sessions(app, user, data).await,
         "audit-session" => return tasks::audit_session(app, user, data).await,
+        "save-browser-proxy" => browser::save(app, user, data)?,
+        "remove-browser-proxy" => browser::reset(app, user)?,
+        "disable-browser-proxy" => browser::direct(app, user)?,
 
         "openrouter-key" => return models::save_openrouter_key(app, user, data).await,
         "openrouter-models" => return models::openrouter_models(app, user).await,

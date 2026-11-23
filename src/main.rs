@@ -24,6 +24,7 @@ pub struct App {
     vault: security::Vault,
     token: String,
     origin: String,
+    operator: String,
     models: model::Models,
     mcp: mcp::Mcp,
     forms: forms::Forms,
@@ -125,6 +126,7 @@ async fn main() -> Result<()> {
         vault: vault.clone(),
         token: token.clone(),
         origin: origin_string.clone(),
+        operator: operator.clone(),
         models: model::Models::new(
             db.clone(),
             vault.clone(),

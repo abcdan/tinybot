@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use tokio::sync::Notify;
 
 mod audit_log;
+mod browser_settings;
 #[cfg(unix)]
 mod browsing;
 mod model_settings;
@@ -41,6 +42,7 @@ fn app_with_model(db: &SqlitePool, rust_model: Arc<dyn ModelProvider>) -> App {
         db: db.clone(),
         vault: vault.clone(),
         token: "unused".into(),
+        operator: "1".into(),
         origin: origin.origin().ascii_serialization(),
         models: model::Models::new(db.clone(), vault.clone(), "codex".into(), None, None)
             .with_fixture(rust_model),
