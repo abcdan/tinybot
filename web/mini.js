@@ -1,5 +1,6 @@
 import { action, button, card, field, form, node, row } from './mini-ui.js';
 import { agentForm, agents } from './mini-agents.js';
+import { audit } from './mini-audit.js';
 import { connectors } from './mini-connectors.js';
 import { schedules, model } from './mini-settings.js';
 
@@ -65,7 +66,7 @@ function setTab(next) {
 function render() {
     if (!state) return;
     content.replaceChildren();
-    ({home, agents, connectors, schedules, model})[tab](state);
+    ({home, agents, connectors, schedules, audit, model})[tab](state);
 }
 
 function home() {
