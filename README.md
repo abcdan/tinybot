@@ -152,6 +152,14 @@ the tool and exact JSON arguments in the agent’s Sharing settings. The
 connector’s upstream credentials must be scoped to the data you intend to
 share. Tools outside the reviewed set require owner approval.
 
+## Chief and helpers
+
+All Telegram conversations are handled by your Chief. Manage saved helpers
+under **Settings & forms → Helpers**. The Chief chooses a suitable helper,
+sends a brief update when it delegates work, and follows up with the result.
+If someone shares a helper with you, ask the Chief to consult it by name.
+Access to the shared helper's records follows the owner's read permissions.
+
 ## Tasks and schedules
 
 - `/new` starts a task, `/tasks` lists tasks, `/switch ID` selects a task, and

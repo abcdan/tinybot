@@ -460,10 +460,15 @@ async fn invitation_and_record_revocation_prevent_shared_result_delivery() {
     message(&db, 21, "3", "/start one-use").await;
     assert!(store::has_access(&db, "2", Some("agent")).await.unwrap());
     assert!(!store::has_access(&db, "3", Some("agent")).await.unwrap());
-    message(&db, 22, "2", "/use agent").await;
     message(&db, 23, "2", "What is in this record?").await;
     let task = store::claim(&db).await.unwrap().unwrap();
     assert_eq!(task.user, "2");
+    sqlx::query("UPDATE tasks SET agent='agent' WHERE id=?")
+        .bind(&task.id)
+        .execute(&db)
+        .await
+        .unwrap();
+    let task = task_for(&db, &task.id).await;
     store::settle(&db, &task, "idle", Some("old protected result"))
         .await
         .unwrap();
@@ -697,7 +702,7 @@ impl ModelProvider for ScriptedChief {
             );
             json!({"kind":"reply","text":"Please ask the user which quarter to use."})
         } else if history.contains("new direction") && !history.contains("helper_reply") {
-            json!({"kind":"tool","name":"delegate","args":{"brief":"Help determine the requested quarter."}})
+            json!({"kind":"tool","name":"delegate","args":{"agent":"reader","brief":"Help determine the requested quarter.","handoff":"I’ll ask Reader which quarter we need and get back to you."}})
         } else if history.contains("helper_reply") {
             json!({"kind":"reply","text":"Which quarter should I use?"})
         } else {
@@ -714,7 +719,6 @@ async fn chief_uses_live_steering_and_escalates_the_helpers_question() {
     let db = fixture().await;
     sqlx::query("INSERT INTO agents VALUES('reader','1','Reader','Help with task choices.','[\"delegate\"]')")
         .execute(&db).await.unwrap();
-    message(&db, 60, "1", "/use reader").await;
     message(&db, 61, "1", "original").await;
     let rust_model = Arc::new(ScriptedChief {
         reached: Notify::new(),
@@ -739,6 +743,68 @@ async fn chief_uses_live_steering_and_escalates_the_helpers_question() {
     let history = store::history(&db, &task.id).await.unwrap();
     assert!(history.iter().all(|entry| entry.2 != "superseded response"));
     assert_eq!(history.last().unwrap().2, "Which quarter should I use?");
+}
+
+struct SharedHelperChief;
+
+#[async_trait]
+impl ModelProvider for SharedHelperChief {
+    async fn complete(&self, prompt: &str, input: &str) -> Result<String> {
+        let input: Value = serde_json::from_str(input)?;
+        let outcome = if prompt.contains("You are a temporary helper") {
+            assert_eq!(input["worker"], "Reader");
+            assert_eq!(input["memory"], json!(["Shared fixture note"]));
+            json!({"kind":"reply","text":"Here is the shared fixture note."})
+        } else if input["history"].to_string().contains("helper_reply") {
+            assert_eq!(input["shared_helper_scope"], "reader");
+            json!({"kind":"reply","text":"Reader found the shared fixture note."})
+        } else {
+            assert_eq!(input["saved_agents"][0]["id"], "reader");
+            assert!(input["saved_agents"][0]["description"].is_null());
+            json!({"kind":"tool","name":"delegate","args":{
+                "agent":"reader","brief":"Find the shared note.","handoff":"I’ll ask Reader to find that note and get back to you."
+            }})
+        };
+        Ok(outcome.to_string())
+    }
+}
+
+#[tokio::test]
+async fn chief_binds_a_shared_helper_scope_before_returning_its_result() {
+    let db = fixture().await;
+    sqlx::query("INSERT INTO agents VALUES('reader','1','Reader','Read shared notes.','[]')")
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO grants VALUES('reader','2')")
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO memory VALUES('published','1','reader','Shared fixture note')")
+        .execute(&db)
+        .await
+        .unwrap();
+    let app = app_with_model(&db, Arc::new(SharedHelperChief));
+    message(&db, 1, "2", "Ask Reader for the shared note.").await;
+    let primary = store::claim(&db).await.unwrap().unwrap();
+    assert!(primary.agent.is_none());
+    runtime::work(&app, &primary).await.unwrap();
+    assert!(store::claim_outbox(&db).await.unwrap().is_none());
+
+    let scoped = store::claim(&db).await.unwrap().unwrap();
+    assert_eq!(scoped.id, primary.id);
+    assert_eq!(scoped.agent.as_deref(), Some("reader"));
+    runtime::work(&app, &scoped).await.unwrap();
+    let handoff = store::claim_outbox(&db).await.unwrap().unwrap();
+    assert!(handoff.body.starts_with("I’ll ask Reader"));
+    let reply = store::claim_outbox(&db).await.unwrap().unwrap();
+    assert_eq!(reply.body, "Reader found the shared fixture note.");
+    assert!(store::can_deliver(&db, &reply).await.unwrap());
+    sqlx::query("DELETE FROM grants WHERE agent='reader' AND member='2'")
+        .execute(&db)
+        .await
+        .unwrap();
+    assert!(!store::can_deliver(&db, &reply).await.unwrap());
 }
 
 struct ReplyMenuModel;
@@ -826,10 +892,14 @@ async fn stale_expired_and_revoked_reply_buttons_cannot_queue_input() {
         .await
         .unwrap();
     let app = app_with_model(&db, Arc::new(ReplyMenuModel));
-    message(&db, 103, "1", "/use helper").await;
-    store::claim_outbox(&db).await.unwrap().unwrap();
     message(&db, 104, "1", "Give me options.").await;
     let task = store::claim(&db).await.unwrap().unwrap();
+    sqlx::query("UPDATE tasks SET agent='helper' WHERE id=?")
+        .bind(&task.id)
+        .execute(&db)
+        .await
+        .unwrap();
+    let task = task_for(&db, &task.id).await;
     runtime::work(&app, &task).await.unwrap();
     let item = store::claim_outbox(&db).await.unwrap().unwrap();
     let options = store::suggested_replies(&db, item.id).await.unwrap();
