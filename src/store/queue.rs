@@ -276,10 +276,12 @@ pub async fn compaction_batch(
 ) -> Result<Vec<(i64, String, String)>> {
     let rows: Vec<(i64, String, String)> = sqlx::query_as(
         "SELECT id,role,body FROM events WHERE task=? AND id<?
+         AND id IS NOT (SELECT max(id) FROM events WHERE task=? AND role='user')
         ORDER BY id LIMIT 28",
     )
     .bind(task)
     .bind(before)
+    .bind(task)
     .fetch_all(db)
     .await?;
     let mut bytes = 0;
@@ -310,11 +312,15 @@ pub async fn compact(
     if changed == 0 {
         return Ok(None);
     }
-    sqlx::query("DELETE FROM events WHERE task=? AND id<=?")
-        .bind(&task.id)
-        .bind(boundary)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "DELETE FROM events WHERE task=? AND id<=?
+         AND id IS NOT (SELECT max(id) FROM events WHERE task=? AND role='user')",
+    )
+    .bind(&task.id)
+    .bind(boundary)
+    .bind(&task.id)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     Ok(Some(summary.into()))
 }

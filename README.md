@@ -208,6 +208,11 @@ sends a brief update when it delegates work, and follows up with the result.
 If someone shares a helper with you, ask the Chief to consult it by name.
 Access to the shared helper's records follows the owner's read permissions.
 
+Chief and its helpers share a hard budget of 100 tool attempts per turn,
+including after an approval pause. With a saved OpenRouter key, Jev checks
+for repeating work every 10 attempts. When tool work stops, Chief answers
+from the results it has and explains any missing information.
+
 ## Tasks and schedules
 
 - Reply to an earlier TinyBot message to give the Chief that message as

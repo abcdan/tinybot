@@ -6,6 +6,7 @@ mod engine;
 mod execution;
 mod feedback;
 mod lookup;
+mod loop_guard;
 mod mcp_approval;
 mod media;
 mod memory;

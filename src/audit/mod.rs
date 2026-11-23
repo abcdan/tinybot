@@ -3,6 +3,10 @@ mod usage;
 
 pub(crate) use usage::{ModelCall, ingress_model_call, provider_call};
 
+pub(crate) fn request_preview(text: &str) -> String {
+    details::message_preview(text)
+}
+
 use crate::{runtime::Outcome, security::now, store::Task};
 use anyhow::{Context, Result};
 use serde::Serialize;
