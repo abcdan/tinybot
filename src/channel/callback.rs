@@ -5,6 +5,8 @@ use serde::Deserialize;
 use sqlx::SqlitePool;
 
 pub(super) const MCP_APPROVAL_PREFIX: &str = "mcp-approval/";
+pub(super) const MAIL_READ_PREFIX: &str = "mail-read/";
+pub(super) const MAIL_SEND_PREFIX: &str = "mail-send/";
 
 #[derive(Deserialize)]
 pub struct Query {
@@ -32,6 +34,8 @@ enum Selection<'a> {
     Reply(&'a str),
     Choice(&'a str, usize),
     McpApproval(&'a str, store::McpApprovalDecision),
+    MailRead(&'a str),
+    MailSend(&'a str, bool),
 }
 
 fn selection(data: &str) -> Option<Selection<'_>> {
@@ -60,6 +64,19 @@ fn selection(data: &str) -> Option<Selection<'_>> {
             uuid::Uuid::parse_str(request).ok()?;
             Some(Selection::Choice(request, option.parse().ok()?))
         }
+        "mail-read" => {
+            uuid::Uuid::parse_str(remainder).ok()?;
+            Some(Selection::MailRead(remainder))
+        }
+        "mail-send" => {
+            let (request, decision) = remainder.split_once('/')?;
+            uuid::Uuid::parse_str(request).ok()?;
+            match decision {
+                "once" => Some(Selection::MailSend(request, true)),
+                "deny" => Some(Selection::MailSend(request, false)),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -79,6 +96,11 @@ pub(super) async fn answer(db: &SqlitePool, query: &Query) -> Result<Answer> {
         return Ok(UNAVAILABLE);
     }
     let user = query.from.id.to_string();
+    let message_id = query
+        .message
+        .as_ref()
+        .and_then(|message| message.message_id)
+        .filter(|id| *id > 0);
     let accepted = match query.data.as_deref().and_then(selection) {
         Some(Selection::Reply(token)) => store::redeem_reply(db, &user, token).await?,
         Some(Selection::Choice(request, option)) => {
@@ -87,12 +109,7 @@ pub(super) async fn answer(db: &SqlitePool, query: &Query) -> Result<Answer> {
                 .is_ok()
         }
         Some(Selection::McpApproval(request, decision)) => {
-            let Some(message_id) = query
-                .message
-                .as_ref()
-                .and_then(|message| message.message_id)
-                .filter(|id| *id > 0)
-            else {
+            let Some(message_id) = message_id else {
                 return Ok(UNAVAILABLE);
             };
             let text = match decision {
@@ -108,6 +125,37 @@ pub(super) async fn answer(db: &SqlitePool, query: &Query) -> Result<Answer> {
             }
             return Ok(Answer {
                 text,
+                clear_keyboard: Some((query.from.id, message_id)),
+            });
+        }
+        Some(Selection::MailRead(message)) => {
+            let Some(message_id) = message_id else {
+                return Ok(UNAVAILABLE);
+            };
+            if !store::mail::reveal_mail(db, &user, message, message_id).await? {
+                return Ok(UNAVAILABLE);
+            }
+            return Ok(Answer {
+                text: "Email opened.",
+                clear_keyboard: Some((query.from.id, message_id)),
+            });
+        }
+        Some(Selection::MailSend(request, approve)) => {
+            let Some(message_id) = message_id else {
+                return Ok(UNAVAILABLE);
+            };
+            if store::respond_email(db, &user, request, approve)
+                .await
+                .is_err()
+            {
+                return Ok(UNAVAILABLE);
+            }
+            return Ok(Answer {
+                text: if approve {
+                    "Approved to send once."
+                } else {
+                    "Email denied."
+                },
                 clear_keyboard: Some((query.from.id, message_id)),
             });
         }
@@ -151,6 +199,19 @@ mod tests {
             selection(&format!("{MCP_APPROVAL_PREFIX}{id}/deny")),
             Some(Selection::McpApproval(request, store::McpApprovalDecision::Deny)) if request == id
         ));
+        assert!(matches!(
+            selection(&format!("{MAIL_READ_PREFIX}{id}")),
+            Some(Selection::MailRead(message)) if message == id
+        ));
+        assert!(matches!(
+            selection(&format!("{MAIL_SEND_PREFIX}{id}/once")),
+            Some(Selection::MailSend(request, true)) if request == id
+        ));
+        assert!(matches!(
+            selection(&format!("{MAIL_SEND_PREFIX}{id}/deny")),
+            Some(Selection::MailSend(request, false)) if request == id
+        ));
+        assert!(selection(&format!("{MAIL_SEND_PREFIX}{id}/always")).is_none());
         assert!(selection("/cancel").is_none());
         assert!(selection("reply/not-a-token").is_none());
         assert!(selection(&format!("choice/{id}/-1")).is_none());

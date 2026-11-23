@@ -12,6 +12,10 @@ pub(super) async fn resume_approval(ctx: &ToolContext<'_>) -> Result<bool> {
     };
     let payload: Value = serde_json::from_str(&pending.payload)?;
     let (result, announce) = match pending.kind.as_str() {
+        super::email::KIND => {
+            super::email::resume(ctx, &pending, &payload).await?;
+            return store::current(&app.db, ctx.task).await;
+        }
         "form-submit" => {
             audit::record("tool", "form_submission", "approved", Value::Null).await;
             audit::tool_started("form_submission", &Value::Null).await;

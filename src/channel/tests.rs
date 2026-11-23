@@ -25,6 +25,81 @@ async fn record(
 }
 
 #[tokio::test]
+async fn email_buttons_and_previews_use_native_telegram_messages() {
+    let mock: Mock = Arc::new(Mutex::new((
+        Vec::new(),
+        VecDeque::from([
+            json!({"ok":false,"error_code":429,"parameters":{"retry_after":3}}),
+            json!({"ok":true,"result":{"message_id":210}}),
+            json!({"ok":true,"result":{"message_id":211}}),
+            json!({"ok":true,"result":{"message_id":212}}),
+        ]),
+    )));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let telegram = Telegram {
+        client: reqwest::Client::new(),
+        api: format!("http://{}/botTEST", listener.local_addr().unwrap()),
+        origin: "https://example.test".into(),
+    };
+    let app = Router::new()
+        .route("/botTEST/{method}", post(record))
+        .with_state(mock.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let id = crate::security::id();
+    let read = format!("mail-read/{id}");
+    let body = "New email in Work (INBOX).";
+    assert_eq!(
+        telegram.send("42", body, Some(&read), None).await.unwrap(),
+        MessageDelivery::Retry(3)
+    );
+    assert_eq!(
+        telegram.send("42", body, Some(&read), None).await.unwrap(),
+        MessageDelivery::Sent(Some(210))
+    );
+    let text = "From: private@example.test\nSubject: **Confidential**\n\nSee https://example.test.";
+    assert_eq!(
+        telegram.send_plain("42", text, Some(210)).await.unwrap(),
+        MessageDelivery::Sent(Some(211))
+    );
+    let send = format!("mail-send/{id}");
+    assert_eq!(
+        telegram
+            .send("42", "Review the email draft.", Some(&send), None)
+            .await
+            .unwrap(),
+        MessageDelivery::Sent(Some(212))
+    );
+
+    let guard = mock.lock().await;
+    let calls = &guard.0;
+    assert!(calls.iter().all(|(method, _)| method == "sendMessage"));
+    assert_eq!(calls[0], calls[1]);
+    assert_eq!(calls[1].1["text"], body);
+    assert_eq!(
+        calls[1].1["reply_markup"]["inline_keyboard"],
+        json!([[{"text":"Read more","callback_data":read}]])
+    );
+    assert_eq!(
+        calls[2].1,
+        json!({
+            "chat_id":42,
+            "text":text,
+            "link_preview_options":{"is_disabled":true},
+            "reply_parameters":{"message_id":210,"allow_sending_without_reply":true}
+        })
+    );
+    assert_eq!(
+        calls[3].1["reply_markup"]["inline_keyboard"],
+        json!([[
+            {"text":"Approve once","callback_data":format!("{send}/once")},
+            {"text":"Deny","callback_data":format!("{send}/deny")}
+        ]])
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn mcp_approval_buttons_resume_only_the_owners_waiting_request() {
     let db = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)

@@ -115,14 +115,15 @@ pub(super) async fn handle_callback(
     Ok(())
 }
 
-pub async fn outbox(db: SqlitePool, adapter: std::sync::Arc<dyn ChannelAdapter>) {
+pub async fn outbox(app: std::sync::Arc<crate::App>, adapter: std::sync::Arc<dyn ChannelAdapter>) {
+    let db = &app.db;
     loop {
         let result=async {
-            let Some(item)=store::claim_outbox(&db).await? else {return Ok(false);};
-            let dispatch=if !store::can_deliver(&db,&item).await? {
+            let Some(item)=store::claim_outbox(db).await? else {return Ok(false);};
+            let dispatch=if !store::can_deliver(db,&item).await? {
                 Dispatch::Failed
             } else {
-                let sent = send_outbound(&db, &*adapter, &item).await;
+                let sent = send_item(&app, &*adapter, &item).await;
                 match sent {
                     Ok(MessageDelivery::Sent(id))=>Dispatch::Sent(id),
                     Ok(MessageDelivery::Retry(delay))=>Dispatch::Retry(now()+delay),
@@ -133,13 +134,39 @@ pub async fn outbox(db: SqlitePool, adapter: std::sync::Arc<dyn ChannelAdapter>)
             sqlx::query("UPDATE outbox SET state=?,retry_at=?,body=CASE WHEN ?='queued' THEN body ELSE '' END,
                 button=CASE WHEN ?='queued' THEN button ELSE NULL END,
                 widget=CASE WHEN ?='queued' THEN widget ELSE NULL END,telegram_message_id=? WHERE id=?")
-                .bind(state).bind(retry).bind(state).bind(state).bind(state).bind(message_id).bind(item.id).execute(&db).await?;
+                .bind(state).bind(retry).bind(state).bind(state).bind(state).bind(message_id).bind(item.id).execute(db).await?;
             Ok::<_,anyhow::Error>(true)
         }.await;
         if !matches!(result, Ok(true)) {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
+}
+
+async fn send_item(
+    app: &crate::App,
+    adapter: &dyn ChannelAdapter,
+    item: &store::Outbound,
+) -> Result<MessageDelivery> {
+    let button = item.button.as_deref();
+    if let Some(message) = button.and_then(|button| button.strip_prefix("mail-preview/")) {
+        let preview = store::mail::mail_preview(&app.db, &app.vault, item, message)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Email preview unavailable"))?;
+        return adapter
+            .send_plain(&item.user, &preview, item.reply_to_message_id)
+            .await;
+    }
+    if let Some(request) = button.and_then(|button| button.strip_prefix(callback::MAIL_SEND_PREFIX))
+    {
+        let preview = crate::runtime::smtp_outbound_preview(&app.db, &app.vault, item, request)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Email approval unavailable"))?;
+        return adapter
+            .send(&item.user, &preview, button, item.reply_to_message_id)
+            .await;
+    }
+    send_outbound(&app.db, adapter, item).await
 }
 
 pub(super) async fn send_outbound(

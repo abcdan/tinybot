@@ -28,7 +28,7 @@ pub use reactions::{REACTION_EMOJIS, queue_reaction, reaction_target};
 pub use replies::{SuggestedReply, redeem_reply, suggested_replies};
 pub use requests::{
     can_deliver, claim_approval, claim_outbox, finish_action, list_requests, notify, pause,
-    respond, respond_mcp, start_action, uncertain_action,
+    respond, respond_email, respond_mcp, start_action, uncertain_action,
 };
 
 use crate::security::{id, now};

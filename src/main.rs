@@ -147,7 +147,8 @@ async fn main() -> Result<()> {
     });
     let telegram = Arc::new(channel::Telegram::new(token, origin_string)?);
     tokio::spawn(channel::listen(app.clone(), operator, telegram.clone()));
-    tokio::spawn(channel::outbox(db.clone(), telegram.clone()));
+    tokio::spawn(channel::outbox(app.clone(), telegram.clone()));
+    tokio::spawn(mail::run(app.clone()));
     tokio::spawn(runtime::run(app.clone(), telegram));
     tokio::spawn(schedules::run(db));
     let address: SocketAddr = env::var("TINYBOT_LISTEN")

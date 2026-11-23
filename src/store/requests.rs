@@ -6,7 +6,7 @@ use sqlx::SqlitePool;
 
 pub async fn list_requests(db: &SqlitePool, user: &str) -> Result<Vec<Pending>> {
     Ok(sqlx::query_as("SELECT p.* FROM pending p JOIN tasks t ON t.id=p.task
-        WHERE p.user=? AND p.state='waiting' AND p.expires>=? AND p.kind IN ('approve','form','form-submit','agent-spec','elicitation')
+        WHERE p.user=? AND p.state='waiting' AND p.expires>=? AND p.kind IN ('approve','form','form-submit','agent-spec','elicitation','email-send')
         AND t.state='waiting' AND t.revision=p.revision
         AND (t.agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=t.agent
         AND (a.owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=?))))
@@ -143,12 +143,14 @@ pub async fn uncertain_action(
 }
 
 pub async fn respond(db: &SqlitePool, user: &str, pending: &str, approve: bool) -> Result<()> {
-    let decision = if approve {
-        McpApprovalDecision::Once
-    } else {
-        McpApprovalDecision::Deny
-    };
-    respond_to_request(db, user, pending, decision, false).await
+    respond_to_request(
+        db,
+        user,
+        pending,
+        approval_vote(approve),
+        ResponseScope::Any,
+    )
+    .await
 }
 
 pub async fn respond_mcp(
@@ -157,7 +159,37 @@ pub async fn respond_mcp(
     pending: &str,
     decision: McpApprovalDecision,
 ) -> Result<()> {
-    respond_to_request(db, user, pending, decision, true).await
+    respond_to_request(db, user, pending, decision, ResponseScope::Mcp).await
+}
+
+pub async fn respond_email(
+    db: &SqlitePool,
+    user: &str,
+    pending: &str,
+    approve: bool,
+) -> Result<()> {
+    respond_to_request(
+        db,
+        user,
+        pending,
+        approval_vote(approve),
+        ResponseScope::Email,
+    )
+    .await
+}
+
+enum ResponseScope {
+    Any,
+    Mcp,
+    Email,
+}
+
+fn approval_vote(approve: bool) -> McpApprovalDecision {
+    if approve {
+        McpApprovalDecision::Once
+    } else {
+        McpApprovalDecision::Deny
+    }
 }
 
 async fn respond_to_request(
@@ -165,13 +197,13 @@ async fn respond_to_request(
     user: &str,
     pending: &str,
     decision: McpApprovalDecision,
-    mcp_only: bool,
+    response_scope: ResponseScope,
 ) -> Result<()> {
     let approve = decision != McpApprovalDecision::Deny;
     let state = if approve { "approved" } else { "denied" };
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     let entry: Pending = sqlx::query_as("UPDATE pending SET state=? WHERE id=? AND user=? AND expires>=?
-        AND state='waiting' AND (kind IN ('approve','form-submit') OR (kind IN ('agent-spec','form','elicitation') AND ?='denied')) AND EXISTS
+        AND state='waiting' AND (kind IN ('approve','form-submit','email-send') OR (kind IN ('agent-spec','form','elicitation') AND ?='denied')) AND EXISTS
         (SELECT 1 FROM tasks t WHERE t.id=pending.task AND t.user=pending.user AND t.revision=pending.revision AND t.state='waiting'
         AND (t.agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=t.agent AND
         (a.owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=?))))) RETURNING *")
@@ -182,10 +214,30 @@ async fn respond_to_request(
     } else {
         None
     };
-    ensure!(
-        !mcp_only || scope.is_some(),
-        "MCP approval request unavailable"
-    );
+    match response_scope {
+        ResponseScope::Any => {}
+        ResponseScope::Mcp => ensure!(scope.is_some(), "MCP approval request unavailable"),
+        ResponseScope::Email => ensure!(
+            entry.kind == "email-send",
+            "Email approval request unavailable"
+        ),
+    }
+    if entry.kind == "email-send" && approve {
+        let payload: Value = serde_json::from_str(&entry.payload)?;
+        let approval = &payload["smtp_approval"];
+        let current: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM mail_accounts a JOIN tasks t ON t.user=a.owner
+             WHERE t.id=? AND t.agent IS NULL AND a.owner=? AND a.id=? AND a.epoch=? AND a.can_send=1)",
+        ).bind(&entry.task).bind(user).bind(approval["account"].as_str()).bind(approval["epoch"].as_i64())
+            .fetch_one(&mut *tx).await?;
+        ensure!(
+            current
+                && approval["sealed"]
+                    .as_str()
+                    .is_some_and(|sealed| !sealed.is_empty()),
+            "SMTP connection changed. Ask for a new draft."
+        );
+    }
     if let Some(scope) = &scope {
         mcp_approvals::validate_request(&mut tx, user, entry.task.as_deref(), scope).await?;
         if decision == McpApprovalDecision::Always {
@@ -207,7 +259,9 @@ async fn respond_to_request(
         .await?;
     }
     if !approve {
-        let message = if scope.is_some() {
+        let message = if entry.kind == "email-send" {
+            "The user declined this email draft. Do not send it or request approval for it again in this turn."
+        } else if scope.is_some() {
             "The user denied this MCP action. Do not request the same action again in this turn."
         } else {
             "User declined the pending action."
