@@ -17,7 +17,7 @@ pub(super) struct Entity {
 }
 
 #[derive(Serialize)]
-pub(super) struct SourceButton {
+pub(super) struct LinkButton {
     text: String,
     url: String,
 }
@@ -25,32 +25,27 @@ pub(super) struct SourceButton {
 pub(super) struct Reply {
     pub text: String,
     pub entities: Vec<Entity>,
-    pub sources: Vec<SourceButton>,
+    pub links: Vec<LinkButton>,
 }
 
 pub(super) fn render(body: &str) -> Reply {
     let body = clip(body, 3900);
-    let (markdown, sources) = if let Some(start) = source_start(body) {
+    let markdown = if let Some(start) = source_start(body) {
         let prefix = body[..start].trim_end();
         let separator = if prefix.is_empty() { "" } else { "\n\n" };
-        (
-            format!("{prefix}{separator}{}", body[start..].trim_start()),
-            prefix.len() + separator.len(),
-        )
+        format!("{prefix}{separator}{}", body[start..].trim_start())
     } else {
-        (body.to_owned(), usize::MAX)
+        body.to_owned()
     };
     let mut output = Renderer::default();
-    for (event, range) in
-        Parser::new_ext(&markdown, Options::ENABLE_STRIKETHROUGH).into_offset_iter()
-    {
-        output.render(event, range.start >= sources);
+    for event in Parser::new_ext(&markdown, Options::ENABLE_STRIKETHROUGH) {
+        output.render(event);
     }
     if output.text.trim().is_empty() || output.text.encode_utf16().count() > 4096 {
         return Reply {
             text: body.to_owned(),
             entities: Vec::new(),
-            sources: Vec::new(),
+            links: Vec::new(),
         };
     }
     // Telegram forbids overlapping styles on code entities and nested block quotes.
@@ -76,7 +71,7 @@ pub(super) fn render(body: &str) -> Reply {
     Reply {
         text: output.text,
         entities: output.entities,
-        sources: output.sources,
+        links: output.links,
     }
 }
 
@@ -135,7 +130,7 @@ fn source_start(body: &str) -> Option<usize> {
 struct Renderer {
     text: String,
     entities: Vec<Entity>,
-    sources: Vec<SourceButton>,
+    links: Vec<LinkButton>,
     active: Vec<Span>,
     lists: Vec<Option<u64>>,
     breaks: usize,
@@ -149,7 +144,6 @@ struct Span {
     start: usize,
     url: Option<String>,
     language: Option<String>,
-    source: bool,
 }
 
 impl Renderer {
@@ -182,7 +176,6 @@ impl Renderer {
             start: self.text.len(),
             url: None,
             language: None,
-            source: false,
         });
         self.active.last_mut().expect("span just opened")
     }
@@ -197,13 +190,8 @@ impl Renderer {
             return;
         }
         if let Some(url) = span.url.as_deref() {
-            let citation = label.trim_matches(['[', ']']);
-            if span.source
-                || (!citation.is_empty() && citation.bytes().all(|byte| byte.is_ascii_digit()))
-            {
-                let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
-                self.source(url, &label);
-            }
+            let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
+            self.link_button(url, &label);
         }
         self.entities.push(Entity {
             kind: span.kind,
@@ -214,28 +202,28 @@ impl Renderer {
         });
     }
 
-    fn source(&mut self, url: &str, label: &str) {
+    fn link_button(&mut self, url: &str, label: &str) {
         if !label.is_empty()
-            && self.sources.len() < 4
-            && self.sources.iter().all(|button| button.url != url)
+            && self.links.len() < 4
+            && self.links.iter().all(|button| button.url != url)
         {
-            self.sources.push(SourceButton {
+            self.links.push(LinkButton {
                 text: clip(label, 64).to_owned(),
                 url: url.to_owned(),
             });
         }
     }
 
-    fn render(&mut self, event: Event<'_>, sources: bool) {
+    fn render(&mut self, event: Event<'_>) {
         match event {
             Event::Text(text) => {
                 self.push(&text);
-                if sources && !self.code_block && !self.link {
+                if !self.code_block && !self.link {
                     for word in text.split_whitespace() {
                         if let Some(url) =
                             public_link(word.trim_matches(['(', ')', '<', '>', ',', '.', ';']))
                         {
-                            self.source(url.as_str(), url.host_str().expect("checked host"));
+                            self.link_button(url.as_str(), url.host_str().expect("checked host"));
                         }
                     }
                 }
@@ -301,7 +289,6 @@ impl Renderer {
                 if let Some(url) = public_link(&dest_url) {
                     let span = self.open("text_link");
                     span.url = Some(url.into());
-                    span.source = sources;
                 }
             }
             Event::End(TagEnd::Link) => {
@@ -376,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn puts_citation_tail_on_its_own_block_and_only_adds_source_buttons() {
+    fn separates_citations_and_adds_buttons_for_reply_links() {
         let reply = render(
             "Bekijk [de site](https://example.com/start). **Bronnen:**\n\
              - [Documentatie](https://example.com/docs)\n- https://example.org/guide",
@@ -386,8 +373,9 @@ mod tests {
             "Bekijk de site.\n\nBronnen:\n\n• Documentatie\n• https://example.org/guide"
         );
         assert_eq!(
-            json!(reply.sources),
+            json!(reply.links),
             json!([
+                {"text":"de site","url":"https://example.com/start"},
                 {"text":"Documentatie","url":"https://example.com/docs"},
                 {"text":"example.org","url":"https://example.org/guide"},
             ])
@@ -407,7 +395,7 @@ mod tests {
         let reply = render("An excerpt.\nSource: https://example.org/doc");
         assert_eq!(reply.text, "An excerpt.\n\nSource: https://example.org/doc");
         assert_eq!(
-            json!(reply.sources),
+            json!(reply.links),
             json!([{"text":"example.org","url":"https://example.org/doc"}])
         );
 
@@ -415,7 +403,7 @@ mod tests {
             "Antwoord.\n\nSources:\n[One](https://example.org/one)\n[Two](https://example.org/two)",
         );
         assert_eq!(reply.text, "Antwoord.\n\nSources:\nOne\nTwo");
-        assert_eq!(reply.sources.len(), 2);
+        assert_eq!(reply.links.len(), 2);
     }
 
     #[test]
@@ -431,11 +419,11 @@ mod tests {
         assert_eq!(reply.entities.len(), 1);
         assert_eq!(reply.entities[0].kind, "pre");
         assert_eq!(reply.entities[0].language.as_deref(), Some("rust"));
-        assert!(reply.sources.is_empty());
+        assert!(reply.links.is_empty());
     }
 
     #[test]
-    fn filters_unsafe_destinations_and_keeps_plain_markdown_links_inline() {
+    fn filters_unsafe_destinations_and_keeps_valid_links_inline_and_in_buttons() {
         let reply = render(
             "[Gewoon](https://example.com/) [Ongeldig](javascript:alert(1)) [Inlog](https://user@example.com/)",
         );
@@ -445,13 +433,30 @@ mod tests {
             reply.entities[0].url.as_deref(),
             Some("https://example.com/")
         );
-        assert!(reply.sources.is_empty());
+        assert_eq!(
+            json!(reply.links),
+            json!([{"text":"Gewoon","url":"https://example.com/"}])
+        );
 
         let reply = render(
             "Sources:\n[Localhost](https://localhost/a) [Subdomain](https://app.localhost./a) \
              [Private](https://192.168.1.5/a) [Mapped](https://[::ffff:127.0.0.1]/a)",
         );
         assert!(reply.entities.is_empty());
-        assert!(reply.sources.is_empty());
+        assert!(reply.links.is_empty());
+    }
+
+    #[test]
+    fn standalone_note_links_become_buttons_without_a_source_heading() {
+        let reply = render(
+            "Found the note.\n\n[Open the note](https://example.org/notes/1)\n\nRelated: https://example.org/notes/2",
+        );
+        assert_eq!(
+            json!(reply.links),
+            json!([
+                {"text":"Open the note","url":"https://example.org/notes/1"},
+                {"text":"example.org","url":"https://example.org/notes/2"},
+            ])
+        );
     }
 }
