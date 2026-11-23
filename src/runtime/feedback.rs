@@ -258,7 +258,7 @@ mod tests {
             };
             let feedback = Feedback::default();
             let result = feedback.complete(&model, &json!({})).await.unwrap();
-            assert!(matches!(result, Some(Step::Reply { text }) if text == "Recovered"));
+            assert!(matches!(result, Some(Step::Reply { text, .. }) if text == "Recovered"));
             assert_eq!(model.calls.load(Ordering::Relaxed), 1);
             assert!(feedback.source.lock().unwrap().is_empty());
         }

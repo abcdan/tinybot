@@ -39,7 +39,7 @@ pub(super) async fn delegate(ctx: &ToolContext<'_>, args: &Value) -> Result<Valu
         })
         .collect();
     let instruction = format!(
-        "{ENGINE} You are a temporary helper. Your reply goes to the Chief. If input or approval is needed, describe precisely what the Chief should ask. Saved role: {}",
+        "{ENGINE} You are a temporary helper. Your reply goes to the Chief. Omit suggested_replies. If input or approval is needed, describe precisely what the Chief should ask. Saved role: {}",
         saved
             .as_ref()
             .map_or("helper", |agent| agent.instructions.as_str())
@@ -63,7 +63,7 @@ pub(super) async fn delegate(ctx: &ToolContext<'_>, args: &Value) -> Result<Valu
             "task was updated during delegation"
         );
         match step {
-            Step::Reply { text } => return Ok(json!({"helper_reply":clip(&text,6000)})),
+            Step::Reply { text, .. } => return Ok(json!({"helper_reply":clip(&text,6000)})),
             Step::Tool { name, args } => {
                 let Some(tool) = allowed.iter().find(|tool| tool.name() == name) else {
                     history.push(json!({"error":"Tool unavailable to this helper"}));
