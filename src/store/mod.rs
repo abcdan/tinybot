@@ -6,6 +6,7 @@ mod queue;
 mod reactions;
 mod replies;
 mod requests;
+pub mod tool_budget;
 
 #[cfg(test)]
 pub use ingress::ingest_telegram;
