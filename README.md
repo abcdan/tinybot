@@ -89,6 +89,14 @@ public sources. Set `TINYBOT_BRAVE_SEARCH_KEY` to use Brave Search. Without a
 key, searches run through the browser worker. Sites may require verification
 before TinyBot can read them.
 
+## Agent audit log
+
+Open **Settings & forms → Audit** in Telegram to inspect new message runs and
+scheduled tasks. Each run shows its model calls, tool calls and outcome
+summaries, including work that resumes after an approval or form submission.
+The log keeps seven days of activity. Entries summarize sensitive tool
+payloads and omit private form values, credentials, and raw model prompts.
+
 ## MCP connectors
 
 Send a message such as **Connect the Atlassian MCP**. TinyBot searches the MCP

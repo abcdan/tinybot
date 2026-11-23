@@ -88,6 +88,7 @@ pub(super) fn arguments(name: &str, args: &Value) -> Value {
             "argument_count":args["arguments"].as_object().map_or(0, |object|object.len()),
             "tool_name":args["tool"].as_str().filter(|value|value.len()<=128 &&
                 value.bytes().all(|byte|byte.is_ascii_alphanumeric() || b"._-".contains(&byte)))
+                .map(message_preview)
         }),
         _ => json!({"argument_count":args.as_object().map_or(0, |object|object.len())}),
     }
