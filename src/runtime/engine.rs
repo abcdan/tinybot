@@ -1,6 +1,7 @@
 use super::execution::{execute_approved, finish};
 use super::feedback::Feedback;
 use super::review::{Verdict, review};
+use super::suggestions::valid_suggestions;
 use super::{
     Call, ENGINE, MAX_REPLY_BYTES, Outcome, Risk, Step, ToolContext, connector_context,
     descriptions,
@@ -218,14 +219,23 @@ async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> Resul
             return store::settle(&app.db, task, "idle", None).await;
         }
         match step {
-            Step::Reply { text } => {
+            Step::Reply {
+                text,
+                suggested_replies,
+            } => {
+                let suggestions = valid_suggestions(&suggested_replies);
                 // Wait for any in-flight draft before queuing the durable reply.
                 let _delivery = match feedback {
                     Some(feedback) => Some(feedback.delivery.lock().await),
                     None => None,
                 };
-                return store::settle(&app.db, task, "idle", Some(clip(&text, MAX_REPLY_BYTES)))
-                    .await;
+                return store::settle_reply(
+                    &app.db,
+                    task,
+                    clip(&text, MAX_REPLY_BYTES),
+                    &suggestions,
+                )
+                .await;
             }
             Step::Tool { name, args } => {
                 let Some(tool) = tools.iter().find(|tool| tool.name() == name) else {
