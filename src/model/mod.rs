@@ -1,8 +1,10 @@
 mod codex;
 mod connections;
 mod openrouter;
+mod transcription;
 
 pub use connections::OpenRouterSettingsError;
+pub(crate) use transcription::MAX_VOICE_BYTES;
 
 use self::{codex::Codex, openrouter::OpenRouter};
 use crate::{
