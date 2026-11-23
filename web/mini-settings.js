@@ -24,9 +24,14 @@ export function browser({browser_proxy: proxy}) {
             await refresh();
         } finally { element.reset(); }
     }));
-    if (proxy.source === 'saved') {
-        settings.append(row(action('Remove saved proxy', 'remove-browser-proxy', {}, 'Saved proxy removed.', true)));
+    const controls = row();
+    if (proxy.source !== 'direct') {
+        controls.append(action('Use direct connection', 'disable-browser-proxy', {}, 'Browser direct connection enabled.', true));
     }
+    if (proxy.overridden) {
+        controls.append(action('Restore deployment setting', 'remove-browser-proxy', {}, 'Deployment setting restored.', true));
+    }
+    if (controls.childElementCount) settings.append(controls);
     content.append(settings);
 }
 

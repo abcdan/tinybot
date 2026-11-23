@@ -120,11 +120,15 @@ test('browser proxy settings are operator only and clear the private URL after s
             case 'status': return state;
             case 'save-browser-proxy':
                 assert.deepEqual(data, {url: proxyUrl});
-                state.browser_proxy = {source: 'saved'};
+                state.browser_proxy = {source: 'saved', overridden: true};
+                return {ok: true};
+            case 'disable-browser-proxy':
+                assert.deepEqual(data, {});
+                state.browser_proxy = {source: 'direct', overridden: true};
                 return {ok: true};
             case 'remove-browser-proxy':
                 assert.deepEqual(data, {});
-                state.browser_proxy = {source: 'environment'};
+                state.browser_proxy = {source: 'environment', overridden: false};
                 return {ok: true};
             default: assert.fail('Unexpected Mini App action ' + action);
         }
@@ -164,10 +168,12 @@ test('browser proxy settings are operator only and clear the private URL after s
         await page.getByText('Using the saved proxy for browser traffic.').waitFor();
         assert.equal(await url.inputValue(), '');
         assert.equal((await page.locator('body').innerText()).includes('fixture-password'), false);
-        const remove = page.getByRole('button', {name: 'Remove saved proxy'});
-        await remove.click();
+        await page.getByRole('button', {name: 'Use direct connection'}).click();
+        await page.getByText('Using a direct browser connection.').waitFor();
+        const restore = page.getByRole('button', {name: 'Restore deployment setting'});
+        await restore.click();
         await page.getByText('Using the proxy configured in deployment settings.').waitFor();
-        assert.equal(await remove.count(), 0);
+        assert.equal(await restore.count(), 0);
 
         state.browser_proxy = null;
         await refresh.click();
