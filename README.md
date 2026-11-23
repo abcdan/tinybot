@@ -100,6 +100,28 @@ Configured accounts can continue using their existing connection.
   `TINYBOT_REVIEW_OPENROUTER_KEY` is the deployment fallback for model review
   and Mercury. Personal OpenRouter credentials take precedence.
 
+## Email
+
+Open **Email** in the Telegram Mini App to add IMAP and SMTP accounts. IMAP uses
+port 993. SMTP uses port 465 with TLS or port 587 with required STARTTLS. Use
+your provider's public mail hostnames and credentials for the corresponding
+protocols. TinyBot encrypts the credentials and retrieved mail.
+
+IMAP monitors the folders you configure. On first connection, it starts at the
+current mailbox position and watches for new mail. Each folder starts in
+**Notify only** mode. The Telegram notice hides the sender, subject and body.
+Tap **Read more** to view the message and select it for your next instruction,
+or reply directly to the notice with what you want the Chief to do. This
+integration reads the text of the email.
+Enable automation on a folder to have the Chief summarize new mail or follow
+your handling instruction. Automated turns can reply in Telegram, ask for
+input, or prepare an email draft for review.
+
+Ask the Chief in chat to compose or reply to an email. Review the exact sender,
+recipients, subject and body, then tap **Approve once** or **Deny**. Every SMTP
+send requires its own approval. TinyBot reports when the server accepts the
+message for delivery.
+
 ## Public websites
 
 In **Model → OpenRouter tools**, toggle Web search, Web fetch, Date and time,

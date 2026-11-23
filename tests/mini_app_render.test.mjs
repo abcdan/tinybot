@@ -396,6 +396,119 @@ test('browser proxy settings are operator only and clear the private URL after s
     }
 });
 
+test('Email settings keep inbox handling opt-in and passwords out of the loaded form', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 650}, reducedMotion: 'reduce'});
+        const page = await context.newPage();
+        const state = {user: '1', provider: 'codex', requests: [], tasks: [], mail_accounts: []};
+        const id = 'c01857d1-c96a-43d2-b285-ab2636b4ac61';
+        let updates = 0;
+        const account = {
+            label: 'Work', address: 'user@example.com',
+            imap: {host: 'imap.example.com', port: 993, username: 'user@example.com'},
+            smtp: {host: 'smtp.example.com', port: 465, username: 'user@example.com'},
+            folders: [
+                {name: 'INBOX', automate: false, instruction: null},
+                {name: 'Projects', automate: true, instruction: 'Summarize new mail from this folder.'}
+            ]
+        };
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return state;
+            if (action === 'save-mail-account') {
+                const creating = updates++ === 0;
+                assert.equal(data.id, creating ? undefined : id);
+                assert.deepEqual(data.config, {
+                    ...account,
+                    label: creating ? 'Work' : 'Projects mail',
+                    imap: {...account.imap, password: creating ? 'test-imap-secret' : ''},
+                    smtp: {...account.smtp, password: creating ? 'test-smtp-secret' : ''}
+                });
+                state.mail_accounts = [{...account, id, label: data.config.label}];
+                return {id};
+            }
+            if (action === 'remove-mail-account') {
+                assert.deepEqual(data, {id});
+                state.mail_accounts = [];
+                return {ok: true};
+            }
+            assert.fail(`Unexpected Mini App action ${action}`);
+        });
+        await page.goto('https://tinybot.test/mini');
+        await page.getByRole('button', {name: 'Email', exact: true}).click();
+        await page.getByRole('button', {name: 'Add email account'}).click();
+        await page.getByLabel('Account name').fill('Work');
+        await page.getByLabel('From email').fill('user@example.com');
+        await page.getByLabel('IMAP host').fill('imap.example.com');
+        await page.getByLabel('IMAP username').fill('user@example.com');
+        await page.getByLabel('IMAP password').fill('test-imap-secret');
+        assert.equal(await page.getByLabel('IMAP password').getAttribute('type'), 'password');
+        assert.equal(await page.getByLabel('Folder name').inputValue(), 'INBOX');
+        const automate = page.getByRole('checkbox', {name: 'Let the agent handle new mail'});
+        assert.equal(await automate.isChecked(), false);
+        await page.getByRole('button', {name: 'Add watched folder'}).click();
+        await page.getByLabel('Folder name').nth(1).fill('Projects');
+        await automate.nth(1).check();
+        await page.locator('.mail-watch-entry').nth(1).getByLabel('Handling instructions (optional)').fill('Summarize new mail from this folder.');
+        await page.getByRole('checkbox', {name: 'Send via SMTP'}).check();
+        await page.getByLabel('SMTP host').fill('smtp.example.com');
+        await page.getByLabel('SMTP security').selectOption('465');
+        await page.getByLabel('SMTP username').fill('user@example.com');
+        await page.getByLabel('SMTP password').fill('test-smtp-secret');
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
+        await page.getByRole('button', {name: 'Save account'}).click();
+        await page.getByRole('heading', {name: 'Work', exact: true}).waitFor();
+        await page.getByRole('listitem').filter({hasText: 'INBOX'}).getByText('Notify only').waitFor();
+        await page.getByRole('listitem').filter({hasText: 'Projects'}).getByText('Automatic handling').waitFor();
+
+        await page.getByRole('button', {name: 'Edit account'}).click();
+        assert.equal(await page.getByLabel('IMAP password').inputValue(), '');
+        assert.equal(await page.getByLabel('SMTP password').inputValue(), '');
+        await page.getByLabel('Account name').fill('Projects mail');
+        await page.getByRole('button', {name: 'Save account'}).click();
+        await page.getByRole('heading', {name: 'Projects mail', exact: true}).waitFor();
+        assert.equal(updates, 2);
+        await page.getByRole('button', {name: 'Remove account'}).click();
+        await page.getByRole('button', {name: 'Keep account'}).click();
+        assert.equal(state.mail_accounts.length, 1);
+        await page.getByRole('button', {name: 'Remove account'}).click();
+        await page.getByRole('button', {name: 'Remove account'}).click();
+        await page.getByText('Email account removed.', {exact: true}).waitFor();
+        assert.equal(state.mail_accounts.length, 0);
+    } finally {
+        await browser.close();
+    }
+});
+
+test('Email approval shows the exact plain-text draft and offers a one-time approval', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext();
+        const page = await context.newPage();
+        const draft = 'From: user@example.com\nTo: reviewer@example.com\nSubject: Fixture\n\nReview <strong>literal text</strong>.';
+        const state = {user: '1', provider: 'codex', tasks: [], requests: [
+            {id: 'draft', kind: 'email-send', content: {operation: 'Send email', explanation: draft}}
+        ]};
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return state;
+            assert.equal(action, 'approve');
+            assert.deepEqual(data, {id: 'draft'});
+            state.requests = [];
+            return {ok: true};
+        });
+        await page.goto('https://tinybot.test/mini');
+        const request = page.locator('#view > .card').filter({has: page.getByRole('heading', {name: 'Send email'})});
+        await request.waitFor();
+        assert.equal(await request.locator('pre').textContent(), draft);
+        assert.equal(await request.getByRole('button', {name: 'Always approve'}).count(), 0);
+        assert.equal(await request.getByRole('button', {name: 'Deny'}).count(), 1);
+        await request.getByRole('button', {name: 'Approve once'}).click();
+        await page.getByText('Send approved.', {exact: true}).waitFor();
+    } finally {
+        await browser.close();
+    }
+});
+
 test('memory settings page by scope and manage group notes with the signed API', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
     const context = await browser.newContext({viewport: {width: 360, height: 720}});

@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 mod browser;
 mod connectors;
+mod mail;
 mod memory;
 mod models;
 mod onboarding;
@@ -97,6 +98,8 @@ async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<
         "save-browser-proxy" => browser::save(app, user, data)?,
         "remove-browser-proxy" => browser::reset(app, user)?,
         "disable-browser-proxy" => browser::direct(app, user)?,
+        "save-mail-account" => return mail::save(app, user, data).await,
+        "remove-mail-account" => mail::remove(app, user, data).await?,
 
         "openrouter-key" => return models::save_openrouter_key(app, user, data).await,
         "openrouter-models" => return models::openrouter_models(app, user).await,
