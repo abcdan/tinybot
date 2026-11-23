@@ -63,6 +63,8 @@ services:
     build:
       context: .
       target: egress
+    environment:
+      TINYBOT_BROWSER_PROXY: ${TINYBOT_BROWSER_PROXY:-}
     mem_limit: 128m
     pids_limit: 96
     networks: [browser_internal, browser_public]

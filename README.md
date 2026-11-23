@@ -89,6 +89,24 @@ public sources. Set `TINYBOT_BRAVE_SEARCH_KEY` to use Brave Search. Without a
 key, searches run through the browser worker. Sites may require verification
 before TinyBot can read them.
 
+### Browser egress proxy
+
+Set `TINYBOT_BROWSER_PROXY` in `.env` or Dokploy's **Environment** settings and
+redeploy. An empty value uses direct browser connections.
+
+| Proxy type | URL format | Port |
+| --- | --- | --- |
+| SOCKS5 | `socks5://[username:password@]host:port` | Required |
+| HTTP CONNECT | `http://[username:password@]host:port` | Defaults to 80 |
+
+Use a trusted proxy. Credentials are optional, and HTTP proxy authentication
+uses Basic. Percent-encode reserved characters in credentials, such as `@`
+as `%40`. The setting routes only browser worker traffic, including
+browser-backed searches, and retains DNS and public HTTPS destination checks.
+The Brave Search API uses a separate connection when configured. With a
+proxy set, browser traffic uses it exclusively and proxy failures surface as
+request errors.
+
 ## Agent audit log
 
 Open **Settings & forms → Audit** in Telegram to inspect new message runs and
