@@ -81,10 +81,14 @@ async fn pending_id(db: &SqlitePool, task: &Task, kind: &str) -> String {
 }
 
 fn signed_mini_init(app: &App, id: u64) -> String {
+    signed_mini_init_at(app, id, now())
+}
+
+fn signed_mini_init_at(app: &App, id: u64, date: i64) -> String {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
-    let date = now().to_string();
+    let date = date.to_string();
     let user = json!({"id":id}).to_string();
     let mut key = Hmac::<Sha256>::new_from_slice(b"WebAppData").unwrap();
     key.update(app.token.as_bytes());
@@ -267,6 +271,73 @@ async fn an_explicit_mini_app_form_keeps_a_single_select_in_the_mini_app() {
         form["content"]["fields"][0]["options"],
         json!(["Travel", "Cooking"])
     );
+}
+
+#[tokio::test]
+async fn telegram_mini_app_launches_at_the_origin_and_requires_signed_access() {
+    let db = fixture().await;
+    let app = Arc::new(app_with_model(&db, Arc::new(WidgetChief)));
+    let init = signed_mini_init(&app, 1);
+    let expired = signed_mini_init_at(&app, 1, now() - 901);
+    let mut tampered = init.clone();
+    let last = tampered.pop().unwrap();
+    tampered.push(if last == '0' { '1' } else { '0' });
+    let unregistered = signed_mini_init(&app, 3);
+    let origin = app.origin.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server =
+        tokio::spawn(async move { axum::serve(listener, web::router(app)).await.unwrap() });
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    for path in ["/", "/mini?form=example"] {
+        let response = client
+            .get(format!("{endpoint}{path}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let csp = response.headers()["content-security-policy"]
+            .to_str()
+            .unwrap();
+        assert!(csp.contains("script-src 'self' https://telegram.org"));
+        assert!(csp.contains("frame-ancestors 'self' https://web.telegram.org"));
+        let body = response.text().await.unwrap();
+        assert!(body.contains("https://telegram.org/js/telegram-web-app.js"));
+        assert!(body.contains("src=\"/mini.js\""));
+    }
+
+    for (init, origin, status) in [
+        ("", origin.as_str(), 403),
+        (tampered.as_str(), origin.as_str(), 403),
+        (expired.as_str(), origin.as_str(), 403),
+        (unregistered.as_str(), origin.as_str(), 403),
+        (init.as_str(), "https://other.example", 403),
+        (init.as_str(), origin.as_str(), 200),
+    ] {
+        let response = client
+            .post(format!("{endpoint}/api/mini"))
+            .header("origin", origin)
+            .json(&json!({"init":init,"action":"status"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        assert!(
+            response.headers()["content-security-policy"]
+                .to_str()
+                .unwrap()
+                .contains("frame-ancestors 'none'")
+        );
+        if status == 200 {
+            assert_eq!(response.json::<Value>().await.unwrap()["user"], "1");
+        }
+    }
+    server.abort();
 }
 
 #[tokio::test]
