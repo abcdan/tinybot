@@ -1,6 +1,6 @@
 use crate::security::{clip, hash, id, now, token};
 use anyhow::Result;
-use sqlx::SqlitePool;
+use sqlx::{Sqlite, SqlitePool, Transaction};
 
 pub async fn ingest(
     db: &SqlitePool,
@@ -161,32 +161,7 @@ pub async fn ingest(
                 .await?;
             task
         };
-        let updated:Option<String> = sqlx::query_scalar("UPDATE tasks SET state=CASE WHEN state IN ('running','uncertain') THEN state ELSE ? END,
-            revision=revision+1,updated=? WHERE id=? AND user=? AND state NOT IN ('cancelled','revoked') AND
-            (agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=tasks.agent AND
-            (a.owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=?)))) RETURNING state")
-            .bind(if provider.is_some() {"queued"} else {"setup"}).bind(now()).bind(&task).bind(user)
-            .bind(user).bind(user).fetch_optional(&mut *tx).await?;
-        if let Some(state) = updated {
-            sqlx::query("UPDATE pending SET state='superseded' WHERE task=? AND state IN ('waiting','approved')")
-                .bind(&task).execute(&mut *tx).await?;
-            sqlx::query("INSERT INTO events(task,role,body) VALUES (?,'user',?)")
-                .bind(&task)
-                .bind(input)
-                .execute(&mut *tx)
-                .await?;
-            if state == "uncertain" {
-                sqlx::query("INSERT INTO outbox(user,body) VALUES(?,?)").bind(user)
-                    .bind("I saved your message. Check the last action at its destination, then send /reconcile to continue.")
-                    .execute(&mut *tx).await?;
-            } else if provider.is_none() {
-                sqlx::query("INSERT INTO outbox(user,body,button) VALUES(?,?,'mini')")
-                    .bind(user)
-                    .bind("I saved your task. Choose a model under Settings & forms and I’ll pick it up.")
-                    .execute(&mut *tx)
-                    .await?;
-            }
-        } else {
+        if !enqueue_input(&mut tx, user, &task, input, provider.is_some()).await? {
             sqlx::query("INSERT INTO outbox(user,body) VALUES(?,?)")
                 .bind(user)
                 .bind("This task is unavailable. Use /new to start another task.")
@@ -196,4 +171,56 @@ pub async fn ingest(
     }
     tx.commit().await?;
     Ok(())
+}
+
+// Record user text and invalidate older approvals under the caller's write transaction.
+pub(super) async fn enqueue_input(
+    tx: &mut Transaction<'_, Sqlite>,
+    user: &str,
+    task: &str,
+    input: &str,
+    has_provider: bool,
+) -> Result<bool> {
+    let state: Option<String> = sqlx::query_scalar(
+        "UPDATE tasks SET state=CASE WHEN state IN ('running','uncertain') THEN state ELSE ? END,
+        revision=revision+1,updated=? WHERE id=? AND user=? AND state NOT IN ('cancelled','revoked') AND
+        (agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=tasks.agent AND
+        (a.owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=?)))) RETURNING state",
+    )
+    .bind(if has_provider { "queued" } else { "setup" })
+    .bind(now())
+    .bind(task)
+    .bind(user)
+    .bind(user)
+    .bind(user)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(state) = state else {
+        return Ok(false);
+    };
+    sqlx::query(
+        "UPDATE pending SET state='superseded' WHERE task=? AND state IN ('waiting','approved')",
+    )
+    .bind(task)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query("INSERT INTO events(task,role,body) VALUES (?,'user',?)")
+        .bind(task)
+        .bind(input)
+        .execute(&mut **tx)
+        .await?;
+    if state == "uncertain" {
+        sqlx::query("INSERT INTO outbox(user,body) VALUES(?,?)")
+            .bind(user)
+            .bind("I saved your message. Check the last action at its destination, then send /reconcile to continue.")
+            .execute(&mut **tx)
+            .await?;
+    } else if !has_provider {
+        sqlx::query("INSERT INTO outbox(user,body,button) VALUES(?,?,'mini')")
+            .bind(user)
+            .bind("I saved your task. Choose a model under Settings & forms and I’ll pick it up.")
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(true)
 }

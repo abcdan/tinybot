@@ -1,4 +1,4 @@
-use super::Task;
+use super::{Task, replies};
 use crate::security::{clip, now};
 use anyhow::Result;
 use sqlx::SqlitePool;
@@ -90,6 +90,10 @@ pub async fn expire(db: &SqlitePool) -> Result<()> {
         .bind(now() - 86400)
         .execute(&mut *tx)
         .await?;
+    sqlx::query("DELETE FROM suggested_replies WHERE expires<?")
+        .bind(now())
+        .execute(&mut *tx)
+        .await?;
     sqlx::query(
         "DELETE FROM outbox WHERE id < (SELECT max(id)-10000 FROM outbox)
         AND state IN ('sent','uncertain','failed')",
@@ -143,6 +147,25 @@ pub async fn settle(
     state: &str,
     message: Option<&str>,
 ) -> Result<()> {
+    settle_task(db, task, state, message, &[]).await
+}
+
+pub async fn settle_reply(
+    db: &SqlitePool,
+    task: &Task,
+    message: &str,
+    suggestions: &[&str],
+) -> Result<()> {
+    settle_task(db, task, "idle", Some(message), suggestions).await
+}
+
+async fn settle_task(
+    db: &SqlitePool,
+    task: &Task,
+    state: &str,
+    message: Option<&str>,
+    suggestions: &[&str],
+) -> Result<()> {
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     let affected = sqlx::query(
         "UPDATE tasks SET state=CASE WHEN revision=? THEN ? ELSE 'queued' END,updated=?
@@ -162,13 +185,15 @@ pub async fn settle(
                 .bind(message)
                 .execute(&mut *tx)
                 .await?;
-            sqlx::query("INSERT INTO outbox(user,task,agent,body) VALUES(?,?,?,?)")
+            let outbox = sqlx::query("INSERT INTO outbox(user,task,agent,body) VALUES(?,?,?,?)")
                 .bind(&task.user)
                 .bind(&task.id)
                 .bind(&task.agent)
                 .bind(message)
                 .execute(&mut *tx)
-                .await?;
+                .await?
+                .last_insert_rowid();
+            replies::insert(&mut tx, outbox, task.revision, suggestions).await?;
         }
     }
     tx.commit().await?;
