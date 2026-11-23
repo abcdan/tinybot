@@ -88,7 +88,7 @@ impl Tool for Builtin {
             Self::Remember => "Remember a durable user preference privately. Args: text.",
             Self::SetGoal => "Record the current task goal. Args: text.",
             Self::Delegate => {
-                "Delegate a bounded brief. Args: brief, optional agent (saved agent ID)."
+                "Ask another agent to carry out a self-contained brief and return findings to you. Choose a matching saved agent by ID when available. Include a handoff: one short first-person message in the user's language saying what you're asking the helper and that you'll follow up. Include the helper's name if you selected one."
             }
             Self::Discover => "Find official remote MCP endpoints. Args: name.",
             Self::Connect => {
@@ -142,7 +142,10 @@ impl Tool for Builtin {
             json!({"type":"array","maxItems":3,"items":{"type":"string","maxLength":48}});
         let (properties, required): (Value, &[&str]) = match self {
             Self::Remember | Self::SetGoal => (json!({"text":text}), &["text"]),
-            Self::Delegate => (json!({"brief":text,"agent":text}), &["brief"]),
+            Self::Delegate => (
+                json!({"brief":text,"agent":text,"handoff":{"type":"string","maxLength":180}}),
+                &["brief"],
+            ),
             Self::Discover => (json!({"name":text}), &["name"]),
             Self::Connect => (
                 json!({"name":text,"endpoint":text,"transport":{"type":"string","enum":["auto","streamable-http","sse","stdio"]}}),
