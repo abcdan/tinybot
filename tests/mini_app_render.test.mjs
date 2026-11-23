@@ -531,3 +531,71 @@ test('audit log retries, pages by message, and reveals chronological calls and r
         await browser.close();
     }
 });
+
+test('audit usage shows provider, model and run totals without treating missing reports as zero', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    const context = await browser.newContext({locale: 'en-US', viewport: {width: 320, height: 720}});
+    const page = await context.newPage();
+    const started = 1795380000;
+    const run = {id: 42, message: 'Look up the forecast', started_at: started, status: 'completed', entry_count: 1};
+    const modelName = 'vendor/' + 'long-name-'.repeat(12) + '<script>text</script>';
+    const free = {
+        provider: 'DeepInfra', model: modelName, calls: 1, input_tokens: 234, output_tokens: 20,
+        total_tokens: 254, cost_usd: 0, token_reported_calls: 1, cost_reported_calls: 1,
+    };
+    const paid = {
+        ...free, model: 'vendor/weather', input_tokens: 1000, output_tokens: 30, total_tokens: 1030, cost_usd: 0.001234,
+    };
+    const codex = {
+        ...free, provider: 'codex', model: 'gpt-fixture', calls: 2, input_tokens: 10, output_tokens: 5,
+        total_tokens: 15, cost_usd: null, token_reported_calls: 1, cost_reported_calls: 0,
+    };
+    const upstream = {...paid, calls: 2, input_tokens: 1234, output_tokens: 50, total_tokens: 1284,
+        token_reported_calls: 2, cost_reported_calls: 2};
+    const overview = {
+        total: {...upstream, calls: 4, input_tokens: 1244, output_tokens: 55, total_tokens: 1299, token_reported_calls: 3},
+        providers: [upstream, codex], models: [free, paid, codex], legacy_entries: 1,
+    };
+    const runUsage = {total: free, providers: [free], models: [free], legacy_entries: 0};
+    await mockMiniApp(context, ({action, data}) => {
+        switch (action) {
+            case 'status': return {user: '1', requests: [], tasks: [], time_zone: 'UTC'};
+            case 'audit-sessions': return {sessions: [run], next_before: null, usage: overview};
+            case 'audit-session':
+                assert.deepEqual(data, {id: 42});
+                return {session: run, next_after: null, usage: runUsage, entries: [
+                    {id: 1, at: started, kind: 'model_call', name: modelName, status: 'completed', detail: {usage: free}},
+                ]};
+            default: assert.fail('Unexpected Mini App action ' + action);
+        }
+    });
+    const values = group => group.locator('.audit-usage-metrics').first().locator('dd').allTextContents();
+    try {
+        await page.goto('https://tinybot.test/mini');
+        await page.getByRole('button', {name: 'Audit', exact: true}).click();
+        const panel = page.locator('.card').filter({has: page.getByRole('heading', {name: 'Model usage', exact: true})});
+        await panel.getByText('Last 7 days', {exact: true}).waitFor();
+        assert.deepEqual(await values(panel), ['$0.001234', '1,244', '55', '1,299']);
+        await panel.getByText('4 model calls · Token counts reported for 3 · Cost reported for 2', {exact: true}).waitFor();
+        await panel.getByText('Earlier model calls may be missing usage data.', {exact: true}).waitFor();
+        const split = provider => panel.locator('.audit-usage-provider').filter({has: page.getByText(provider, {exact: true})});
+        const provider = split('DeepInfra');
+        assert.deepEqual(await values(provider), ['$0.001234', '1,234', '50', '1,284']);
+        const model = name => provider.getByRole('listitem').filter({has: page.getByText(name, {exact: true})});
+        assert.deepEqual(await values(model(modelName)), ['$0.00', '234', '20', '254']);
+        assert.deepEqual(await values(model('vendor/weather')), ['$0.001234', '1,000', '30', '1,030']);
+        assert.deepEqual(await values(split('Codex')), ['Not reported', '10', '5', '15']);
+        assert.equal(await panel.locator('script').count(), 0);
+
+        await page.getByText('Look up the forecast', {exact: true}).click();
+        const session = page.locator('.audit-run-usage');
+        await session.getByRole('heading', {name: 'Run usage', exact: true}).waitFor();
+        assert.deepEqual(await values(session), ['$0.00', '234', '20', '254']);
+        const entry = page.locator('.audit-timeline > li');
+        assert.deepEqual(await values(entry), ['$0.00', '234', '20', '254']);
+        assert.equal(await entry.locator('script').count(), 0);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
+    } finally {
+        await browser.close();
+    }
+});

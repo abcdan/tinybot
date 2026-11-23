@@ -1,10 +1,20 @@
-import { button, node, row } from './mini-ui.js';
+import { button, card, node, row } from './mini-ui.js';
 import { api, content } from './mini.js';
+
+const numbers = new Intl.NumberFormat();
+const dollars = new Intl.NumberFormat(undefined, {
+    style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 8,
+});
+const providerNames = new Map([['codex', 'Codex'], ['openrouter', 'OpenRouter']]);
 
 export function audit(state) {
     const dates = new Intl.DateTimeFormat(undefined, {
         dateStyle: 'medium', timeStyle: 'medium', timeZone: state.time_zone
     });
+    const usage = card('Model usage');
+    const totals = node('div');
+    usage.append(node('p', 'Last 7 days', 'meta'), totals);
+    usage.hidden = true;
     const sessions = node('div');
     const status = node('p', '', 'meta');
     status.setAttribute('role', 'status');
@@ -17,6 +27,10 @@ export function audit(state) {
         more.hidden = true;
         try {
             const page = await api('audit-sessions', before === null ? {} : {before});
+            if (before === null && page.usage) {
+                renderUsage(totals, page.usage);
+                usage.hidden = false;
+            }
             sessions.append(...page.sessions.map(run => auditRun(run, dates)));
             before = page.next_before ?? null;
             status.textContent = 'There are no message runs in the last 7 days.';
@@ -31,7 +45,7 @@ export function audit(state) {
     }
 
     content.append(node('h2', 'Audit log'), node('p', 'Message runs and their model and tool calls are kept for 7 days. Sensitive payloads are summarized.', 'meta'),
-        sessions, status, more);
+        usage, sessions, status, more);
     void load();
 }
 
@@ -41,6 +55,10 @@ function auditRun(run, dates) {
     const summary = node('span', describe(run, dates), 'meta');
     title.append(node('span', run.message || 'Message'), summary);
     const finished = node('p', '', 'meta');
+    const usage = node('section', undefined, 'audit-run-usage');
+    const totals = node('div');
+    usage.append(node('h4', 'Run usage'), totals);
+    usage.hidden = true;
     const timeline = node('ol', undefined, 'audit-timeline');
     timeline.setAttribute('role', 'list');
     const status = node('p', 'Loading run entries…', 'meta');
@@ -50,7 +68,7 @@ function auditRun(run, dates) {
     const actions = row(more, refresh);
     finished.hidden = true;
     actions.hidden = true;
-    card.append(title, finished, timeline, status, actions);
+    card.append(title, finished, usage, timeline, status, actions);
     let after = null;
     let loaded = false;
     let loading = false;
@@ -66,6 +84,10 @@ function auditRun(run, dates) {
             summary.textContent = describe(result.session, dates);
             finished.hidden = result.session.finished_at == null;
             finished.textContent = finished.hidden ? '' : 'Finished ' + date(result.session.finished_at, dates);
+            if (result.usage) {
+                renderUsage(totals, result.usage);
+                usage.hidden = false;
+            }
             const entries = result.entries.map(item => auditEntry(item, dates));
             if (nextPage) timeline.append(...entries);
             else timeline.replaceChildren(...entries);
@@ -92,6 +114,65 @@ function auditRun(run, dates) {
     return card;
 }
 
+function renderUsage(target, {total, providers, models, legacy_entries: legacyEntries}) {
+    target.replaceChildren();
+    if (total.calls === 0) {
+        target.append(node('p', 'No model usage recorded.', 'meta'));
+    } else {
+        target.append(metrics(total), coverage(total));
+        for (const provider of providers) {
+            const group = node('details', undefined, 'audit-usage-provider');
+            group.open = true;
+            group.append(node('summary', providerNames.get(provider.provider) ?? provider.provider),
+                metrics(provider), coverage(provider));
+            const list = node('ul', undefined, 'audit-usage-models');
+            list.setAttribute('role', 'list');
+            for (const model of models.filter(model => model.provider === provider.provider)) {
+                const item = node('li');
+                item.append(node('strong', model.model), metrics(model), coverage(model));
+                list.append(item);
+            }
+            group.append(list);
+            target.append(group);
+        }
+    }
+    if (legacyEntries > 0) {
+        target.append(node('p', 'Earlier model calls may be missing usage data.', 'meta'));
+    }
+}
+
+function metrics(usage) {
+    const list = node('dl', undefined, 'audit-usage-metrics');
+    for (const [name, value] of [
+        ['Cost (USD)', formatCost(usage.cost_usd)],
+        ['Input tokens', formatTokens(usage.input_tokens)],
+        ['Output tokens', formatTokens(usage.output_tokens)],
+        ['Total tokens', formatTokens(usage.total_tokens)],
+    ]) {
+        const item = node('div');
+        item.append(node('dt', name), node('dd', value));
+        list.append(item);
+    }
+    return list;
+}
+
+function coverage({calls, token_reported_calls: tokenCalls, cost_reported_calls: costCalls}) {
+    const parts = [numbers.format(calls) + (calls === 1 ? ' model call' : ' model calls')];
+    if (tokenCalls < calls) parts.push('Token counts reported for ' + numbers.format(tokenCalls));
+    if (costCalls < calls) parts.push('Cost reported for ' + numbers.format(costCalls));
+    return node('p', parts.join(' · '), 'meta audit-usage-coverage');
+}
+
+function formatTokens(value) {
+    return value == null ? 'Not reported' : numbers.format(value);
+}
+
+function formatCost(value) {
+    if (value == null) return 'Not reported';
+    if (value > 0 && value < 0.00000001) return '< ' + dollars.format(0.00000001);
+    return dollars.format(value);
+}
+
 function auditEntry(item, dates) {
     const entry = node('li');
     const title = [label(item.kind), item.name].filter(Boolean).join(' · ');
@@ -103,6 +184,10 @@ function auditEntry(item, dates) {
             ? Object.entries(item.detail)
             : [['details', item.detail]];
         for (const [key, value] of parts) {
+            if (item.kind === 'model_call' && key === 'usage' && value != null) {
+                entry.append(metrics(value));
+                continue;
+            }
             entry.append(node('div', label(key), 'meta'),
                 node('pre', typeof value === 'string' ? value : JSON.stringify(value, null, 2)));
         }
