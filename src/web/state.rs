@@ -1,4 +1,4 @@
-use crate::{App, mcp::Connector, security::clip, store};
+use crate::{App, mcp::Connector, proxy, security::clip, store};
 use anyhow::Result;
 use serde_json::{Value, json};
 
@@ -72,6 +72,23 @@ pub(super) async fn status(app: &App, user: &str) -> Result<Value> {
     let schedules = crate::schedules::list(&app.db, user).await?;
     let zone = crate::schedules::timezone(&app.db, user).await?;
     let connections = app.models.connections(user).await?;
+    let browser_proxy = if user == app.operator {
+        match proxy::browser_proxy_status() {
+            Ok(status) => {
+                let source = if status.mode == "proxy" {
+                    "saved"
+                } else if status.mode == "deployment" && status.deployment_configured {
+                    "environment"
+                } else {
+                    "direct"
+                };
+                json!({"source":source,"overridden":status.mode!="deployment"})
+            }
+            Err(_) => json!({"source":"unavailable","overridden":false}),
+        }
+    } else {
+        Value::Null
+    };
     let read_tools: std::collections::BTreeMap<_, _> = connectors
         .iter()
         .map(|connector| (&connector.id, app.mcp.read_tools(&connector.endpoint)))
@@ -80,7 +97,7 @@ pub(super) async fn status(app: &App, user: &str) -> Result<Value> {
         json!({"user":user,"provider":profile.0,"model":profile.1,"active_task":profile.2,
         "agents":agents,"tasks":tasks,"requests":requests,"connectors":connectors,"members":members,"memory":memory,"grants":grants,
         "schedules":schedules,"time_zone":zone.name(),"openrouter_connected":connections.openrouter_key,
-        "codex_model":connections.codex_model,"read_tools":read_tools}),
+        "codex_model":connections.codex_model,"read_tools":read_tools,"browser_proxy":browser_proxy}),
     )
 }
 

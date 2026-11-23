@@ -96,8 +96,13 @@ before TinyBot can read them.
 
 ### Browser egress proxy
 
-Set `TINYBOT_BROWSER_PROXY` in `.env` or Dokploy's **Environment** settings and
-redeploy. An empty value uses direct browser connections.
+Open **Settings & forms → Browser** in Telegram as the TinyBot operator to save
+an upstream proxy, use a direct connection, or restore the deployment setting.
+Changes apply to new browser connections. The Mini App accepts public proxy
+endpoints and keeps the URL and credentials out of its status response.
+
+For a deployment default, set `TINYBOT_BROWSER_PROXY` in `.env` or Dokploy's
+**Environment** settings. An empty deployment setting uses direct connections.
 
 | Proxy type | URL format | Port |
 | --- | --- | --- |
