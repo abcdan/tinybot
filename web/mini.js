@@ -2,6 +2,7 @@ import { action, button, card, field, form, node, row } from './mini-ui.js';
 import { agentForm, agents } from './mini-agents.js';
 import { audit } from './mini-audit.js';
 import { connectors } from './mini-connectors.js';
+import { memories } from './mini-memory.js';
 import { browser, schedules, model } from './mini-settings.js';
 
 export const telegram = window.Telegram?.WebApp;
@@ -70,7 +71,7 @@ function setTab(next) {
 function render() {
     if (!state) return;
     content.replaceChildren();
-    ({home, agents, connectors, browser, schedules, audit, model})[tab](state);
+    ({home, agents, memories, connectors, browser, schedules, audit, model})[tab](state);
 }
 
 function home() {
