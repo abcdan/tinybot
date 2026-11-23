@@ -1,4 +1,5 @@
 mod api;
+mod rich;
 mod updates;
 
 use super::{Card, ChannelAdapter, Inbound, MessageDelivery, callback, formatting, media};
