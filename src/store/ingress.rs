@@ -2,6 +2,9 @@ use crate::security::{clip, hash, id, now, token};
 use anyhow::Result;
 use sqlx::{Sqlite, SqlitePool, Transaction};
 
+#[cfg(test)]
+mod tests;
+
 pub async fn ingest(
     db: &SqlitePool,
     operator: &str,
@@ -77,19 +80,25 @@ async fn ingest_message(
                     .bind(user)
                     .execute(&mut *tx)
                     .await?;
+                let name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id=?")
+                    .bind(&agent)
+                    .fetch_one(&mut *tx)
+                    .await?;
                 response = Some(format!(
-                    "Invitation accepted. Open Settings & forms or use /use {agent} to ask this agent a question."
+                    "Invitation accepted. Ask your Chief to consult {name}. Open Settings & forms if you still need to set up a model."
                 ));
             }
         } else {
             response = Some("This invitation is invalid or expired.".into());
         }
     }
-    let profile: Option<(Option<String>, Option<String>)> =
-        sqlx::query_as("SELECT active_task,provider FROM users WHERE id=?")
-            .bind(user)
-            .fetch_optional(&mut *tx)
-            .await?;
+    let profile: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT t.id,u.provider FROM users u LEFT JOIN tasks t ON t.id=u.active_task
+         AND t.user=u.id AND t.chief_chat=1 AND t.state NOT IN ('cancelled','revoked') WHERE u.id=?",
+    )
+    .bind(user)
+    .fetch_optional(&mut *tx)
+    .await?;
     let Some((active_task, provider)) = profile else {
         tx.commit().await?;
         return Ok(());
@@ -97,7 +106,7 @@ async fn ingest_message(
     let mut active = active_task;
     if response.is_none() {
         match command {
-            "/start" | "/help" => response = Some("Use /panel for tasks, requests, and schedules, and /settings for account setup and forms. Use /new to start a task, /cancel to stop, or /reconcile after checking an uncertain action.".into()),
+            "/start" | "/help" => response = Some("Message your Chief to start a task. It can delegate to saved agents. Use /panel for tasks, requests, and schedules, and /settings for account setup and forms. Use /new to start a task, /cancel to stop, or /reconcile after checking an uncertain action.".into()),
             "/panel" => response = Some("Manage TinyBot from this chat.".into()),
             "/settings" => response = Some("Open Settings & forms to manage your account and complete forms.".into()),
             "/invite" if user == operator => {
@@ -107,22 +116,19 @@ async fn ingest_message(
                 response = Some(format!("Have your guest send /start {raw} to this bot. This invitation expires in 24 hours."));
             }
             "/tasks" => {
-                let rows: Vec<(String,String,String)> = sqlx::query_as("SELECT id,title,state FROM tasks
-                    WHERE user=? AND state<>'revoked' AND (agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=tasks.agent
-                    AND (a.owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=?))))
-                    ORDER BY updated DESC LIMIT 12").bind(user).bind(user).bind(user).fetch_all(&mut *tx).await?;
+                let rows = super::list_tasks(&mut *tx, user).await?;
                 response = Some(if rows.is_empty() { "You have no tasks yet.".into() } else {
-                    rows.into_iter().map(|(id,title,state)| format!("{title} ({state})\n/switch {id}")).collect::<Vec<_>>().join("\n\n")
+                    rows.into_iter().take(12).map(|task| {
+                        if task.state == "cancelled" {
+                            format!("{} ({})", task.title, task.state)
+                        } else {
+                            format!("{} ({})\n/switch {}", task.title, task.state, task.id)
+                        }
+                    }).collect::<Vec<_>>().join("\n\n")
                 });
             }
             "/switch" => {
-                let found: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks t WHERE t.id=? AND t.user=? AND t.state NOT IN ('cancelled','revoked')
-                    AND (agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=t.agent AND
-                    (a.owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=?)))))")
-                    .bind(argument).bind(user).bind(user).bind(user).fetch_one(&mut *tx).await?;
-                if found {
-                    sqlx::query("UPDATE users SET active_task=? WHERE id=?").bind(argument).bind(user).execute(&mut *tx).await?;
-                }
+                let found = super::select_task(&mut *tx, user, argument).await?;
                 response = Some(if found {"Switched tasks."} else {"Task unavailable."}.into());
             }
             "/cancel" => {
@@ -151,18 +157,7 @@ async fn ingest_message(
                 }
                 response=Some(if resumed {"Task resumed after reconciliation."} else {"The active task does not need reconciliation."}.into());
             }
-            "/use" => {
-                let agent: Option<String> = sqlx::query_scalar("SELECT name FROM agents a WHERE a.id=? AND
-                    (a.owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=?))")
-                    .bind(argument).bind(user).bind(user).fetch_optional(&mut *tx).await?;
-                response = Some(if let Some(name) = agent {
-                    let task = id();
-                    sqlx::query("INSERT INTO tasks(id,user,agent,title,state,updated) VALUES(?,?,?,?,'idle',?)")
-                        .bind(&task).bind(user).bind(argument).bind(format!("Ask {name}")).bind(now()).execute(&mut *tx).await?;
-                    sqlx::query("UPDATE users SET active_task=? WHERE id=?").bind(task).bind(user).execute(&mut *tx).await?;
-                    format!("Send your question for {name}. Use /new to return to your Chief.")
-                } else { "Agent unavailable.".into() });
-            }
+            "/use" => response = Some("Message your Chief here. It can delegate to saved agents.".into()),
             _ if text.is_empty() => response = Some("Send a text message to give TinyBot a task.".into()),
             _ if command.starts_with('/') => response = Some("Use /help to see available commands.".into()),
             _ => {}
@@ -233,7 +228,7 @@ pub(super) async fn enqueue_input(
 ) -> Result<bool> {
     let state: Option<String> = sqlx::query_scalar(
         "UPDATE tasks SET state=CASE WHEN state IN ('running','uncertain') THEN state ELSE ? END,
-        revision=revision+1,updated=? WHERE id=? AND user=? AND state NOT IN ('cancelled','revoked') AND
+        revision=revision+1,updated=? WHERE id=? AND user=? AND chief_chat=1 AND state NOT IN ('cancelled','revoked') AND
         (agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=tasks.agent AND
         (a.owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=?)))) RETURNING state",
     )

@@ -203,23 +203,7 @@ async fn operation(app: &App, user: &str, action: &str, data: Value) -> Result<V
             .await?;
         }
         "select-agent" => {
-            let agent = text(&data, "agent", 64)?;
-            ensure!(
-                store::has_access(&app.db, user, Some(agent)).await?,
-                "agent unavailable"
-            );
-            let mut tx = app.db.begin_with("BEGIN IMMEDIATE").await?;
-            let task = id();
-            sqlx::query("INSERT INTO tasks(id,user,agent,title,state,updated) SELECT ?,?,id,'Ask '||name,'idle',?
-                FROM agents WHERE id=? AND (owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=id AND member=?))")
-                .bind(&task).bind(user).bind(now()).bind(agent).bind(user).bind(user)
-                .execute(&mut *tx).await?;
-            sqlx::query("UPDATE users SET active_task=? WHERE id=?")
-                .bind(task)
-                .bind(user)
-                .execute(&mut *tx)
-                .await?;
-            tx.commit().await?;
+            anyhow::bail!("Message your Chief in Telegram. It can delegate to saved agents.");
         }
         "select-task" => {
             let task = text(&data, "task", 64)?;
