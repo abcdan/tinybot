@@ -83,6 +83,7 @@ pub(super) async fn delegate(ctx: &ToolContext<'_>, args: &Value) -> Result<Valu
             .as_ref()
             .map(|worker| (worker.id.as_str(), worker.name.as_str())),
         args["handoff"].as_str(),
+        &brief,
     )
     .await?;
     audit::record(
@@ -269,7 +270,7 @@ mod tests {
                 let handoff = store::claim_outbox(&self.0).await?.unwrap();
                 assert_eq!(
                     handoff.body,
-                    "Ik vraag Researcher naar vrijdag en kom erop terug."
+                    "Researcher zoekt uit of ze vrijdag open zijn."
                 );
                 return Ok(json!({"kind":"reply","text":"Open on Friday."}).to_string());
             }
@@ -283,7 +284,7 @@ mod tests {
             );
             Ok(json!({"kind":"tool","name":"delegate","args":{
                 "agent":"worker","brief":"Check Friday opening hours.",
-                "handoff":"Ik vraag Researcher naar vrijdag en kom erop terug."
+                "handoff":"Researcher zoekt uit of ze vrijdag open zijn."
             }})
             .to_string())
         }
