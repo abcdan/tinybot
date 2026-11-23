@@ -38,8 +38,7 @@ export async function refresh() {
         if (sequence !== generation) return;
         if (formId) {
             show('');
-            const item = card(result.test ? 'Test form' : 'Answer a few questions',
-                result.test ? 'Enter any sample answers.' : 'Your answers will be shared with your agent.');
+            const item = card('Answer a few questions', 'Your answers will be shared with your agent.');
             item.append(generatedForm(result));
             content.replaceChildren(item);
         } else {
@@ -125,13 +124,12 @@ function generatedForm(request) {
         });
     });
     const website = request.kind === 'form';
-    const label = website ? 'Continue to review' : request.test ? 'Submit test' : 'Send answers';
+    const label = website ? 'Continue to review' : 'Send answers';
     return form(label, inputs, async (values, element) => {
         await api(website ? 'submit-form' : 'answer-form', {id: request.id, values});
         element.reset();
         if (formId) {
-            const done = card(request.test ? 'Test submitted' : 'Answers sent',
-                request.test ? 'Your sample answers reached TinyBot. Look for a confirmation in chat.' : 'TinyBot will continue in your chat.');
+            const done = card('Answers sent', 'TinyBot will continue in your chat.');
             done.append(button('Back to chat', () => telegram?.close()));
             content.replaceChildren(done);
             refreshButton.hidden = true;

@@ -175,40 +175,11 @@ pub async fn answer(
     submit_answer(db, user, request, |_| Ok(values)).await
 }
 
-pub async fn queue_test(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, user: &str) -> Result<()> {
-    let request = id();
-    let form = json!({"mini_app":true,"fields":[
-        {"name":"topic","label":"Sample topic","type":"text","required":true,"hint":"Try Weekend plans."},
-        {"name":"format","label":"Preferred format","type":"select","required":true,
-         "options":["Short summary","Checklist"]}
-    ]});
-    sqlx::query("DELETE FROM pending WHERE user=? AND task IS NULL AND kind='elicitation' AND state='waiting'")
-        .bind(user)
-        .execute(&mut **tx)
-        .await?;
-    sqlx::query("INSERT INTO pending(id,user,kind,payload,expires) VALUES(?,?,'elicitation',?,?)")
-        .bind(&request)
-        .bind(user)
-        .bind(form.to_string())
-        .bind(now() + 900)
-        .execute(&mut **tx)
-        .await?;
-    sqlx::query("INSERT INTO outbox(user,body,button) VALUES(?,?,?)")
-        .bind(user)
-        .bind("Open the Mini App and send some sample answers. I’ll confirm here when they arrive.")
-        .bind(format!("form/{request}"))
-        .execute(&mut **tx)
-        .await?;
-    Ok(())
-}
-
 pub async fn input_request(db: &SqlitePool, user: &str, request: &str) -> Result<Value> {
     let pending = waiting_input(db, user, request).await?;
     let spec: FormSpec = serde_json::from_str(&pending.payload)?;
     spec.validate()?;
-    Ok(json!({
-        "id":pending.id,"kind":"elicitation","content":spec,"test":pending.task.is_none()
-    }))
+    Ok(json!({"id":pending.id,"kind":"elicitation","content":spec}))
 }
 
 #[derive(serde::Serialize)]
@@ -254,10 +225,10 @@ async fn waiting_input<'a>(
     request: &str,
 ) -> Result<Pending> {
     sqlx::query_as(
-        "SELECT p.* FROM pending p LEFT JOIN tasks t ON t.id=p.task AND t.user=p.user
+        "SELECT p.* FROM pending p JOIN tasks t ON t.id=p.task AND t.user=p.user
         WHERE p.id=? AND p.user=? AND p.kind='elicitation' AND p.state='waiting' AND p.expires>=?
-        AND (p.task IS NULL OR (t.revision=p.revision AND t.state='waiting'
-        AND (t.agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=t.agent AND a.owner=p.user))))",
+        AND t.revision=p.revision AND t.state='waiting'
+        AND (t.agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=t.agent AND a.owner=p.user))",
     )
     .bind(request)
     .bind(user)
@@ -275,6 +246,7 @@ async fn submit_answer(
 ) -> Result<()> {
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     let pending = waiting_input(&mut *tx, user, request).await?;
+    let task = pending.task.as_deref().context("form unavailable")?;
     let spec: FormSpec = serde_json::from_str(&pending.payload)?;
     spec.validate()?;
     let values = values(&spec)?;
@@ -283,27 +255,19 @@ async fn submit_answer(
         .bind(request)
         .execute(&mut *tx)
         .await?;
-    if let Some(task) = &pending.task {
-        sqlx::query("INSERT INTO events(task,role,body) VALUES(?,'user',?)")
-            .bind(task)
-            .bind(format!(
-                "My answers to your form: {}",
-                serde_json::to_string(&values)?
-            ))
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("UPDATE tasks SET state='queued',revision=revision+1,updated=? WHERE id=?")
-            .bind(now())
-            .bind(task)
-            .execute(&mut *tx)
-            .await?;
-    } else {
-        sqlx::query("INSERT INTO outbox(user,body) VALUES(?,?)")
-            .bind(user)
-            .bind("Mini App test passed. I received your sample answers.")
-            .execute(&mut *tx)
-            .await?;
-    }
+    sqlx::query("INSERT INTO events(task,role,body) VALUES(?,'user',?)")
+        .bind(task)
+        .bind(format!(
+            "My answers to your form: {}",
+            serde_json::to_string(&values)?
+        ))
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE tasks SET state='queued',revision=revision+1,updated=? WHERE id=?")
+        .bind(now())
+        .bind(task)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(())
 }
