@@ -67,8 +67,6 @@ pub(super) async fn delegate(ctx: &ToolContext<'_>, args: &Value) -> Result<Valu
                 && worker.allows(tool.name())
         })
         .collect();
-    let memory =
-        store::memory::helper_context(&ctx.app.db, ctx.task, worker_task.agent.as_deref()).await?;
     ensure!(
         store::current(&ctx.app.db, worker.task).await?,
         "task or worker access changed before delegation"
@@ -86,6 +84,8 @@ pub(super) async fn delegate(ctx: &ToolContext<'_>, args: &Value) -> Result<Valu
         &brief,
     )
     .await?;
+    let memory =
+        super::memory::for_helper(ctx.app, ctx.task, worker_task.agent.as_deref(), &brief).await?;
     audit::record(
         "delegation",
         "helper",

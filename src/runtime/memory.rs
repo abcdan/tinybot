@@ -1,3 +1,7 @@
+mod smart;
+
+pub(super) use smart::{for_chief, for_helper};
+
 use super::{ToolContext, string};
 use crate::store::memory;
 use anyhow::{Context, Result, ensure};
