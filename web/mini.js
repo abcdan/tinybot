@@ -39,7 +39,7 @@ export async function refresh() {
         if (sequence !== generation) return;
         if (formId) {
             show('');
-            const item = card('Answer a few questions', 'Your answers will be shared with your agent.');
+            const item = card('Answer a few questions', 'Your answers go to your Chief.');
             item.append(generatedForm(result));
             content.replaceChildren(item);
         } else {
@@ -79,13 +79,13 @@ function home() {
     if (!state.requests.length) content.append(card(null, 'You’re all caught up.'));
     for (const request of state.requests) {
         const details = request.content;
-        const title = { 'agent-spec': 'Configure an agent', form: 'Enter form details', 'form-submit': 'Submit website form', elicitation: 'Answer a few questions' }[request.kind];
+        const title = { 'agent-spec': 'Configure a helper', form: 'Enter form details', 'form-submit': 'Submit website form', elicitation: 'Answer a few questions' }[request.kind];
         const item = card(details.operation || title, details.destination);
         if (request.kind === 'agent-spec') {
             item.append(agentForm(null, details, request.id));
             item.append(row(action('Decline', 'deny', {id: request.id}, 'Request declined.', true)));
         } else if (request.kind === 'form' || request.kind === 'elicitation') {
-            if (request.kind === 'elicitation') item.append(node('p', 'Your answers will be shared with your agent.'));
+            if (request.kind === 'elicitation') item.append(node('p', 'Your answers go to your Chief.'));
             item.append(generatedForm(request), row(action('Decline', 'deny', {id: request.id}, 'Request declined.', true)));
         } else {
             if (details.preview || details.details) item.append(node('pre', details.preview || details.details));
@@ -95,12 +95,13 @@ function home() {
         content.append(item);
     }
     content.append(node('h2', 'Tasks'));
-    if (!state.tasks.length) content.append(card(null, 'Send a message in Telegram to start a task.'));
-    for (const task of state.tasks) {
+    const tasks = state.tasks.filter(task => !task.agent);
+    if (!tasks.length) content.append(card(null, 'Send a message to your Chief in Telegram to start a task.'));
+    for (const task of tasks) {
         const item = card(task.title, task.state.replaceAll('-', ' '));
         if (task.id !== state.active_task && task.state !== 'cancelled') {
             item.append(action('Switch to task', 'select-task', {task: task.id}, 'Send your next message in Telegram.', true));
-        } else if (task.id === state.active_task) item.append(node('span', 'Active in chat', 'meta'));
+        } else if (task.id === state.active_task) item.append(node('span', 'Current Chief task', 'meta'));
         content.append(item);
     }
 }
