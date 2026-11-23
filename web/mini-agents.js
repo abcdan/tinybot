@@ -1,5 +1,5 @@
 import { action, button, card, field, form, node, row } from './mini-ui.js';
-import { api, content, refresh, show, telegram } from './mini.js';
+import { api, content, refresh, show } from './mini.js';
 
 const toolNames = {
     list_mcp_tools: 'Browse connector tools',
@@ -32,12 +32,12 @@ export function agentForm(agent, proposal, pending) {
         }
         inputs.push(groups);
     }
-    return form(agent ? 'Save changes' : 'Save agent', inputs, async (data, element) => {
+    return form(agent ? 'Save changes' : 'Save helper', inputs, async (data, element) => {
         await api('save-agent', {name: data.name, instructions: data.instructions,
             tools: element.querySelector('fieldset') ? new FormData(element).getAll('tool') : current,
             agent: agent?.id, pending});
         await refresh();
-        show('Agent saved.');
+        show('Helper saved.');
     });
 }
 
@@ -46,19 +46,18 @@ function fieldControl(name, label, value, hint) {
 }
 
 export function agents(state) {
-    const creator = card('Create an agent');
+    const creator = card('Create a helper', 'Your Chief can delegate part of a task to a saved helper.');
     creator.append(agentForm(null, null));
-    content.append(creator, node('h2', 'Agents'));
+    content.append(creator, node('h2', 'Saved helpers'));
     for (const agent of state.agents) {
         const owned = agent.owner === state.user;
         const item = card(agent.name, owned ? undefined : 'Shared with you');
-        item.append(action('Use in chat', 'select-agent', {agent: agent.id}, 'Send your next message in Telegram.'));
         if (owned) {
             const settings = node('details');
-            settings.append(node('summary', 'Edit agent'), agentForm(agent, null));
+            settings.append(node('summary', 'Edit helper'), agentForm(agent, null));
             const share = node('details');
             share.append(node('summary', 'Sharing'),
-                node('p', 'Members can ask about published notes and explicitly shared records. Shared results can be sent to their model provider.'));
+                node('p', 'Members can ask their Chief about published notes and explicitly shared records. Shared results can be sent to their model provider.'));
             const invite = node('pre');
             invite.hidden = true;
             share.append(button('Create one-time invitation', async () => {
@@ -73,7 +72,7 @@ export function agents(state) {
             share.append(form('Publish note', [field('body', 'Shared memory', {type: 'textarea', max: 1200})], async data => {
                 await api('publish-memory', {...data, agent: agent.id});
                 await refresh();
-                show('Note published to this agent.');
+                show('Note published to this helper.');
             }));
             for (const [id, , body] of state.memory.filter(([, scope]) => scope === agent.id)) {
                 share.append(node('p', body), action('Remove note', 'delete-memory', {id}, 'Note removed.', true));

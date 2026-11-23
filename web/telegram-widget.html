@@ -34,7 +34,7 @@ const widget = window.TelegramWidget;
 const byId = id => document.getElementById(id);
 const views = {
     requests: { label: 'Requests', empty: 'No pending requests.', action: 'decline', button: 'Decline' },
-    tasks: { label: 'Tasks', empty: 'Send a message to start a task.', action: 'select', button: 'Switch to task' },
+    tasks: { label: 'Tasks', empty: 'Send a message to your Chief to start a task.', action: 'select', button: 'Switch to task' },
     schedules: { label: 'Schedules', empty: 'Ask TinyBot to schedule a task.', action: 'cancel', button: 'Cancel schedule' }
 };
 let page = { view: 'requests', page: 0, rows: [] };
