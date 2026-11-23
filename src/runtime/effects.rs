@@ -21,16 +21,8 @@ pub(super) async fn execute(tool: Builtin, ctx: &ToolContext<'_>, args: Value) -
     let app = ctx.app;
     let task = ctx.task;
     let data = match tool {
-        Builtin::Remember => {
-            let text = string(&args, "text", 1200)?;
-            sqlx::query("INSERT INTO memory(id,owner,body) VALUES(?,?,?)")
-                .bind(id())
-                .bind(&task.user)
-                .bind(text)
-                .execute(&app.db)
-                .await?;
-            json!({"saved":true})
-        }
+        Builtin::Remember => super::memory::save(ctx, &args).await?,
+        Builtin::RecallMemory => super::memory::recall(ctx, &args).await?,
         Builtin::SetGoal => {
             let text = string(&args, "text", 1500)?;
             sqlx::query("UPDATE tasks SET goal=? WHERE id=? AND revision=?")

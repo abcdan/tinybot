@@ -42,6 +42,7 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
     let ctx = ToolContext {
         app,
         task,
+        parent_task: None,
         owner,
         connectors,
         allowed_tools,
@@ -49,22 +50,7 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
     if !resume_approval(&ctx).await? {
         return store::settle(&app.db, task, "idle", None).await;
     }
-    let memory: Vec<String> = if let Some(agent) = &agent {
-        sqlx::query_scalar(
-            "SELECT body FROM memory WHERE owner=? AND agent=? ORDER BY rowid DESC LIMIT 16",
-        )
-        .bind(&agent.owner)
-        .bind(&agent.id)
-        .fetch_all(&app.db)
-        .await?
-    } else {
-        sqlx::query_scalar(
-            "SELECT body FROM memory WHERE owner=? AND agent IS NULL ORDER BY rowid DESC LIMIT 16",
-        )
-        .bind(&task.user)
-        .fetch_all(&app.db)
-        .await?
-    };
+    let memory = store::memory::chief_context(&app.db, task).await?;
     let saved: Vec<(String, String, Option<String>)> = sqlx::query_as(
         "SELECT a.id,a.name,CASE WHEN a.owner=? THEN a.instructions END FROM agents a
          WHERE (a.owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=?))
