@@ -64,8 +64,10 @@ after adding the domain. Then check `https://your-domain/health` and send
   code in the Mini App and run `tinybot codex connect https://your-domain` on a
   computer with a browser. Build the local command with `cargo build --locked
   --release` and use the binary in the build output.
-- **Forms** with a single choice can be answered using buttons in chat. Use
-  Settings & forms for longer forms and typed inputs. TinyBot can use the
+- **Forms** with a single choice can be answered using buttons in chat.
+  Ask for a Mini App form to open it directly using **Open form**. Send
+  `/testform` to try a sample form without a model. TinyBot confirms the
+  submission in Telegram. TinyBot can use the
   task model to generate fields. When an OpenRouter key is available, it can
   use `inception/mercury-3` for form generation.
   Website values go directly from the Mini App to TinyBot over HTTPS and stay
