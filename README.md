@@ -167,6 +167,10 @@ Access to the shared helper's records follows the owner's read permissions.
 
 ## Tasks and schedules
 
+- Reply to an earlier TinyBot message to give the Chief that message as
+  context, including when you send a voice note. The Chief answers in the
+  reply thread. You can send an emoji as a reply in private chat. Telegram
+  only sends native reaction updates when its Bot API permission rules allow it.
 - `/new` starts a task, `/tasks` lists tasks, `/switch ID` selects a task, and
   `/cancel` stops the active task.
 - Say **Remind me tomorrow at 9 am to send the report** or **Draft the report
