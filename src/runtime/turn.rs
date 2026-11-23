@@ -1,6 +1,7 @@
 use super::execution::{finish, resume_approval};
 use super::feedback::Feedback;
 use super::lookup::{self, Lookup};
+use super::loop_guard::{self, Progress};
 use super::mcp_approval;
 use super::review::{Verdict, review};
 use super::suggestions::valid_suggestions;
@@ -19,8 +20,6 @@ use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
-
-const TOOL_STEP_LIMIT: usize = 14;
 
 pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> Result<()> {
     if !store::has_access(&app.db, &task.user, task.agent.as_deref()).await? {
@@ -88,10 +87,13 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
     .bind(&task.id)
     .fetch_optional(&app.db)
     .await?;
+    let request = latest_request
+        .as_ref()
+        .map_or("", |(_, text, _)| text.as_str());
     let memory = super::memory::for_chief(
         app,
         task,
-        latest_request.as_ref().map_or("", |(_, text, _)| text),
+        request,
         owner
             && latest_request
                 .as_ref()
@@ -111,10 +113,15 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
     let mut consulted_helper = false;
     let mut repeated_lookup = false;
     let mut finish_lookup = false;
-    for step_number in 0..=TOOL_STEP_LIMIT {
-        if !store::current(&app.db, task).await? {
+    loop {
+        let progress = loop_guard::check(app, task, request).await?;
+        if matches!(progress, Progress::Superseded) {
             return store::settle(&app.db, task, "idle", None).await;
         }
+        let stop_reason = match progress {
+            Progress::Finish(reason) => Some(reason),
+            _ => None,
+        };
         let mut records = store::history(&app.db, &task.id).await?;
         if let Some((event, _, _)) = &latest_request {
             consulted_helper |= records
@@ -142,7 +149,12 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                         .await?
                     {
                         summary = next;
-                        records.retain(|(id, _, _)| id > boundary);
+                        records.retain(|(id, _, _)| {
+                            id > boundary
+                                || latest_request
+                                    .as_ref()
+                                    .is_some_and(|(latest, _, _)| id == latest)
+                        });
                     }
                 }
             }
@@ -172,12 +184,19 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
             "telegram_reply":store::latest_reply_context(&app.db, &task.id).await?,
             "saved_agents":saved,"tools":descriptions(&tools),"connectors":connector_context(&ctx)
         });
-        let has_research = consulted_helper || !lookups.is_empty();
-        if finish_lookup || step_number == TOOL_STEP_LIMIT {
-            if !has_research {
-                break;
-            }
-            return finish_research(app, task, feedback, &*model, &input).await;
+        let has_work = consulted_helper
+            || !lookups.is_empty()
+            || records
+                .iter()
+                .rev()
+                .take_while(|(id, _, _)| {
+                    latest_request
+                        .as_ref()
+                        .is_none_or(|(latest, _, _)| id > latest)
+                })
+                .any(|(_, role, _)| role == "tool");
+        if finish_lookup || stop_reason.is_some() {
+            return finish_from_context(app, task, feedback, &*model, &input, stop_reason).await;
         }
         let step = if let Some(feedback) = feedback {
             feedback.complete(&*model, &input, &definitions).await
@@ -193,8 +212,8 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
         let step = match step {
             Ok(Some(step)) => step,
             Ok(None) => return store::settle(&app.db, task, "idle", None).await,
-            Err(_) if has_research => {
-                return finish_research(app, task, feedback, &*model, &input).await;
+            Err(_) if has_work => {
+                return finish_from_context(app, task, feedback, &*model, &input, None).await;
             }
             Err(error) => return Err(error),
         };
@@ -216,7 +235,8 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                 .await;
                 if text.trim().is_empty() {
                     if consulted_helper {
-                        return finish_research(app, task, feedback, &*model, &input).await;
+                        return finish_from_context(app, task, feedback, &*model, &input, None)
+                            .await;
                     }
                     return store::settle(&app.db, task, "idle", None).await;
                 }
@@ -234,6 +254,9 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                 .await;
             }
             Step::Tool { name, args } => {
+                if !loop_guard::reserve(app, task, "chief", &name, &args).await? {
+                    continue;
+                }
                 let Some(tool) = tools.iter().find(|tool| tool.name() == name) else {
                     audit::record("model", "agent_turn", "unknown_tool", Value::Null).await;
                     store::append(&app.db, &task.id, "tool", "Requested tool is unavailable.")
@@ -312,9 +335,6 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                 } else {
                     None
                 };
-                let request = latest_request
-                    .as_ref()
-                    .map_or("", |(_, text, _)| text.as_str());
                 let mut requires_confirmation = intent.risk == Risk::Write;
                 if intent.risk != Risk::Local {
                     let review = if mcp.is_some() {
@@ -468,26 +488,20 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
             }
         }
     }
-    store::settle(
-        &app.db,
-        task,
-        "idle",
-        Some("I reached the task’s step limit. Send a follow-up to continue."),
-    )
-    .await
 }
 
-async fn finish_research(
+async fn finish_from_context(
     app: &App,
     task: &Task,
     feedback: Option<&Feedback>,
     model: &dyn ModelProvider,
     input: &Value,
+    stop_reason: Option<&str>,
 ) -> Result<()> {
     if !store::current(&app.db, task).await? {
         return store::settle(&app.db, task, "idle", None).await;
     }
-    let text = lookup::reply(model, input).await;
+    let text = lookup::reply(model, input, stop_reason).await;
     let _delivery = match feedback {
         Some(feedback) => Some(feedback.delivery.lock().await),
         None => None,

@@ -19,6 +19,7 @@ mod browser_settings;
 mod browsing;
 mod mcp_approvals;
 mod model_settings;
+mod tool_budget;
 
 async fn fixture() -> SqlitePool {
     let db = SqlitePoolOptions::new()
@@ -692,6 +693,7 @@ async fn compaction_is_atomic_and_preserves_new_and_unprocessed_context() {
         .await
         .unwrap();
     assert_eq!(batch.len(), 28);
+    assert_eq!(batch[0].0, records[1].0);
     store::compact(&db, &task, batch.last().unwrap().0, "persisted summary")
         .await
         .unwrap();
@@ -706,7 +708,8 @@ async fn compaction_is_atomic_and_preserves_new_and_unprocessed_context() {
     let task = store::claim(&db).await.unwrap().unwrap();
     assert_eq!(task.summary, "persisted summary");
     let remaining = store::history(&db, &task.id).await.unwrap();
-    assert_eq!(remaining.first().unwrap().0, records[28].0);
+    assert_eq!(remaining[0].2, "initial instruction");
+    assert_eq!(remaining[1].0, records[29].0);
     assert_eq!(remaining.last().unwrap().2, "latest change");
 }
 
