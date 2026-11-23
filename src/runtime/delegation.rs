@@ -217,3 +217,112 @@ async fn resolve_worker(ctx: &ToolContext<'_>, explicit: Option<&str>) -> Result
     .context("saved worker unavailable")?;
     Ok(Some(worker))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{App, model, security::Vault};
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
+    use std::sync::Arc;
+
+    struct ChiefFixture(SqlitePool);
+
+    #[async_trait]
+    impl model::ModelProvider for ChiefFixture {
+        async fn complete(&self, system: &str, input: &str) -> Result<String> {
+            let input: Value = serde_json::from_str(input)?;
+            if system.contains("You are a temporary helper") {
+                assert!(system.contains("Study the timetable"));
+                assert_eq!(input["worker"], "Researcher");
+                assert_eq!(input["brief"], "Check Friday opening hours.");
+                assert!(input["tools"].as_array().unwrap().is_empty());
+                let handoff = store::claim_outbox(&self.0).await?.unwrap();
+                assert_eq!(
+                    handoff.body,
+                    "Ik vraag Researcher naar vrijdag en kom erop terug."
+                );
+                return Ok(json!({"kind":"reply","text":"Open on Friday."}).to_string());
+            }
+            let history = input["history"].to_string();
+            if history.contains("Open on Friday.") {
+                return Ok(json!({"kind":"reply","text":"Researcher heeft bevestigd dat ze vrijdag open zijn."}).to_string());
+            }
+            assert_eq!(
+                input["latest_request"],
+                "Vraag Researcher of ze vrijdag open zijn."
+            );
+            Ok(json!({"kind":"tool","name":"delegate","args":{
+                "agent":"worker","brief":"Check Friday opening hours.",
+                "handoff":"Ik vraag Researcher naar vrijdag en kom erop terug."
+            }})
+            .to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn chief_queues_named_handoff_before_the_worker_and_reports_its_answer() {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!().run(&db).await.unwrap();
+        store::seed(&db, "1").await.unwrap();
+        sqlx::query("UPDATE users SET provider='openrouter',model='test/model' WHERE id='1'")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO agents VALUES('worker','1','Researcher','Study the timetable.','[\"send_reply\"]')")
+            .execute(&db).await.unwrap();
+        let vault = Vault::new(&"12".repeat(32)).unwrap();
+        let origin = url::Url::parse("https://tinybot.example").unwrap();
+        let app = App {
+            db: db.clone(),
+            vault: vault.clone(),
+            token: "unused".into(),
+            origin: origin.origin().ascii_serialization(),
+            models: model::Models::new(db.clone(), vault.clone(), "codex".into(), None, None)
+                .with_fixture(Arc::new(ChiefFixture(db.clone()))),
+            mcp: crate::mcp::Mcp::new(db.clone(), vault, origin),
+            forms: crate::forms::Forms::default(),
+            workers: crate::workers::Workers {
+                browser: "unused".into(),
+                python: "unused".into(),
+            },
+            tools: super::super::tools(),
+        };
+        store::ingest_telegram(
+            &db,
+            "1",
+            42,
+            "1",
+            "Vraag Researcher of ze vrijdag open zijn.",
+            55,
+        )
+        .await
+        .unwrap();
+        let task = store::claim(&db).await.unwrap().unwrap();
+        super::super::work(&app, &task).await.unwrap();
+        let final_reply = store::claim_outbox(&db).await.unwrap().unwrap();
+        assert_eq!(
+            final_reply.body,
+            "Researcher heeft bevestigd dat ze vrijdag open zijn."
+        );
+        let handoffs: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE task=? AND role='handoff'")
+                .bind(&task.id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(handoffs, 1);
+        let acknowledged: bool =
+            sqlx::query_scalar("SELECT acknowledged FROM events WHERE task=? AND role='user'")
+                .bind(&task.id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert!(acknowledged);
+    }
+}
