@@ -4,6 +4,8 @@ use serde::Serialize;
 use std::cmp::Reverse;
 use url::{Host, Url};
 
+const MAX_MESSAGE_UNITS: usize = 4096;
+
 #[derive(Serialize)]
 pub(super) struct Entity {
     #[serde(rename = "type")]
@@ -29,24 +31,36 @@ pub(super) struct Reply {
 }
 
 pub(super) fn render(body: &str) -> Reply {
-    let body = clip(body, 3900);
-    let markdown = if let Some(start) = source_start(body) {
-        let prefix = body[..start].trim_end();
-        let separator = if prefix.is_empty() { "" } else { "\n\n" };
-        format!("{prefix}{separator}{}", body[start..].trim_start())
-    } else {
-        body.to_owned()
-    };
-    let mut output = Renderer::default();
-    for event in Parser::new_ext(&markdown, Options::ENABLE_STRIKETHROUGH) {
-        output.render(event);
+    let markdown = normalized_markdown(body);
+    let mut output = Renderer::markdown(&markdown, true);
+    if output.has_table && output.text.encode_utf16().count() > MAX_MESSAGE_UNITS {
+        output = Renderer::markdown(&markdown, false);
     }
-    if output.text.trim().is_empty() || output.text.encode_utf16().count() > 4096 {
+    let oversized = output.text.encode_utf16().count() > MAX_MESSAGE_UNITS;
+    if output.text.trim().is_empty() || (!output.has_table && oversized) {
         return Reply {
-            text: body.to_owned(),
+            text: clip(body, 3900).to_owned(),
             entities: Vec::new(),
             links: Vec::new(),
         };
+    }
+    if oversized {
+        // Keep the rendered table readable even when its compact form is too long.
+        let mut units = 0;
+        let end = output
+            .text
+            .char_indices()
+            .find_map(|(index, character)| {
+                units += character.len_utf16();
+                (units >= MAX_MESSAGE_UNITS).then_some(index)
+            })
+            .expect("text exceeds Telegram's limit");
+        output.text.truncate(end);
+        let units = output.text.encode_utf16().count();
+        output
+            .entities
+            .retain(|entity| entity.offset + entity.length <= units);
+        output.text.push('…');
     }
     // Telegram forbids overlapping styles on code entities and nested block quotes.
     let code: Vec<_> = output
@@ -75,14 +89,28 @@ pub(super) fn render(body: &str) -> Reply {
     }
 }
 
+pub(super) fn normalized_markdown(body: &str) -> String {
+    let body = clip(body, 3900);
+    if let Some(start) = source_start(body) {
+        let prefix = body[..start].trim_end();
+        let separator = if prefix.is_empty() { "" } else { "\n\n" };
+        format!("{prefix}{separator}{}", body[start..].trim_start())
+    } else {
+        body.to_owned()
+    }
+}
+
 fn source_start(body: &str) -> Option<usize> {
     let lower = body.to_ascii_lowercase();
     let mut in_code = false;
-    for (event, range) in Parser::new(body).into_offset_iter() {
+    let mut in_table = false;
+    for (event, range) in Parser::new_ext(body, Options::ENABLE_TABLES).into_offset_iter() {
         match event {
             Event::Start(Tag::CodeBlock(_)) => in_code = true,
             Event::End(TagEnd::CodeBlock) => in_code = false,
-            Event::Text(_) if !in_code => {
+            Event::Start(Tag::Table(_)) => in_table = true,
+            Event::End(TagEnd::Table) => in_table = false,
+            Event::Text(_) if !in_code && !in_table => {
                 for label in [
                     "sources",
                     "source",
@@ -137,6 +165,7 @@ struct Renderer {
     code_block: bool,
     link: bool,
     quotes: usize,
+    has_table: bool,
 }
 
 struct Span {
@@ -147,6 +176,89 @@ struct Span {
 }
 
 impl Renderer {
+    fn markdown(body: &str, labelled_rows: bool) -> Self {
+        let mut output = Self::default();
+        let mut events =
+            Parser::new_ext(body, Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES);
+        while let Some(event) = events.next() {
+            if matches!(event, Event::Start(Tag::Table(_))) {
+                output.table(&mut events, labelled_rows);
+            } else {
+                output.render(event);
+            }
+        }
+        output
+    }
+
+    fn table<'a>(&mut self, events: &mut impl Iterator<Item = Event<'a>>, labelled_rows: bool) {
+        let mut headings = Vec::new();
+        let mut cells = Vec::new();
+        let mut rows = Vec::new();
+        while let Some(event) = events.next() {
+            match event {
+                Event::Start(Tag::TableCell) => cells.push(
+                    events
+                        .by_ref()
+                        .take_while(|event| !matches!(event, Event::End(TagEnd::TableCell)))
+                        .collect::<Vec<_>>(),
+                ),
+                Event::End(TagEnd::TableHead) => headings = std::mem::take(&mut cells),
+                Event::End(TagEnd::TableRow) => rows.push(std::mem::take(&mut cells)),
+                Event::End(TagEnd::Table) => break,
+                _ => {}
+            }
+        }
+
+        self.has_table = true;
+        self.breaks = self.breaks.max(2);
+        if labelled_rows && !rows.is_empty() {
+            for row in rows {
+                for (column, cell) in row.into_iter().enumerate() {
+                    if let Some(heading) =
+                        headings.get(column).filter(|heading| !heading.is_empty())
+                    {
+                        self.open("bold");
+                        heading.iter().cloned().for_each(|event| self.render(event));
+                        self.close("bold");
+                        self.push(" · ");
+                    }
+                    if cell.is_empty() {
+                        self.push("—");
+                    }
+                    cell.into_iter().for_each(|event| self.render(event));
+                    self.breaks = 1;
+                }
+                self.breaks = 2;
+                // Three UTF-8 bytes per UTF-16 unit is the largest possible ratio.
+                // The caller restarts in compact mode once a labelled table is oversized.
+                if self.text.len() > 3 * MAX_MESSAGE_UNITS {
+                    break;
+                }
+            }
+        } else {
+            self.open("bold");
+            self.compact_table_row(headings);
+            self.close("bold");
+            for row in rows {
+                self.breaks = 1;
+                self.compact_table_row(row);
+            }
+        }
+        self.breaks = 2;
+    }
+
+    fn compact_table_row(&mut self, cells: Vec<Vec<Event<'_>>>) {
+        for (column, cell) in cells.into_iter().enumerate() {
+            if column != 0 {
+                self.push(" · ");
+            }
+            if cell.is_empty() {
+                self.push("—");
+            }
+            cell.into_iter().for_each(|event| self.render(event));
+        }
+    }
+
     fn flush(&mut self) {
         if !self.text.is_empty() {
             let existing = self
@@ -323,7 +435,7 @@ impl Renderer {
     }
 }
 
-fn public_link(value: &str) -> Option<Url> {
+pub(super) fn public_link(value: &str) -> Option<Url> {
     if value.len() > 2048 {
         return None;
     }
@@ -404,6 +516,68 @@ mod tests {
         );
         assert_eq!(reply.text, "Antwoord.\n\nSources:\nOne\nTwo");
         assert_eq!(reply.links.len(), 2);
+    }
+
+    #[test]
+    fn renders_markdown_tables_as_readable_rows_with_citation_buttons() {
+        let reply = render(concat!(
+            "Tarieven excl. btw.\n\n",
+            "| Abonnement | Maandelijks betalen | Jaarlijks betalen |\n",
+            "|---|---:|---:|\n",
+            "| 😀 Lite | €25 per maand | €180 per jaar |\n",
+            "| **Premium** | €69 per maand | €708 per jaar |\n",
+            "\nBronnen:\n[Plug&Pay-tarieven](https://example.com/tarieven)",
+        ));
+        assert_eq!(
+            reply.text,
+            concat!(
+                "Tarieven excl. btw.\n\n",
+                "Abonnement · 😀 Lite\nMaandelijks betalen · €25 per maand\nJaarlijks betalen · €180 per jaar\n\n",
+                "Abonnement · Premium\nMaandelijks betalen · €69 per maand\nJaarlijks betalen · €708 per jaar\n\n",
+                "Bronnen:\nPlug&Pay-tarieven",
+            )
+        );
+        assert_eq!(
+            json!(reply.links),
+            json!([{"text":"Plug&Pay-tarieven","url":"https://example.com/tarieven"}])
+        );
+        let start = reply.text.find("Premium").unwrap();
+        let offset = reply.text[..start].encode_utf16().count();
+        assert!(reply.entities.iter().any(|entity| {
+            entity.kind == "bold" && entity.offset == offset && entity.length == "Premium".len()
+        }));
+    }
+
+    #[test]
+    fn preserves_table_cell_markup_and_does_not_parse_fenced_tables() {
+        let reply = render(concat!(
+            "| Feature | Details |\n|---|---|\n",
+            "| `a\\|b` | [Open](https://example.com/details) |\n",
+            "| — | |\n",
+            "\n```text\n| Example | Literal |\n|---|---|\n```",
+        ));
+        assert_eq!(
+            reply.text,
+            "Feature · a|b\nDetails · Open\n\nFeature · —\nDetails · —\n\n| Example | Literal |\n|---|---|\n"
+        );
+        assert!(reply.entities.iter().any(|entity| entity.kind == "code"));
+        assert!(reply.entities.iter().any(|entity| entity.kind == "pre"));
+        assert_eq!(reply.links.len(), 1);
+    }
+
+    #[test]
+    fn uses_compact_rows_when_repeating_headers_would_exceed_telegram_limit() {
+        let header = "Annual subscription paid monthly ".repeat(4);
+        let table = format!(
+            "| Plan | {} |\n|---|---|\n{}\nSources:\n[Pricing](https://example.com/prices)",
+            header.trim_end(),
+            "| Lite | €25 |\n".repeat(40),
+        );
+        let reply = render(&table);
+        assert_eq!(reply.text.matches(header.trim_end()).count(), 1);
+        assert_eq!(reply.text.matches("Lite · €25").count(), 40);
+        assert!(reply.text.ends_with("\n\nSources:\nPricing"));
+        assert_eq!(reply.links.len(), 1);
     }
 
     #[test]
