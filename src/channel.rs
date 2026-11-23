@@ -113,8 +113,20 @@ impl Telegram {
     }
 
     async fn feedback(&self, method: &str, data: Value) -> Result<Option<Duration>> {
-        let output =
-            tokio::time::timeout(Duration::from_secs(3), self.call(method, data)).await??;
+        let output = tokio::time::timeout(Duration::from_secs(3), async {
+            let mut data = data;
+            let output = self.call(method, data.clone()).await?;
+            if data.get("entities").is_some()
+                && bad_request(&output).is_some_and(|description| invalid_entities(&description))
+            {
+                data.as_object_mut()
+                    .expect("feedback object")
+                    .remove("entities");
+                return self.call(method, data).await;
+            }
+            Ok(output)
+        })
+        .await??;
         if output["ok"] == true {
             return Ok(None);
         }
@@ -321,11 +333,12 @@ impl ChannelAdapter for Telegram {
 
     async fn draft(&self, user: &str, id: i32, text: &str) -> Result<Option<Duration>> {
         let user = user.parse::<i64>().context("invalid Telegram recipient")?;
-        self.feedback(
-            "sendMessageDraft",
-            json!({"chat_id":user,"draft_id":id,"text":text}),
-        )
-        .await
+        let reply = formatting::render(text);
+        let mut data = json!({"chat_id":user,"draft_id":id,"text":reply.text});
+        if !reply.entities.is_empty() {
+            data["entities"] = json!(reply.entities);
+        }
+        self.feedback("sendMessageDraft", data).await
     }
 
     async fn react(&self, user: &str, message_id: i64, emoji: &str) -> Result<Option<i64>> {
@@ -744,6 +757,55 @@ mod tests {
             json!({"chat_id":42,"message_id":51,"reaction":[{"type":"emoji","emoji":"❤"}]});
         assert_eq!(calls[1], ("setMessageReaction".into(), reaction));
         assert_eq!(calls[1], calls[2]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn drafts_use_native_entities_without_a_source_keyboard() {
+        let mock: Mock = Arc::new(Mutex::new((
+            Vec::new(),
+            VecDeque::from([
+                json!({"ok":false,"error_code":400,"description":"Bad Request: can't parse entities"}),
+                json!({"ok":true}),
+                json!({"ok":false,"error_code":429,"parameters":{"retry_after":4}}),
+                json!({"ok":false,"error_code":404,"description":"Not Found"}),
+            ]),
+        )));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = format!("http://{}/botTEST", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route("/botTEST/{method}", post(record))
+            .with_state(mock.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let telegram = Telegram {
+            client: reqwest::Client::new(),
+            api,
+            origin: "https://example.test".into(),
+        };
+        let body = "**Gevonden**. Source: https://example.test/docs";
+        assert_eq!(telegram.draft("42", 5, body).await.unwrap(), None);
+        assert_eq!(
+            telegram.draft("42", 5, body).await.unwrap(),
+            Some(Duration::from_secs(4))
+        );
+        assert!(telegram.draft("42", 5, body).await.is_err());
+
+        let mock = mock.lock().await;
+        assert_eq!(mock.0.len(), 4);
+        for (method, payload) in &mock.0 {
+            assert_eq!(method, "sendMessageDraft");
+            assert_eq!(payload["draft_id"], 5);
+            assert_eq!(
+                payload["text"],
+                "Gevonden.\n\nSource: https://example.test/docs"
+            );
+            assert!(payload.get("reply_markup").is_none());
+        }
+        assert_eq!(
+            mock.0[0].1["entities"],
+            json!([{"type":"bold","offset":0,"length":8}])
+        );
+        assert!(mock.0[1].1.get("entities").is_none());
         server.abort();
     }
 
