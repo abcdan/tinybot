@@ -1,0 +1,125 @@
+x-gateway-origin: &gateway-origin https://${AMCP_DOMAIN:-mcp.${TINYBOT_DOMAIN:-localhost}}
+
+services:
+  anythingmcp-init:
+    image: httpd:2.4-alpine@sha256:32bd0639bcc4917ef1fd9363a1d9dd2dd9c498565118b062a10d51e43a5c3a24
+    entrypoint: ["sh", "/etc/tinybot/init-secrets.sh"]
+    network_mode: none
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      AMCP_POSTGRES_PASSWORD: ${AMCP_POSTGRES_PASSWORD:-}
+      AMCP_JWT_SECRET: ${AMCP_JWT_SECRET:-}
+      AMCP_COOKIE_SECRET: ${AMCP_COOKIE_SECRET:-}
+      AMCP_ENCRYPTION_KEY: ${AMCP_ENCRYPTION_KEY:-}
+    configs:
+      - source: gateway_init
+        target: /etc/tinybot/init-secrets.sh
+    volumes:
+      - gateway_secrets:/run/anythingmcp-secrets
+      - gateway_database_secret:/run/anythingmcp-db
+      - gateway_setup:/run/anythingmcp-setup
+
+  gateway:
+    image: nginx:1.28-alpine@sha256:a8b39bd9cf0f83869a2162827a0caf6137ddf759d50a171451b335cecc87d236
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    configs:
+      - source: gateway_proxy
+        target: /etc/nginx/conf.d/default.conf
+    volumes:
+      - gateway_setup:/run/anythingmcp-setup:ro
+    expose:
+      - "8080"
+    depends_on:
+      anythingmcp-init:
+        condition: service_completed_successfully
+      anythingmcp:
+        condition: service_healthy
+    networks: [gateway_edge]
+
+  anythingmcp:
+    image: helpcodeai/anythingmcp:v0.55.9@sha256:470fbb5bf4e563e10fbb891ebf9548607cb731004fb7186af336e7f2145db406
+    platform: linux/amd64
+    command: ["sh", "/etc/tinybot/start-with-secrets.sh"]
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    # Keep upstream license and fallback mail requests on this container.
+    extra_hosts:
+      - "anythingmcp.com=127.0.0.1"
+      - "cloud.anythingmcp.com=127.0.0.1"
+    environment:
+      NODE_ENV: production
+      DEPLOYMENT_MODE: self-hosted
+      PORT: "4000"
+      FRONTEND_URL: *gateway-origin
+      SERVER_URL: *gateway-origin
+      CORS_ORIGIN: *gateway-origin
+      MCP_AUTH_MODE: both
+      MCP_ALLOW_ANONYMOUS: "false"
+      ALLOW_OPEN_REGISTRATION: "false"
+      LICENSE_USAGE_REPORT: "false"
+      SMTP_HOST: ${AMCP_SMTP_HOST:-}
+      SMTP_PORT: ${AMCP_SMTP_PORT:-587}
+      SMTP_USER: ${AMCP_SMTP_USER:-}
+      SMTP_PASS: ${AMCP_SMTP_PASS:-}
+      SMTP_FROM: ${AMCP_SMTP_FROM:-}
+      SMTP_SECURE: ${AMCP_SMTP_SECURE:-false}
+    configs:
+      - source: gateway_start
+        target: /etc/tinybot/start-with-secrets.sh
+    volumes:
+      - gateway_secrets:/run/anythingmcp-secrets:ro
+      - gateway_database_secret:/run/anythingmcp-db:ro
+    depends_on:
+      anythingmcp-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    networks: [gateway, gateway_edge]
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      POSTGRES_USER: anythingmcp
+      POSTGRES_PASSWORD_FILE: /run/anythingmcp-db/postgres_password
+      POSTGRES_DB: anythingmcp
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - gateway_database_secret:/run/anythingmcp-db:ro
+    depends_on:
+      anythingmcp-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "anythingmcp", "-d", "anythingmcp"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks: [gateway]
+
+networks:
+  gateway:
+    internal: true
+  gateway_edge:
+
+configs:
+  gateway_init:
+    file: ./deploy/anythingmcp-init.sh
+  gateway_start:
+    file: ./deploy/anythingmcp-start.sh
+  gateway_proxy:
+    file: ./deploy/anythingmcp-nginx.conf
+
+volumes:
+  postgres_data:
+  gateway_secrets:
+  gateway_database_secret:
+  gateway_setup:

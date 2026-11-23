@@ -1,0 +1,7 @@
+services:
+  gateway:
+    networks: [gateway_edge, dokploy-network]
+
+networks:
+  dokploy-network:
+    external: true

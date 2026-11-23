@@ -1,3 +1,7 @@
 {$TINYBOT_DOMAIN} {
-    reverse_proxy tinybot:8080
+	reverse_proxy tinybot:8080
+}
+
+{$AMCP_DOMAIN} {
+	reverse_proxy gateway:8080
 }
