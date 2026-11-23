@@ -4,7 +4,6 @@ use crate::{
     security::{hash, now},
     siwc::Profile,
 };
-use anyhow::Result;
 use axum::{
     Json,
     extract::State,
@@ -12,29 +11,6 @@ use axum::{
 };
 use serde_json::json;
 use std::sync::Arc;
-
-pub(super) async fn configure(
-    app: &App,
-    user: &str,
-    kind: &str,
-    model: &str,
-    credential: &str,
-) -> Result<()> {
-    let mut tx = app.db.begin_with("BEGIN IMMEDIATE").await?;
-    sqlx::query("UPDATE users SET provider=?,model=?,credential=? WHERE id=?")
-        .bind(kind)
-        .bind(model)
-        .bind(credential)
-        .bind(user)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("UPDATE tasks SET state='queued' WHERE user=? AND state='setup'")
-        .bind(user)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    Ok(())
-}
 
 pub(super) async fn import_codex(
     State(app): State<Arc<App>>,
@@ -58,12 +34,8 @@ pub(super) async fn import_codex(
     .map_err(|e| invalid(e.into()))?;
     let (user, model) = pair.ok_or_else(forbidden)?;
     profile.validate_import().await.map_err(invalid)?;
-    let bytes = serde_json::to_vec(&profile).map_err(|e| invalid(e.into()))?;
-    let encrypted = app
-        .vault
-        .seal(&format!("model:{user}"), &bytes)
-        .map_err(invalid)?;
-    configure(&app, &user, "codex", &model, &encrypted)
+    app.models
+        .connect_codex(&user, &model, &profile)
         .await
         .map_err(invalid)?;
     Ok(Json(json!({"ok":true})))
