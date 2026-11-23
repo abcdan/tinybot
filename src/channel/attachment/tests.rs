@@ -90,6 +90,7 @@ async fn telegram_attachments_preserve_captions_and_skip_duplicate_or_unauthoriz
         token: "test".into(),
         operator: "1".into(),
         origin: telegram.origin.clone(),
+        anything_mcp_origin: None,
         models: crate::model::Models::new(db.clone(), vault.clone(), "unused".into(), None, None),
         mcp: crate::mcp::Mcp::new(
             db.clone(),

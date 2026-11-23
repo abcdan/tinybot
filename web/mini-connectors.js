@@ -2,7 +2,7 @@ import { action, button, card, field, form, node, row } from './mini-ui.js';
 import { api, content, refresh, show, telegram } from './mini.js';
 
 export function connectors(state) {
-    content.append(anythingMcpSetup(), findConnector(), node('h2', 'Connections'));
+    content.append(anythingMcpSetup(state.anything_mcp_origin), findConnector(), node('h2', 'Connections'));
     for (const connector of state.connectors || []) {
         const gateway = connector.kind === 'anythingmcp';
         const connected = connector.auth !== 'pending';
@@ -25,9 +25,11 @@ export function connectors(state) {
     }
 }
 
-function anythingMcpSetup() {
-    const item = card('Connect AnythingMCP', 'Copy the MCP server URL from your own AnythingMCP gateway.');
-    item.append(form('Continue', [field('endpoint', 'Gateway MCP URL', {type: 'url', max: 2048})], async ({endpoint}) => {
+function anythingMcpSetup(origin) {
+    const item = card('Connect AnythingMCP', origin ? '' : 'Copy the MCP server URL from your own AnythingMCP gateway.');
+    if (origin) item.append(row(button('Open gateway', () => telegram.openLink(origin, {try_instant_view: false}), true)));
+    const value = origin ? new URL('/mcp', origin).href : '';
+    item.append(form('Continue', [field('endpoint', 'Gateway MCP URL', {type: 'url', max: 2048, value})], async ({endpoint}) => {
         const {id} = await api('add-anything-mcp', {endpoint: endpoint.trim()});
         await refresh();
         document.getElementById(`connection-${id}`)?.focus();
