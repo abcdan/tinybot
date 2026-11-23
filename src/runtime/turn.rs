@@ -97,6 +97,13 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                 .is_some_and(|(_, _, id)| id.is_some_and(|id| id > 0)),
     )
     .await?;
+    let attachment = super::media::context(
+        app,
+        task,
+        &*model,
+        latest_request.as_ref().map(|(_, text, _)| text.as_str()),
+    )
+    .await?;
     let mut summary = task.summary.clone();
     let mut goal = task.goal.clone();
     let mut lookups = BTreeSet::new();
@@ -158,7 +165,7 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
             .collect::<Vec<_>>();
         let zone = schedules::timezone(&app.db, &task.user).await?;
         let input = json!({
-            "goal":goal,"summary":summary,"latest_request":latest_request.as_ref().map(|(_,text,_)|clip(text,8000)),"history":history,"memory":memory,
+            "goal":goal,"summary":summary,"latest_request":latest_request.as_ref().map(|(_,text,_)|clip(text,8000)),"history":history,"memory":memory,"attachment":attachment,
             "local_time":schedules::local_iso(now(),zone),"time_zone":zone.name(),
             "shared_helper_scope":agent.as_ref().filter(|_|!owner).map(|agent|&agent.id),
             "telegram_reply":store::latest_reply_context(&app.db, &task.id).await?,
