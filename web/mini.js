@@ -12,10 +12,13 @@ const refreshButton = document.querySelector('#refresh');
 const tabs = document.querySelector('#tabs');
 const browserTab = tabs.querySelector('[data-tab="browser"]');
 const sourceLink = document.querySelector('#source-link');
+const footer = sourceLink.closest('footer');
 const formId = new URLSearchParams(window.location.search).get('form');
+const openInTelegram = 'Open TinyBot from its Telegram profile or tap Settings & forms in the bot chat.';
 let state;
 let tab = 'home';
 let generation = 0;
+let opened = false;
 
 export function show(text, error = false) {
     notice.textContent = text;
@@ -24,14 +27,16 @@ export function show(text, error = false) {
 }
 
 export async function api(action, data = {}) {
-    if (!telegram?.initData) throw new Error('Open this app from your TinyBot Telegram chat.');
+    if (!telegram?.initData) throw new Error(openInTelegram);
     const response = await fetch('/api/mini', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({init: telegram.initData, action, data})
     });
     const result = await response.json();
-    if (!response.ok) throw new Error(result.error || 'The request did not complete.');
+    if (!response.ok) {
+        throw Object.assign(new Error(result.error || 'The request did not complete.'), {status: response.status});
+    }
     return result;
 }
 
@@ -40,8 +45,15 @@ export async function refresh() {
     try {
         const result = formId ? await api('get-form', {id: formId}) : await api('status');
         if (sequence !== generation) return;
+        tabs.hidden = Boolean(formId);
+        refreshButton.hidden = false;
+        footer.hidden = false;
+        if (!opened) {
+            opened = true;
+            openFullscreen();
+        }
+        show('');
         if (formId) {
-            show('');
             const item = card('Answer a few questions', 'Your answers go to your Chief.');
             item.append(generatedForm(result));
             content.replaceChildren(item);
@@ -53,10 +65,34 @@ export async function refresh() {
         }
     } catch (error) {
         if (sequence === generation) {
+            state = undefined;
+            tabs.hidden = true;
+            footer.hidden = true;
+            refreshButton.hidden = !telegram?.initData || error.status === 403;
             content.replaceChildren();
-            show(error.message, true);
+            show(error.status === 403 ? openInTelegram : error.message, true);
         }
     }
+}
+
+function openFullscreen() {
+    const expand = () => {
+        try { telegram.expand?.(); }
+        catch { /* Settings still work at the current height. */ }
+    };
+    try {
+        if (telegram.isFullscreen) return;
+        if (telegram.isVersionAtLeast?.('8.0') && telegram.requestFullscreen) {
+            telegram.onEvent?.('fullscreenFailed', ({error}) => {
+                if (error === 'UNSUPPORTED') expand();
+            });
+            telegram.requestFullscreen();
+            return;
+        }
+    } catch {
+        // Some clients expose the method without fullscreen support.
+    }
+    expand();
 }
 
 function setTab(next) {
@@ -151,7 +187,6 @@ function syncColorScheme() {
     if (scheme === 'light' || scheme === 'dark') document.documentElement.style.colorScheme = scheme;
 }
 
-tabs.hidden = Boolean(formId);
 if (formId) {
     content.closest('main').classList.add('narrow');
     content.setAttribute('aria-label', 'Form');
