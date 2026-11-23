@@ -1,5 +1,6 @@
 use super::execution::{execute_approved, finish};
 use super::feedback::Feedback;
+use super::lookup::{self, Lookup};
 use super::review::{Verdict, review};
 use super::suggestions::valid_suggestions;
 use super::{
@@ -17,7 +18,9 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
+
+const TOOL_STEP_LIMIT: usize = 14;
 
 pub async fn run(app: Arc<App>, channel: Arc<dyn ChannelAdapter>) {
     let mut jobs = tokio::task::JoinSet::new();
@@ -163,9 +166,18 @@ async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> Resul
         .filter(|tool| ctx.allows(tool.name()))
         .collect();
     let definitions = tool_definitions(&tools);
+    let latest_request: Option<String> = sqlx::query_scalar(
+        "SELECT body FROM events WHERE task=? AND role='user' ORDER BY id DESC LIMIT 1",
+    )
+    .bind(&task.id)
+    .fetch_optional(&app.db)
+    .await?;
     let mut summary = task.summary.clone();
     let mut goal = task.goal.clone();
-    for _ in 0..14 {
+    let mut lookups = BTreeMap::new();
+    let mut repeated_lookup = false;
+    let mut finish_lookup = false;
+    for step_number in 0..=TOOL_STEP_LIMIT {
         if !store::current(&app.db, task).await? {
             return store::settle(&app.db, task, "idle", None).await;
         }
@@ -213,11 +225,22 @@ async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> Resul
             .collect::<Vec<_>>();
         let zone = schedules::timezone(&app.db, &task.user).await?;
         let input = json!({
-            "goal":goal,"summary":summary,"history":history,"memory":memory,
+            "goal":goal,"summary":summary,"latest_request":latest_request.as_deref().map(|text|clip(text,8000)),"history":history,"memory":memory,
             "local_time":schedules::local_iso(now(),zone),"time_zone":zone.name(),
             "agent_role":agent.as_ref().map(|agent|clip(&agent.instructions,2500)),
             "saved_agents":saved,"tools":descriptions(&tools),"connectors":connector_context(&ctx)
         });
+        if finish_lookup || step_number == TOOL_STEP_LIMIT {
+            if lookups.is_empty() {
+                break;
+            }
+            let text = lookup::reply(&*model, &input, &lookups).await;
+            let _delivery = match feedback {
+                Some(feedback) => Some(feedback.delivery.lock().await),
+                None => None,
+            };
+            return store::settle_reply(&app.db, task, clip(&text, MAX_REPLY_BYTES), &[]).await;
+        }
         let step: Step = if let Some(feedback) = feedback {
             let Some(step) = feedback.complete(&*model, &input, &definitions).await? else {
                 return store::settle(&app.db, task, "idle", None).await;
@@ -268,6 +291,25 @@ async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> Resul
                         continue;
                     }
                 };
+                let lookup = if intent.risk == Risk::PublicRead {
+                    Lookup::new(&name, &args)?
+                } else {
+                    None
+                };
+                if lookup
+                    .as_ref()
+                    .is_some_and(|lookup| lookups.contains_key(lookup))
+                {
+                    if repeated_lookup {
+                        finish_lookup = true;
+                    } else {
+                        repeated_lookup = true;
+                        store::append(&app.db, &task.id, "tool",
+                            "That lookup already ran in this turn. Use its recorded result. If it failed and the user needs an alternative, use a different public source or a search query. Otherwise provide the final answer now.",
+                        ).await?;
+                    }
+                    continue;
+                }
                 let mut requires_confirmation = intent.risk == Risk::Write;
                 if intent.risk != Risk::Local {
                     let review = review(&ctx, &intent)
@@ -355,7 +397,14 @@ async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> Resul
                     return store::settle(&app.db, task, "idle", None).await;
                 }
                 let result = tool.execute(&ctx, args).await;
-                finish(&ctx, &action, result, false).await?;
+                if let Some(lookup) = lookup {
+                    let observation = lookup.observe(result);
+                    store::finish_action(&app.db, task, &action, &observation.to_string(), false)
+                        .await?;
+                    lookups.insert(lookup, observation);
+                } else {
+                    finish(&ctx, &action, result, false).await?;
+                }
                 if name == "set_goal" {
                     goal = sqlx::query_scalar("SELECT goal FROM tasks WHERE id=?")
                         .bind(&task.id)
