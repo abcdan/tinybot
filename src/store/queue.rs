@@ -218,18 +218,26 @@ async fn settle_task(
     if let (Some(row), Some(message)) = (affected, message) {
         use sqlx::Row;
         if row.get::<i64, _>("revision") == task.revision {
-            sqlx::query("INSERT INTO events(task,role,body) VALUES(?,'assistant',?)")
-                .bind(&task.id)
-                .bind(message)
-                .execute(&mut *tx)
-                .await?;
-            let outbox =
-                sqlx::query("INSERT INTO outbox(user,task,agent,body,widget) VALUES(?,?,?,?,?)")
+            let assistant_event =
+                sqlx::query("INSERT INTO events(task,role,body) VALUES(?,'assistant',?)")
+                    .bind(&task.id)
+                    .bind(message)
+                    .execute(&mut *tx)
+                    .await?
+                    .last_insert_rowid();
+            let outbox = sqlx::query(
+                "INSERT INTO outbox(user,task,agent,body,widget,assistant_event_id,reply_to_message_id)
+                 VALUES(?,?,?,?,?,?,(SELECT CASE WHEN telegram_reply_message_id IS NOT NULL
+                    THEN COALESCE(telegram_message_id, telegram_reply_message_id) END
+                    FROM events WHERE task=? AND role='user' ORDER BY id DESC LIMIT 1))",
+            )
                     .bind(&task.user)
                     .bind(&task.id)
                     .bind(&task.agent)
                     .bind(message)
                     .bind(widget)
+                    .bind(assistant_event)
+                    .bind(&task.id)
                     .execute(&mut *tx)
                     .await?
                     .last_insert_rowid();

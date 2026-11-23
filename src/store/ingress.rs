@@ -1,9 +1,37 @@
 use crate::security::{clip, hash, id, now, token};
 use anyhow::Result;
+use serde::Serialize;
 use sqlx::{Sqlite, SqlitePool, Transaction};
 
 #[cfg(test)]
 mod tests;
+
+#[derive(Clone, Serialize, sqlx::FromRow)]
+pub struct ReplyContext {
+    pub message_id: i64,
+    pub excerpt: Option<String>,
+    pub from_bot: bool,
+}
+
+#[derive(Default)]
+struct TelegramInput {
+    message_id: Option<i64>,
+    reply: Option<ReplyContext>,
+    literal: bool,
+    reaction: bool,
+}
+
+pub async fn latest_reply_context(db: &SqlitePool, task: &str) -> Result<Option<ReplyContext>> {
+    Ok(sqlx::query_as(
+        "SELECT telegram_reply_message_id AS message_id,telegram_reply_excerpt AS excerpt,
+             telegram_reply_from_bot AS from_bot
+         FROM events WHERE id=(SELECT id FROM events WHERE task=? AND role='user' ORDER BY id DESC LIMIT 1)
+           AND telegram_reply_message_id IS NOT NULL",
+    )
+    .bind(task)
+    .fetch_optional(db)
+    .await?)
+}
 
 pub async fn ingest(
     db: &SqlitePool,
@@ -13,7 +41,16 @@ pub async fn ingest(
     user: &str,
     text: &str,
 ) -> Result<()> {
-    ingest_message(db, operator, channel, external_id, user, text, None).await
+    ingest_message(
+        db,
+        operator,
+        channel,
+        external_id,
+        user,
+        text,
+        TelegramInput::default(),
+    )
+    .await
 }
 
 pub async fn ingest_telegram(
@@ -24,6 +61,18 @@ pub async fn ingest_telegram(
     text: &str,
     message_id: i64,
 ) -> Result<()> {
+    ingest_telegram_reply(db, operator, external_id, user, text, message_id, None).await
+}
+
+pub async fn ingest_telegram_reply(
+    db: &SqlitePool,
+    operator: &str,
+    external_id: i64,
+    user: &str,
+    text: &str,
+    message_id: i64,
+    reply: Option<ReplyContext>,
+) -> Result<()> {
     ingest_message(
         db,
         operator,
@@ -31,7 +80,66 @@ pub async fn ingest_telegram(
         external_id,
         user,
         text,
-        (message_id > 0).then_some(message_id),
+        TelegramInput {
+            message_id: (message_id > 0).then_some(message_id),
+            reply,
+            ..TelegramInput::default()
+        },
+    )
+    .await
+}
+
+pub async fn ingest_telegram_voice(
+    db: &SqlitePool,
+    operator: &str,
+    external_id: i64,
+    user: &str,
+    text: &str,
+    message_id: i64,
+    reply: Option<ReplyContext>,
+) -> Result<()> {
+    ingest_message(
+        db,
+        operator,
+        "telegram",
+        external_id,
+        user,
+        text,
+        TelegramInput {
+            message_id: (message_id > 0).then_some(message_id),
+            reply,
+            literal: true,
+            reaction: false,
+        },
+    )
+    .await
+}
+
+pub async fn ingest_telegram_reaction(
+    db: &SqlitePool,
+    operator: &str,
+    external_id: i64,
+    user: &str,
+    message_id: i64,
+    emoji: &str,
+) -> Result<()> {
+    ingest_message(
+        db,
+        operator,
+        "telegram",
+        external_id,
+        user,
+        emoji,
+        TelegramInput {
+            message_id: None,
+            reply: Some(ReplyContext {
+                message_id,
+                excerpt: None,
+                from_bot: true,
+            }),
+            literal: true,
+            reaction: true,
+        },
     )
     .await
 }
@@ -43,7 +151,7 @@ async fn ingest_message(
     external_id: i64,
     user: &str,
     text: &str,
-    telegram_message_id: Option<i64>,
+    mut telegram: TelegramInput,
 ) -> Result<()> {
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     let inserted = sqlx::query("INSERT OR IGNORE INTO updates VALUES (?,?)")
@@ -57,7 +165,11 @@ async fn ingest_message(
     }
     let text = clip(text.trim(), 8000);
     let (command, argument) = text.split_once(' ').unwrap_or((text, ""));
-    let command = command.split('@').next().unwrap_or(command);
+    let command = if telegram.literal {
+        ""
+    } else {
+        command.split('@').next().unwrap_or(command)
+    };
     let argument = argument.trim();
     let mut response = None;
     if command == "/start" && !argument.is_empty() {
@@ -177,6 +289,42 @@ async fn ingest_message(
             .await?;
     } else {
         let input = if command == "/new" { argument } else { text };
+        let target: Option<(String, Option<String>)> = if command != "/new"
+            && let Some(reply) = telegram
+                .reply
+                .as_ref()
+                .filter(|reply| reply.from_bot && reply.message_id > 0)
+        {
+            sqlx::query_as(
+                    "SELECT o.task,e.body FROM outbox o LEFT JOIN events e ON e.id=o.assistant_event_id AND e.task=o.task
+                     WHERE o.user=? AND o.telegram_message_id=? AND o.state='sent' AND o.task IS NOT NULL",
+                )
+                .bind(user).bind(reply.message_id).fetch_optional(&mut *tx).await?
+        } else {
+            None
+        };
+        if let Some((task, excerpt)) = target {
+            if !super::select_task(&mut *tx, user, &task).await? {
+                if !telegram.reaction {
+                    sqlx::query("INSERT INTO outbox(user,body) VALUES(?,?)")
+                    .bind(user)
+                    .bind("That message belongs to a task you can no longer continue. Send a new message to your Chief.")
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                tx.commit().await?;
+                return Ok(());
+            }
+            if let Some(reply) = &mut telegram.reply
+                && reply.excerpt.is_none()
+            {
+                reply.excerpt = excerpt;
+            }
+            active = Some(task);
+        } else if telegram.reaction {
+            tx.commit().await?;
+            return Ok(());
+        }
         let task = if let Some(active) = active {
             active
         } else {
@@ -202,7 +350,8 @@ async fn ingest_message(
             &task,
             input,
             provider.is_some(),
-            telegram_message_id,
+            telegram.message_id,
+            telegram.reply.as_ref(),
         )
         .await?
         {
@@ -225,6 +374,7 @@ pub(super) async fn enqueue_input(
     input: &str,
     has_provider: bool,
     telegram_message_id: Option<i64>,
+    reply: Option<&ReplyContext>,
 ) -> Result<bool> {
     let state: Option<String> = sqlx::query_scalar(
         "UPDATE tasks SET state=CASE WHEN state IN ('running','uncertain') THEN state ELSE ? END,
@@ -249,10 +399,17 @@ pub(super) async fn enqueue_input(
     .bind(task)
     .execute(&mut **tx)
     .await?;
-    sqlx::query("INSERT INTO events(task,role,body,telegram_message_id) VALUES (?,'user',?,?)")
+    let reply = reply.filter(|reply| reply.message_id > 0);
+    sqlx::query(
+        "INSERT INTO events(task,role,body,telegram_message_id,telegram_reply_message_id,telegram_reply_excerpt,telegram_reply_from_bot)
+         VALUES (?,'user',?,?,?,?,?)",
+    )
         .bind(task)
         .bind(input)
         .bind(telegram_message_id)
+        .bind(reply.map(|reply| reply.message_id))
+        .bind(reply.and_then(|reply| reply.excerpt.as_deref()).map(|text| clip(text, 1600)))
+        .bind(reply.map(|reply| reply.from_bot))
         .execute(&mut **tx)
         .await?;
     crate::audit::open(tx, task, input).await?;

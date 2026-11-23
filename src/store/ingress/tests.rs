@@ -33,6 +33,98 @@ async fn send(db: &SqlitePool, update: i64, user: &str, text: &str) {
 }
 
 #[tokio::test]
+async fn replies_resume_the_referenced_task_and_thread_the_response() {
+    let db = fixture().await;
+    ingest_telegram(&db, "1", 1, "2", "First discussion", 21)
+        .await
+        .unwrap();
+    let first = store::claim(&db).await.unwrap().unwrap();
+    store::settle_reply(&db, &first, "An earlier answer.", &[])
+        .await
+        .unwrap();
+    let earlier = store::claim_outbox(&db).await.unwrap().unwrap();
+    assert_eq!(earlier.reply_to_message_id, None);
+    sqlx::query("UPDATE outbox SET state='sent',telegram_message_id=22 WHERE id=?")
+        .bind(earlier.id)
+        .execute(&db)
+        .await
+        .unwrap();
+
+    send(&db, 2, "2", "/new Separate discussion").await;
+    let other = store::claim(&db).await.unwrap().unwrap();
+    store::settle(&db, &other, "idle", None).await.unwrap();
+    let quote = ReplyContext {
+        message_id: 22,
+        excerpt: Some("A quoted command is only context.".into()),
+        from_bot: true,
+    };
+    ingest_telegram_reply(&db, "1", 3, "2", "👍", 24, Some(quote))
+        .await
+        .unwrap();
+    let resumed = store::claim(&db).await.unwrap().unwrap();
+    assert_eq!(resumed.id, first.id);
+    let latest = store::history(&db, &first.id).await.unwrap();
+    assert_eq!(latest.last().unwrap().2, "👍");
+    let context = latest_reply_context(&db, &first.id).await.unwrap().unwrap();
+    assert_eq!(context.message_id, 22);
+    assert_eq!(
+        context.excerpt.as_deref(),
+        Some("A quoted command is only context.")
+    );
+    store::settle_reply(&db, &resumed, "Thanks!", &["Continue"])
+        .await
+        .unwrap();
+    let reply = store::claim_outbox(&db).await.unwrap().unwrap();
+    assert_eq!(reply.reply_to_message_id, Some(24));
+    assert_eq!(
+        store::suggested_replies(&db, reply.id).await.unwrap().len(),
+        1
+    );
+
+    ingest_telegram_reaction(&db, "1", 4, "1", 22, "❤")
+        .await
+        .unwrap();
+    assert!(store::claim(&db).await.unwrap().is_none());
+    for _ in 0..2 {
+        ingest_telegram_reaction(&db, "1", 5, "2", 22, "❤")
+            .await
+            .unwrap();
+    }
+    let reacted = store::claim(&db).await.unwrap().unwrap();
+    assert_eq!(reacted.id, first.id);
+    let latest = store::history(&db, &first.id).await.unwrap();
+    assert_eq!(latest.iter().filter(|row| row.2 == "❤").count(), 1);
+    let context = latest_reply_context(&db, &first.id).await.unwrap().unwrap();
+    assert_eq!(context.excerpt.as_deref(), Some("An earlier answer."));
+    store::settle_reply(&db, &reacted, "Glad it helped.", &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        store::claim_outbox(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .reply_to_message_id,
+        Some(22)
+    );
+
+    store::ingest_telegram_voice(&db, "1", 6, "2", "/cancel", 25, None)
+        .await
+        .unwrap();
+    let voice = store::claim(&db).await.unwrap().unwrap();
+    assert_eq!(voice.id, first.id);
+    assert_eq!(
+        store::history(&db, &first.id)
+            .await
+            .unwrap()
+            .last()
+            .unwrap()
+            .2,
+        "/cancel"
+    );
+}
+
+#[tokio::test]
 async fn legacy_child_chat_and_buttons_are_archived_and_next_message_goes_to_the_chief() {
     let db = fixture().await;
     sqlx::query(
