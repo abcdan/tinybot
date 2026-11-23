@@ -622,20 +622,6 @@ async fn stale_expired_and_revoked_reply_buttons_cannot_queue_input() {
             .await
             .unwrap()
     );
-    sqlx::query("DELETE FROM grants WHERE agent='helper' AND member='1'")
-        .execute(&db)
-        .await
-        .unwrap();
-    assert!(
-        !store::redeem_reply(&db, "1", &options[1].token)
-            .await
-            .unwrap()
-    );
-
-    sqlx::query("INSERT INTO grants(agent,member) VALUES('helper','1')")
-        .execute(&db)
-        .await
-        .unwrap();
     message(&db, 105, "1", "This follow-up is newer.").await;
     let revised = store::claim(&db).await.unwrap().unwrap();
     runtime::work(&app, &revised).await.unwrap();
@@ -647,6 +633,19 @@ async fn stale_expired_and_revoked_reply_buttons_cannot_queue_input() {
     );
     assert!(
         !store::redeem_reply(&db, "1", &options[1].token)
+            .await
+            .unwrap()
+    );
+
+    let latest_item = store::claim_outbox(&db).await.unwrap().unwrap();
+    let latest = store::suggested_replies(&db, latest_item.id).await.unwrap();
+    assert_eq!(latest.len(), 2);
+    sqlx::query("DELETE FROM grants WHERE agent='helper' AND member='1'")
+        .execute(&db)
+        .await
+        .unwrap();
+    assert!(
+        !store::redeem_reply(&db, "1", &latest[0].token)
             .await
             .unwrap()
     );
