@@ -105,6 +105,7 @@ pub(super) async fn status(app: &App, user: &str) -> Result<Value> {
     Ok(
         json!({"user":user,"provider":profile.0,"model":profile.1,"active_task":profile.2,
         "agents":agents,"tasks":tasks,"requests":requests,"connectors":connectors,"members":members,"memory":memory,"grants":grants,
+        "anything_mcp_origin":app.anything_mcp_origin,
         "schedules":schedules,"time_zone":zone.name(),"openrouter_connected":connections.openrouter_key,
         "openrouter_server_tools":openrouter_server_tools,
         "codex_model":connections.codex_model,"read_tools":read_tools,"browser_proxy":browser_proxy,

@@ -170,7 +170,7 @@ test('a self-hosted AnythingMCP gateway signs in from Connections and lists its 
         const endpoint = 'https://mcp.example.test/mcp/workspace';
         const consent = 'https://mcp.example.test/oauth/authorize?state=fixture';
         const connector = {id: 'gateway', name: 'AnythingMCP', endpoint, kind: 'anythingmcp', auth: 'pending', transport: 'streamable-http'};
-        const state = {user: '1', provider: 'codex', requests: [], tasks: [], connectors: []};
+        const state = {user: '1', provider: 'codex', requests: [], tasks: [], connectors: [], anything_mcp_origin: 'https://mcp.example.test'};
         let registrations = 0;
         await mockMiniApp(context, ({action, data}) => {
             if (action === 'status') return state;
@@ -197,7 +197,10 @@ test('a self-hosted AnythingMCP gateway signs in from Connections and lists its 
         await page.getByRole('button', {name: 'Connections', exact: true}).click();
         await page.getByRole('heading', {name: 'Connect AnythingMCP'}).waitFor();
         const url = page.getByLabel('Gateway MCP URL', {exact: true});
-        assert.equal(await url.inputValue(), '');
+        assert.equal(await url.inputValue(), 'https://mcp.example.test/mcp');
+        await page.getByRole('button', {name: 'Open gateway', exact: true}).click();
+        assert.equal(await page.evaluate(() => window.openedLink), 'https://mcp.example.test');
+        await page.evaluate(() => { delete window.openedLink; });
         await url.fill(endpoint);
         await page.getByRole('button', {name: 'Continue', exact: true}).click();
         const card = page.locator('#connection-gateway');

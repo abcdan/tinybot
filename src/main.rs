@@ -25,6 +25,7 @@ pub struct App {
     vault: security::Vault,
     token: String,
     origin: String,
+    anything_mcp_origin: Option<String>,
     operator: String,
     models: model::Models,
     mcp: mcp::Mcp,
@@ -94,6 +95,18 @@ async fn main() -> Result<()> {
         "TINYBOT_ORIGIN must contain only an HTTPS origin"
     );
     let origin_string = origin.origin().ascii_serialization();
+    let anything_mcp_origin = env::var("TINYBOT_ANYTHINGMCP_ORIGIN")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(|value| -> Result<String> {
+            let url = net::https(&value).context("invalid TINYBOT_ANYTHINGMCP_ORIGIN")?;
+            ensure!(
+                url.path() == "/" && url.query().is_none(),
+                "TINYBOT_ANYTHINGMCP_ORIGIN must contain only an HTTPS origin"
+            );
+            Ok(url.origin().ascii_serialization())
+        })
+        .transpose()?;
     let token = secret("TELEGRAM_BOT_TOKEN")?;
     ensure!(
         token.len() >= 15
@@ -127,6 +140,7 @@ async fn main() -> Result<()> {
         vault: vault.clone(),
         token: token.clone(),
         origin: origin_string.clone(),
+        anything_mcp_origin,
         operator: operator.clone(),
         models: model::Models::new(
             db.clone(),

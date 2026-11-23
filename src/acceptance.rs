@@ -51,6 +51,7 @@ fn app_with_model(db: &SqlitePool, rust_model: Arc<dyn ModelProvider>) -> App {
         token: "unused".into(),
         operator: "1".into(),
         origin: origin.origin().ascii_serialization(),
+        anything_mcp_origin: None,
         models: model::Models::new(db.clone(), vault.clone(), "codex".into(), None, None)
             .with_fixture(rust_model),
         mcp: mcp::Mcp::new(db.clone(), vault, origin),

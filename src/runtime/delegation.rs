@@ -331,6 +331,7 @@ mod tests {
             token: "unused".into(),
             operator: "1".into(),
             origin: origin.origin().ascii_serialization(),
+            anything_mcp_origin: None,
             models: model::Models::new(db.clone(), vault.clone(), "codex".into(), None, None)
                 .with_fixture(Arc::new(ChiefFixture(db.clone()))),
             mcp: crate::mcp::Mcp::new(db.clone(), vault, origin),
