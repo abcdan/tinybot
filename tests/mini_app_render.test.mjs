@@ -579,17 +579,28 @@ test('audit log retries, pages by message, and reveals chronological calls and r
         await page.getByText('Audit log unavailable.', {exact: true}).waitFor();
         await page.getByRole('button', {name: 'Retry loading audit log'}).click();
         await page.getByText('Find the weather', {exact: true}).waitFor();
-        assert.equal(await page.getByText('Message runs and their model and tool calls are kept for 7 days.').count(), 1);
+        await page.getByRole('heading', {name: 'Recent messages'}).waitFor();
         assert.equal(requests.some(({action}) => action === 'audit-session'), false);
         await page.getByText('Find the weather', {exact: true}).click();
         await page.getByRole('button', {name: 'Load more entries'}).click();
-        await page.getByText('Sunny <script>safe text</script>', {exact: true}).waitFor();
-        const entries = await page.locator('.audit-timeline > li').allTextContents();
-        assert.equal(entries.length, 3);
-        assert.match(entries[0], /Model · fixture\/model.*Started/s);
-        assert.match(entries[1], /Tool · search_web.*Started.*Arguments.*Weather forecast/s);
-        assert.match(entries[2], /Tool · search_web.*Completed.*Result.*Sunny/s);
-        assert.equal(await page.locator('.audit-timeline script').count(), 0);
+        const entries = page.locator('.audit-timeline > li');
+        await entries.nth(2).getByText('Search web', {exact: true}).waitFor();
+        assert.deepEqual(await entries.locator('.audit-entry-name').allTextContents(), [
+            'fixture/model', 'Search web', 'Search web',
+        ]);
+        assert.deepEqual(await entries.locator('.audit-status').allTextContents(), ['Started', 'Started', 'Completed']);
+        assert.deepEqual(await entries.locator('time').evaluateAll(items => items.map(item => item.dateTime)),
+            [started, started + 1, started + 4].map(time => new Date(time * 1000).toISOString()));
+
+        const argumentsText = entries.nth(1).getByText(/Weather forecast/);
+        const result = entries.nth(2).getByText('Sunny <script>safe text</script>', {exact: true});
+        await argumentsText.waitFor({state: 'hidden'});
+        await result.waitFor({state: 'hidden'});
+        await entries.nth(1).locator('summary').click();
+        await argumentsText.waitFor();
+        await entries.nth(2).locator('summary').click();
+        await result.waitFor();
+        assert.equal(await entries.locator('script').count(), 0);
         assert.deepEqual(requests.filter(({action}) => action === 'audit-session').map(({data}) => data), [
             {id: 42}, {id: 42, after: 2}
         ]);
@@ -606,7 +617,7 @@ test('audit log retries, pages by message, and reveals chronological calls and r
 
 test('audit usage shows provider, model and run totals without treating missing reports as zero', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
-    const context = await browser.newContext({locale: 'en-US', viewport: {width: 320, height: 720}});
+    const context = await browser.newContext({locale: 'en-US', viewport: {width: 320, height: 720}, colorScheme: 'light'});
     const page = await context.newPage();
     const started = 1795380000;
     const run = {id: 42, message: 'Look up the forecast', started_at: started, status: 'completed', entry_count: 1};
@@ -641,16 +652,20 @@ test('audit usage shows provider, model and run totals without treating missing 
             default: assert.fail('Unexpected Mini App action ' + action);
         }
     });
-    const values = group => group.locator('.audit-usage-metrics').first().locator('dd').allTextContents();
+    const values = group => group.locator('.audit-metrics').first().locator('dd').allTextContents();
     try {
         await page.goto('https://tinybot.test/mini');
         await page.getByRole('button', {name: 'Audit', exact: true}).click();
-        const panel = page.locator('.card').filter({has: page.getByRole('heading', {name: 'Model usage', exact: true})});
-        await panel.getByText('Last 7 days', {exact: true}).waitFor();
-        assert.deepEqual(await values(panel), ['$0.001234', '1,244', '55', '1,299']);
-        await panel.getByText('4 model calls · Token counts reported for 3 · Cost reported for 2', {exact: true}).waitFor();
-        await panel.getByText('Earlier model calls may be missing usage data.', {exact: true}).waitFor();
-        const split = provider => panel.locator('.audit-usage-provider').filter({has: page.getByText(provider, {exact: true})});
+        const panel = page.locator('.audit-usage');
+        await panel.getByRole('heading', {name: 'Last 7 days'}).waitFor();
+        assert.deepEqual(await values(panel), ['$0.001234', '1,299', '4']);
+        await panel.getByText(/Cost reported for 2 of 4 calls.*Tokens reported for 3 of 4 calls.*Earlier calls/).waitFor();
+        const breakdown = panel.locator('.audit-breakdown');
+        await breakdown.waitFor({state: 'hidden'});
+        await panel.getByText('Usage breakdown', {exact: true}).click();
+        await breakdown.waitFor();
+        assert.deepEqual(await values(breakdown), ['1,244', '55']);
+        const split = provider => breakdown.locator('.audit-provider').filter({has: page.getByText(provider, {exact: true})});
         const provider = split('DeepInfra');
         assert.deepEqual(await values(provider), ['$0.001234', '1,234', '50', '1,284']);
         const model = name => provider.getByRole('listitem').filter({has: page.getByText(name, {exact: true})});
@@ -662,10 +677,24 @@ test('audit usage shows provider, model and run totals without treating missing 
         await page.getByText('Look up the forecast', {exact: true}).click();
         const session = page.locator('.audit-run-usage');
         await session.getByRole('heading', {name: 'Run usage', exact: true}).waitFor();
-        assert.deepEqual(await values(session), ['$0.00', '234', '20', '254']);
+        assert.deepEqual(await values(session), ['$0.00', '254', '1']);
+        const runBreakdown = session.locator('.audit-breakdown');
+        await runBreakdown.waitFor({state: 'hidden'});
+        await session.getByText('Usage breakdown', {exact: true}).click();
+        assert.deepEqual(await values(runBreakdown), ['234', '20']);
         const entry = page.locator('.audit-timeline > li');
+        const modelCall = entry.locator('summary');
+        await modelCall.waitFor();
+        await entry.locator('.audit-metrics').waitFor({state: 'hidden'});
+        await modelCall.click();
+        await entry.locator('.audit-metrics').waitFor();
         assert.deepEqual(await values(entry), ['$0.00', '234', '20', '254']);
         assert.equal(await entry.locator('script').count(), 0);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
+
+        const lightSurface = await panel.evaluate(element => getComputedStyle(element).backgroundColor);
+        await page.emulateMedia({colorScheme: 'dark'});
+        assert.notEqual(await panel.evaluate(element => getComputedStyle(element).backgroundColor), lightSurface);
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
     } finally {
         await browser.close();
