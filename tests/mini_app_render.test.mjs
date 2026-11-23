@@ -184,6 +184,90 @@ test('browser proxy settings are operator only and clear the private URL after s
     }
 });
 
+test('memory settings page by scope and manage group notes with the signed API', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    const context = await browser.newContext({viewport: {width: 360, height: 720}});
+    const page = await context.newPage();
+    const state = {
+        user: '1', provider: 'codex', requests: [], tasks: [], time_zone: 'UTC',
+        agents: [
+            {id: 'writer', owner: '1', name: 'Writer'},
+            {id: 'research', name: 'Shared research helper'},
+        ],
+    };
+    const created_at = 1731933900;
+    const groupText = 'Use concise updates.\nKeep <b>examples</b> as text.';
+    let groupNotes = [];
+    await mockMiniApp(context, ({action, data}) => {
+        switch (action) {
+            case 'status': return state;
+            case 'list-memories':
+                if (data.scope === 'group') return {entries: groupNotes};
+                if (data.scope === 'agent') {
+                    assert.deepEqual(data, {scope: 'agent', agent: 'writer'});
+                    return {entries: [{id: 7, scope: 'agent', agent: 'writer', created_at, body: 'Writer preferences'}]};
+                }
+                assert.equal(data.scope, 'private');
+                if (data.before != null) {
+                    assert.equal(data.before, 10);
+                    return {entries: [{id: 9, scope: 'private', created_at, body: 'Older Chief memory'}]};
+                }
+                return {entries: [{id: 10, scope: 'private', created_at, body: 'Chief preferences'}], next_before: 10};
+            case 'save-memory':
+                assert.deepEqual(data, {scope: 'group', body: groupText});
+                groupNotes = [{id: 11, scope: 'group', created_at, body: groupText}];
+                return {ok: true};
+            case 'delete-memory':
+                assert.deepEqual(data, {id: 11});
+                groupNotes = [];
+                return {ok: true};
+            default: assert.fail('Unexpected Mini App action ' + action);
+        }
+    });
+    let unavailable = true;
+    await page.route('**/api/mini', route => {
+        const {action, data} = route.request().postDataJSON();
+        if (unavailable && action === 'list-memories' && data.scope === 'group') {
+            unavailable = false;
+            return route.fulfill({status: 503, json: {error: 'Memory settings unavailable.'}});
+        }
+        return route.fallback();
+    });
+    try {
+        await page.goto('https://tinybot.test/mini');
+        await page.getByRole('button', {name: 'Memory', exact: true}).click();
+        const scope = page.getByRole('combobox', {name: 'Memory scope'});
+        await page.getByText('Chief preferences', {exact: true}).waitFor();
+        await page.getByRole('button', {name: 'Load older memories'}).click();
+        await page.getByText('Older Chief memory', {exact: true}).waitFor();
+        assert.equal(await scope.getByRole('option', {name: 'Helper · Shared research helper'}).count(), 0);
+
+        await scope.selectOption('group');
+        await page.getByText('Memory settings unavailable.', {exact: true}).waitFor();
+        await page.getByRole('button', {name: 'Retry loading memories'}).click();
+        await page.getByText('No memories saved here yet.').waitFor();
+        const note = page.getByRole('textbox', {name: 'Memory', exact: true});
+        await note.fill(groupText);
+        await page.getByRole('button', {name: 'Save memory'}).click();
+        const entry = page.locator('.memory-note');
+        await entry.waitFor();
+        assert.equal(await entry.textContent(), groupText);
+        assert.equal(await entry.locator('b').count(), 0);
+        assert.equal(await note.inputValue(), '');
+        await page.getByRole('button', {name: 'Refresh', exact: true}).click();
+        await entry.waitFor();
+        assert.equal(await scope.inputValue(), 'group');
+        await page.getByRole('button', {name: 'Delete memory'}).click();
+        await page.getByText('No memories saved here yet.').waitFor();
+
+        await scope.selectOption('agent:writer');
+        await page.getByText('Writer preferences', {exact: true}).waitFor();
+        assert.equal(await page.getByText('Chief preferences', {exact: true}).count(), 0);
+    } finally {
+        await browser.close();
+    }
+});
+
 test('a generated Mini App uses shared controls and submits details for masked review', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
     const context = await browser.newContext();
