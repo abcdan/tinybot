@@ -79,6 +79,7 @@ pub(super) async fn handle(
             .await;
         }
     };
+    let _ = adapter.typing(&received.user).await;
     let result = tokio::time::timeout(Duration::from_secs(35), async {
         let audio = adapter.download_voice(&received.note.file_id).await?;
         transcriber.transcribe(&audio).await
