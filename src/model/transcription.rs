@@ -1,9 +1,9 @@
 use super::Models;
-use crate::net;
+use crate::{audit::ModelCall, net};
 use anyhow::{Context, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde::Deserialize;
 use serde_json::{Value, json};
+use std::time::Instant;
 
 const ENDPOINT: &str = "https://openrouter.ai/api/v1/audio/transcriptions";
 const MODEL: &str = "openai/whisper-large-v3";
@@ -11,6 +11,12 @@ pub(crate) const MAX_VOICE_BYTES: usize = 10 * 1024 * 1024;
 
 pub(crate) struct VoiceTranscriber {
     key: String,
+}
+
+pub(crate) struct TranscribedVoice {
+    pub(crate) text: String,
+    pub(crate) usage: ModelCall,
+    pub(crate) duration_ms: u64,
 }
 
 impl Models {
@@ -24,7 +30,7 @@ impl Models {
 }
 
 impl VoiceTranscriber {
-    pub(crate) async fn transcribe(&self, audio: &[u8]) -> Result<String> {
+    pub(crate) async fn transcribe(&self, audio: &[u8]) -> Result<TranscribedVoice> {
         let endpoint = net::https(ENDPOINT)?;
         let request = net::request(reqwest::Method::POST, &endpoint).await?;
         self.request_transcript(request, audio).await
@@ -34,7 +40,8 @@ impl VoiceTranscriber {
         &self,
         request: reqwest::RequestBuilder,
         audio: &[u8],
-    ) -> Result<String> {
+    ) -> Result<TranscribedVoice> {
+        let started = Instant::now();
         let response = request
             .bearer_auth(&self.key)
             .json(&voice_payload(audio)?)
@@ -48,17 +55,21 @@ impl VoiceTranscriber {
         let body = net::body(response, 128 * 1024)
             .await
             .context("invalid voice transcription response")?;
-        let reply: Transcription =
+        let reply: Value =
             serde_json::from_slice(&body).context("invalid voice transcription response")?;
-        let text = reply.text.trim();
-        ensure!(!text.is_empty(), "voice transcription was empty");
-        Ok(text.to_owned())
+        let text = reply["text"]
+            .as_str()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .context("voice transcription was empty")?;
+        let mut usage = ModelCall::new("openrouter", MODEL);
+        usage.openrouter(&reply);
+        Ok(TranscribedVoice {
+            text: text.to_owned(),
+            usage,
+            duration_ms: started.elapsed().as_millis() as u64,
+        })
     }
-}
-
-#[derive(Deserialize)]
-struct Transcription {
-    text: String,
 }
 
 fn voice_payload(audio: &[u8]) -> Result<Value> {
@@ -121,17 +132,31 @@ mod tests {
                         "input_audio": {"data": STANDARD.encode(b"OggStest"), "format": "ogg"}
                     })
                 );
-                Json(json!({"text": " Hallo Chief. ", "usage": {"seconds": 1}}))
+                Json(json!({
+                    "text": " Hallo Chief. ",
+                    "usage": {"seconds": 1, "input_tokens": 11, "output_tokens": 4, "total_tokens": 15, "cost": 0.000008}
+                }))
             }),
         );
         let server = tokio::spawn(async move { axum::serve(listener, fixture).await.unwrap() });
         let request = reqwest::Client::new().post(endpoint);
+        let reply = transcriber
+            .request_transcript(request, b"OggStest")
+            .await
+            .unwrap();
+        assert_eq!(reply.text, "Hallo Chief.");
         assert_eq!(
-            transcriber
-                .request_transcript(request, b"OggStest")
-                .await
-                .unwrap(),
-            "Hallo Chief."
+            serde_json::to_value(reply.usage).unwrap(),
+            json!({
+                "provider": "openrouter",
+                "model": MODEL,
+                "usage": {
+                    "input_tokens": 11,
+                    "output_tokens": 4,
+                    "total_tokens": 15,
+                    "cost_usd": 0.000008,
+                }
+            })
         );
         server.abort();
     }
