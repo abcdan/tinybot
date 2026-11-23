@@ -72,6 +72,8 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
         })
         .collect();
     let model = app.models.provider(&task.user, false).await?;
+    let profile = app.models.onboarding_profile(&task.user).await?;
+    let profile = json!({"display_name":profile.display_name,"chief_name":profile.chief_name});
     let tools: Vec<_> = app
         .tools
         .iter()
@@ -179,6 +181,7 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
         let zone = schedules::timezone(&app.db, &task.user).await?;
         let input = json!({
             "goal":goal,"summary":summary,"latest_request":latest_request.as_ref().map(|(_,text,_)|clip(text,8000)),"history":history,"memory":memory,"attachment":attachment,
+            "profile":profile,
             "local_time":schedules::local_iso(now(),zone),"time_zone":zone.name(),
             "shared_helper_scope":agent.as_ref().filter(|_|!owner).map(|agent|&agent.id),
             "telegram_reply":store::latest_reply_context(&app.db, &task.id).await?,
