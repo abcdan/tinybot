@@ -188,6 +188,7 @@ impl Models {
             return Ok(model.clone());
         }
         if review && let Some(model) = &self.review_model {
+            crate::audit::model_selected("openrouter", model, true).await;
             return Ok(Arc::new(OpenRouter {
                 key: self.openrouter_key(user).await?,
                 model: model.clone(),
@@ -204,6 +205,7 @@ impl Models {
         let kind = kind.context("Choose a provider in the Mini App first.")?;
         let model = model.context("Choose a model in the Mini App first.")?;
         if kind == "openrouter" {
+            crate::audit::model_selected("openrouter", &model, review).await;
             let key = self
                 .user_openrouter_key(user)
                 .await?
@@ -214,6 +216,7 @@ impl Models {
             }));
         }
         ensure!(kind == "codex", "unknown model provider");
+        crate::audit::model_selected("codex", &model, review).await;
         let binding = format!("model:{user}");
         let credential = credential.context("model credential missing")?;
         let secret = self.vault.open(&binding, &credential)?;

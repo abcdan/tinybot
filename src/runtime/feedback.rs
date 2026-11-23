@@ -1,5 +1,6 @@
 use super::{ENGINE, MAX_REPLY_BYTES, Step};
 use crate::{
+    audit,
     channel::ChannelAdapter,
     model::{ModelProvider, ToolDefinition, parse_json_reply},
     security::clip,
@@ -42,9 +43,12 @@ impl Feedback {
         let streamed = tokio::select! {
             biased;
             _ = self.stale.notified() => return Ok(None),
-            result = model.complete_turn(ENGINE, &input, tools, Some(&mut append)) => result,
+            result = audit::model("agent_turn_stream", async {
+                let response = model.complete_turn(ENGINE, &input, tools, Some(&mut append)).await?;
+                parse_json_reply(&response)
+            }) => result,
         };
-        if let Ok(step) = streamed.and_then(|response| parse_json_reply(&response)) {
+        if let Ok(step) = streamed {
             return Ok(Some(step));
         }
 
@@ -53,9 +57,12 @@ impl Feedback {
         let buffered = tokio::select! {
             biased;
             _ = self.stale.notified() => return Ok(None),
-            result = model.complete_turn(ENGINE, &input, tools, None) => result?,
+            result = audit::model("agent_turn_buffered", async {
+                let response = model.complete_turn(ENGINE, &input, tools, None).await?;
+                parse_json_reply(&response)
+            }) => result?,
         };
-        parse_json_reply(&buffered).map(Some)
+        Ok(Some(buffered))
     }
 
     pub(super) async fn show(&self, db: &SqlitePool, task: &Task, channel: &dyn ChannelAdapter) {
