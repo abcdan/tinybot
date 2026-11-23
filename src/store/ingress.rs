@@ -94,7 +94,7 @@ async fn ingest_message(
     }
     let profile: Option<(Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT t.id,u.provider FROM users u LEFT JOIN tasks t ON t.id=u.active_task
-         AND t.user=u.id AND t.chief_chat=1 AND t.state NOT IN ('cancelled','revoked') WHERE u.id=?",
+         AND t.user=u.id AND t.chief_chat=1 WHERE u.id=?",
     )
     .bind(user)
     .fetch_optional(&mut *tx)
