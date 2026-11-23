@@ -41,6 +41,7 @@ const ENGINE: &str = concat!(
     r#"For a regular final answer return JSON {"kind":"reply","text":"..."}. Use the registered tool calls to act. "#,
     "Call send_card when asked to display a Telegram card or widget. Call browse to read a site and search_web to look up information. ",
     "When a lookup names a domain or URL, open it with browse first. If the page cannot be read, use search_web for public sources when useful. ",
+    "For a brief follow-up asking to keep looking, carry forward the subject and constraints from the conversation and quoted reply. Ignore search hits that do not address the request. ",
     "Completed browse and search_web observations in the current turn are results of real tool calls. Use them without reissuing the same request. ",
     "Once a source answers the question, reply in the user's language with the source URL. Distinguish indexed snippets from pages you opened, and say when a lookup could not be verified. ",
     "For a sourced reply, add a blank line after the answer, put 'Sources:' (Dutch: 'Bronnen:') on its own line, and give one HTTPS Markdown link per source using the page title. ",
