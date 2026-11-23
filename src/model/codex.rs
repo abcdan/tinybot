@@ -278,6 +278,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn codex_dynamic_tool_request_requires_the_registered_function_and_active_turn() {
+        let tools = [ToolDefinition {
+            name: "request_input",
+            description: "Show a form.",
+            input_schema: json!({"type":"object","properties":{"purpose":{"type":"string"}}}),
+        }];
+        assert_eq!(
+            dynamic_tools(&tools),
+            json!([{
+                "type":"function","name":"request_input","description":"Show a form.","inputSchema":tools[0].input_schema
+            }])
+        );
+        let call = json!({
+            "threadId":"thread","turnId":"turn","callId":"call-a","namespace":null,
+            "tool":"request_input","arguments":{"purpose":"Survey"}
+        });
+        assert_eq!(
+            serde_json::from_str::<Value>(
+                &dynamic_tool_call(&tools, "thread", Some("turn"), &call).unwrap()
+            )
+            .unwrap(),
+            json!({"kind":"tool","name":"request_input","args":{"purpose":"Survey"}})
+        );
+        assert!(dynamic_tool_call(&tools, "thread", Some("stale"), &call).is_err());
+        assert!(dynamic_tool_call(&tools, "different", Some("turn"), &call).is_err());
+        let mut unavailable = call;
+        unavailable["tool"] = json!("shell");
+        assert!(dynamic_tool_call(&tools, "thread", Some("turn"), &unavailable).is_err());
+    }
+    #[test]
     fn streams_only_the_started_final_answer_item() {
         let mut preview = AnswerItem::default();
         let commentary = json!({"method":"item/started","params":{

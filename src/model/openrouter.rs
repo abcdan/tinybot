@@ -295,3 +295,117 @@ impl StreamTurn {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn definitions() -> [ToolDefinition; 1] {
+        [ToolDefinition {
+            name: "browse",
+            description: "Read a public website.",
+            input_schema: json!({
+                "type":"object","properties":{"url":{"type":"string"}},"required":["url"]
+            }),
+        }]
+    }
+
+    #[test]
+    fn registers_native_openrouter_function_schemas() {
+        let definitions = definitions();
+        let body = stream_request(
+            "provider/model",
+            "system prompt",
+            "task context",
+            &definitions,
+        );
+        assert_eq!(body["messages"][0]["content"], "system prompt");
+        assert_eq!(body["messages"][1]["content"], "task context");
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["function"]["name"], "browse");
+        assert_eq!(
+            body["tools"][0]["function"]["parameters"],
+            definitions[0].input_schema
+        );
+        assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(body["parallel_tool_calls"], false);
+    }
+
+    #[test]
+    fn waits_for_the_tool_finish_frame_and_keeps_arguments_out_of_drafts() {
+        let definitions = definitions();
+        let mut turn = StreamTurn::default();
+        let mut draft = String::new();
+        let mut emit = |part: &str| draft.push_str(part);
+        assert!(
+            turn.accept(
+                r#"{"choices":[],"usage":{"completion_tokens":4}}"#,
+                &definitions,
+                &mut emit
+            )
+            .unwrap()
+            .is_none()
+        );
+        let start = json!({"choices":[{"delta":{"tool_calls":[
+            {"index":0,"id":"call_a","function":{"name":"browse","arguments":"{\"url\":"}}
+        ]},"finish_reason":null}]});
+        let args = json!({"choices":[{"delta":{"tool_calls":[
+            {"index":0,"function":{"arguments":"\"https://example.org\"}"}}
+        ]},"finish_reason":null}]});
+        assert!(
+            turn.accept(&start.to_string(), &definitions, &mut emit)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            turn.accept(&args.to_string(), &definitions, &mut emit)
+                .unwrap()
+                .is_none()
+        );
+        let result = turn
+            .accept(
+                r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+                &definitions,
+                &mut emit,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(draft.is_empty());
+        assert_eq!(
+            serde_json::from_str::<Value>(&result).unwrap(),
+            json!({
+                "kind":"tool","name":"browse","args":{"url":"https://example.org"}
+            })
+        );
+    }
+
+    #[test]
+    fn streams_reply_content_and_requires_the_native_wire_for_tools() {
+        let definitions = definitions();
+        let mut turn = StreamTurn::default();
+        let mut emit = |_: &str| {};
+        let reply = r#"{"kind":"reply","text":"Hello"}"#;
+        let finished = json!({"choices":[{"delta":{"content":reply},"finish_reason":"stop"}]});
+        let mut draft = String::new();
+        assert_eq!(
+            turn.accept(&finished.to_string(), &definitions, &mut |part: &str| draft
+                .push_str(part))
+                .unwrap(),
+            Some(reply.into())
+        );
+        assert_eq!(draft, reply);
+        let fake = json!({"choices":[{"delta":{"content":"{\"kind\":\"tool\",\"name\":\"browse\",\"args\":{}}"},"finish_reason":"stop"}]});
+        assert!(
+            turn.accept(&fake.to_string(), &definitions, &mut emit)
+                .is_err()
+        );
+        assert!(
+            turn.accept(
+                r#"{"error":{"message":"partial failure"}}"#,
+                &definitions,
+                &mut emit
+            )
+            .is_err()
+        );
+    }
+}
