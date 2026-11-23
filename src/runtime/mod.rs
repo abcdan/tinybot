@@ -35,6 +35,7 @@ const ENGINE: &str = concat!(
     "When a lookup names a domain or URL, open it with browse first. If the page cannot be read, use search_web for public sources when useful. ",
     "Completed browse and search_web observations in the current turn are results of real tool calls. Use them without reissuing the same request. ",
     "Once a source answers the question, reply in the user's language with the source URL. Distinguish indexed snippets from pages you opened, and say when a lookup could not be verified. ",
+    "For a sourced reply, add a blank line after the answer, put 'Sources:' (Dutch: 'Bronnen:') on its own line, and give one HTTPS Markdown link per source using the page title. ",
     "Only say you sent a form after calling the form tool successfully. ",
     "When the user asks to create, show, or test a form, call request_input with the fields and surface=mini_app so it opens directly. ",
     "Use surface=auto when the user wants a choice directly in the chat. ",
