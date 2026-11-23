@@ -10,6 +10,38 @@ pub async fn ingest(
     user: &str,
     text: &str,
 ) -> Result<()> {
+    ingest_message(db, operator, channel, external_id, user, text, None).await
+}
+
+pub async fn ingest_telegram(
+    db: &SqlitePool,
+    operator: &str,
+    external_id: i64,
+    user: &str,
+    text: &str,
+    message_id: i64,
+) -> Result<()> {
+    ingest_message(
+        db,
+        operator,
+        "telegram",
+        external_id,
+        user,
+        text,
+        (message_id > 0).then_some(message_id),
+    )
+    .await
+}
+
+async fn ingest_message(
+    db: &SqlitePool,
+    operator: &str,
+    channel: &str,
+    external_id: i64,
+    user: &str,
+    text: &str,
+    telegram_message_id: Option<i64>,
+) -> Result<()> {
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     let inserted = sqlx::query("INSERT OR IGNORE INTO updates VALUES (?,?)")
         .bind(channel)
@@ -168,7 +200,16 @@ pub async fn ingest(
                 .await?;
             task
         };
-        if !enqueue_input(&mut tx, user, &task, input, provider.is_some()).await? {
+        if !enqueue_input(
+            &mut tx,
+            user,
+            &task,
+            input,
+            provider.is_some(),
+            telegram_message_id,
+        )
+        .await?
+        {
             sqlx::query("INSERT INTO outbox(user,body) VALUES(?,?)")
                 .bind(user)
                 .bind("This task is unavailable. Use /new to start another task.")
@@ -187,6 +228,7 @@ pub(super) async fn enqueue_input(
     task: &str,
     input: &str,
     has_provider: bool,
+    telegram_message_id: Option<i64>,
 ) -> Result<bool> {
     let state: Option<String> = sqlx::query_scalar(
         "UPDATE tasks SET state=CASE WHEN state IN ('running','uncertain') THEN state ELSE ? END,
@@ -211,9 +253,10 @@ pub(super) async fn enqueue_input(
     .bind(task)
     .execute(&mut **tx)
     .await?;
-    sqlx::query("INSERT INTO events(task,role,body) VALUES (?,'user',?)")
+    sqlx::query("INSERT INTO events(task,role,body,telegram_message_id) VALUES (?,'user',?,?)")
         .bind(task)
         .bind(input)
+        .bind(telegram_message_id)
         .execute(&mut **tx)
         .await?;
     if state == "uncertain" {

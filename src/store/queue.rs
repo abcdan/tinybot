@@ -22,9 +22,12 @@ pub async fn recover(db: &SqlitePool) -> Result<()> {
     sqlx::query("UPDATE tasks SET state='queued' WHERE state='running'")
         .execute(&mut *tx)
         .await?;
-    sqlx::query("UPDATE outbox SET state='uncertain' WHERE state='sending'")
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "UPDATE outbox SET state=CASE WHEN reaction_event IS NULL THEN 'uncertain' ELSE 'queued' END
+         WHERE state='sending'",
+    )
+    .execute(&mut *tx)
+    .await?;
     sqlx::query(
         "UPDATE pending SET state='lost' WHERE kind='form' AND state IN ('waiting','approved')",
     )

@@ -1,13 +1,15 @@
 mod ingress;
 mod queue;
+mod reactions;
 mod replies;
 mod requests;
 
-pub use ingress::ingest;
+pub use ingress::{ingest, ingest_telegram};
 pub use queue::{
     append, claim, compact, compaction_batch, current, expire, has_access, history, list_tasks,
     recover, select_task, settle, settle_reply, settle_widget,
 };
+pub use reactions::{REACTION_EMOJIS, queue_reaction, reaction_target};
 pub use replies::{SuggestedReply, redeem_reply, suggested_replies};
 pub use requests::{
     can_deliver, claim_approval, claim_outbox, finish_action, list_requests, notify, pause,
@@ -63,6 +65,7 @@ pub struct Outbound {
     pub body: String,
     pub button: Option<String>,
     pub widget: Option<String>,
+    pub reaction_event: Option<i64>,
 }
 
 pub async fn open(path: &Path) -> Result<SqlitePool> {
