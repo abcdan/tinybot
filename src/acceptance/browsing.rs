@@ -1,7 +1,8 @@
 use super::{app_with_model, fixture, message};
 use crate::{
     model::{ModelProvider, TextDelta, ToolDefinition},
-    runtime, security, store,
+    runtime::{self, Intent, Outcome, Risk, Tool, ToolContext},
+    security, store,
 };
 use anyhow::{Result, ensure};
 use async_trait::async_trait;
@@ -72,7 +73,13 @@ impl ModelProvider for RepeatingBrowser {
     async fn complete(&self, system: &str, input: &str) -> Result<String> {
         assert!(system.contains("Give a final answer"));
         let input: Value = serde_json::from_str(input)?;
-        let observations = input["completed_lookups"].as_array().unwrap();
+        let observations: Vec<Value> = input["history"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["role"] == "tool")
+            .filter_map(|event| serde_json::from_str(event["text"].as_str()?).ok())
+            .collect();
         assert_eq!(observations.len(), 1);
         let observation = &observations[0];
         assert_eq!(observation["target"], "https://example.org/");
@@ -209,5 +216,127 @@ async fn chat_browse_uses_the_isolated_browser_without_requiring_a_second_model(
                 .await
                 .unwrap();
         assert_eq!(pending, 0);
+    }
+}
+
+struct UnrelatedSearch;
+
+#[async_trait]
+impl Tool for UnrelatedSearch {
+    fn name(&self) -> &'static str {
+        "search_web"
+    }
+
+    fn describe(&self) -> &'static str {
+        "Return unrelated indexed results"
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({"type":"object","properties":{"query":{"type":"string"}}})
+    }
+
+    async fn inspect(&self, _: &ToolContext<'_>, _: &Value) -> Result<Intent> {
+        Ok(Intent {
+            risk: Risk::PublicRead,
+            detail: "search the public web".into(),
+            destination: "Public web search".into(),
+        })
+    }
+
+    async fn execute(&self, _: &ToolContext<'_>, _: Value) -> Result<Outcome> {
+        Ok(Outcome::Continue(json!({
+            "results":[{"title":"Solitaire","url":"https://games.example/solitaire"}]
+        })))
+    }
+}
+
+struct ResearchFinal {
+    after_handoff: bool,
+}
+
+#[async_trait]
+impl ModelProvider for ResearchFinal {
+    async fn complete_turn(
+        &self,
+        _: &str,
+        _: &str,
+        _: &[ToolDefinition],
+        _: Option<&mut TextDelta<'_>>,
+    ) -> Result<String> {
+        if self.after_handoff {
+            anyhow::bail!("the Chief's tool turn failed");
+        }
+        Ok(
+            json!({"kind":"tool","name":"search_web","args":{"query":"MaxiAxi retourkosten"}})
+                .to_string(),
+        )
+    }
+
+    async fn complete(&self, system: &str, input: &str) -> Result<String> {
+        assert!(system.contains("Use only evidence that directly addresses the request"));
+        let context: Value = serde_json::from_str(input)?;
+        assert_eq!(context["latest_request"], "Kan je even doorzoeken?");
+        assert_eq!(
+            context["telegram_reply"]["excerpt"],
+            "Ik zoek de retourvoorwaarden van MaxiAxi."
+        );
+        if self.after_handoff {
+            assert!(input.contains("retourpagina"));
+            return Ok(
+                json!({"text":"Op de retourpagina staat dat je eerst contact moet opnemen."})
+                    .to_string(),
+            );
+        }
+        assert!(input.contains("Solitaire"));
+        Ok("invalid model response".into())
+    }
+}
+
+#[tokio::test]
+async fn chief_finishes_research_without_dumping_unrelated_results() {
+    for after_handoff in [false, true] {
+        let db = fixture().await;
+        let mut app = app_with_model(&db, Arc::new(ResearchFinal { after_handoff }));
+        app.tools.retain(|tool| tool.name() != "search_web");
+        app.tools.push(Box::new(UnrelatedSearch));
+        store::ingest_telegram_reply(
+            &db,
+            "1",
+            42,
+            "1",
+            "Kan je even doorzoeken?",
+            55,
+            Some(store::ReplyContext {
+                message_id: 54,
+                excerpt: Some("Ik zoek de retourvoorwaarden van MaxiAxi.".into()),
+                from_bot: true,
+            }),
+        )
+        .await
+        .unwrap();
+        let task = store::claim(&db).await.unwrap().unwrap();
+        if after_handoff {
+            store::append(&db, &task.id, "handoff", "Ik vraag het aan Research.")
+                .await
+                .unwrap();
+            store::append(
+                &db,
+                &task.id,
+                "tool",
+                r#"{"helper_reply":"Op de retourpagina staat dat je eerst contact moet opnemen."}"#,
+            )
+            .await
+            .unwrap();
+        }
+        runtime::work(&app, &task).await.unwrap();
+        let final_reply = store::claim_outbox(&db).await.unwrap().unwrap();
+        assert_eq!(
+            final_reply.body,
+            if after_handoff {
+                "Op de retourpagina staat dat je eerst contact moet opnemen."
+            } else {
+                "I couldn’t verify the requested information."
+            }
+        );
     }
 }
