@@ -3,11 +3,13 @@ mod connections;
 mod decisions;
 mod media;
 mod openrouter;
+mod server_tools;
 mod transcription;
 
 pub(crate) use connections::OnboardingError;
 pub use connections::OpenRouterSettingsError;
 pub use media::{AttachmentInput, AttachmentRead};
+pub(crate) use server_tools::{ServerTool, ServerToolInput};
 pub(crate) use transcription::MAX_VOICE_BYTES;
 
 use self::{codex::Codex, openrouter::OpenRouter};

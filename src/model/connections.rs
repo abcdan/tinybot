@@ -1,5 +1,6 @@
 mod catalog;
 mod onboarding;
+mod server_tools;
 #[cfg(test)]
 mod tests;
 
