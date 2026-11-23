@@ -59,7 +59,7 @@ after adding the domain. Then check `https://your-domain/health` and send
 
 ## Models and Mini Apps
 
-- **Tasks** use a generative OpenRouter model you select or an eligible ChatGPT
+- **Tasks** use a tool-capable OpenRouter model you select or an eligible ChatGPT
   plan through the official Codex App Server. To set up Codex, create a pairing
   code in the Mini App and run `tinybot codex connect https://your-domain` on a
   computer with a browser. Build the local command with `cargo build --locked
@@ -71,11 +71,14 @@ after adding the domain. Then check `https://your-domain/health` and send
   use `inception/mercury-3` for form generation.
   Website values go directly from the Mini App to TinyBot over HTTPS and stay
   in memory until use or expiry. Review the masked preview before submitting.
+- **Acknowledgements** use Mercury 3 to generate a short message in your
+  language while TinyBot starts a lookup or longer task. A connected OpenRouter
+  key enables them for both Codex and OpenRouter tasks.
 - **Action review** defaults to a separate call to the active task model. Set
   `TINYBOT_REVIEW_MODEL=typesafe/jev-1.14` to use OpenRouter's typed Decisions API.
   The broker still enforces permissions and approvals. An optional
   `TINYBOT_REVIEW_OPENROUTER_KEY` is the deployment fallback for model review
-  and form generation. Personal OpenRouter credentials take precedence.
+  and Mercury. Personal OpenRouter credentials take precedence.
 
 ## Public websites
 
