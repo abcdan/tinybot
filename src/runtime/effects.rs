@@ -137,13 +137,22 @@ pub(super) async fn execute(tool: Builtin, ctx: &ToolContext<'_>, args: Value) -
         }
         Builtin::Input => {
             let purpose = string(&args, "purpose", 500)?;
-            let spec: FormSpec = if let Some(fields) = args.get("fields") {
+            let mut spec: FormSpec = if let Some(fields) = args.get("fields") {
                 serde_json::from_value(json!({"fields":fields}))?
             } else {
                 let model = app.models.forms(&task.user).await?;
                 json_reply(&*model,
                     &format!("{UI_SPEC}\nReturn only JSON with fields. Propose up to eight fields for the stated task. Use text, textarea, number, date, select or checkbox. Use private=false, with options for selects. Ask only for ordinary task preferences. Never request contact, credentials, payment, identity, medical or other private information."),
                     &json!({"purpose":purpose})).await?
+            };
+            let surface = args
+                .get("surface")
+                .map(|data| data.as_str().context("choose surface auto or mini_app"))
+                .transpose()?;
+            spec.mini_app = match surface {
+                None | Some("auto") => false,
+                Some("mini_app") => true,
+                Some(_) => anyhow::bail!("choose surface auto or mini_app"),
             };
             spec.validate()?;
             ensure!(
@@ -175,10 +184,9 @@ pub(super) async fn execute(tool: Builtin, ctx: &ToolContext<'_>, args: Value) -
                 "unsupported task input"
             );
             let request = id();
-            let choice_button = format!("choice/{request}");
             let (notification, button) = match spec.widget_choice() {
-                Some(field) => (field.label.as_str(), choice_button.as_str()),
-                None => ("Open Settings & forms to answer so I can continue.", "mini"),
+                Some(field) => (field.label.as_str(), format!("choice/{request}")),
+                None => ("I prepared a form for you.", format!("form/{request}")),
             };
             store::pause(
                 &app.db,
@@ -186,7 +194,7 @@ pub(super) async fn execute(tool: Builtin, ctx: &ToolContext<'_>, args: Value) -
                 "elicitation",
                 &serde_json::to_value(&spec)?,
                 notification,
-                Some(button),
+                Some(&button),
                 900,
                 &request,
             )

@@ -1,4 +1,4 @@
-use super::{Api, accounts, agents, forbidden, invalid, origin, state};
+use super::{Api, ApiError, accounts, agents, forbidden, invalid, origin, state};
 use crate::{
     App,
     mcp::Candidate,
@@ -6,7 +6,11 @@ use crate::{
     store,
 };
 use anyhow::{Context, Result, anyhow, ensure};
-use axum::{Json, extract::State, http::HeaderMap};
+use axum::{
+    Json,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc};
@@ -34,10 +38,20 @@ pub(super) async fn mini(
     if !onboarded {
         return Err(forbidden());
     }
-    operation(&app, &user, &request.action, request.data)
+    let action = request.action.as_str();
+    operation(&app, &user, action, request.data)
         .await
         .map(Json)
-        .map_err(invalid)
+        .map_err(|error| {
+            if action == "get-form" {
+                ApiError(
+                    StatusCode::NOT_FOUND,
+                    "This form is no longer available. Open a fresh form from TinyBot in Telegram.",
+                )
+            } else {
+                invalid(error)
+            }
+        })
 }
 
 pub(super) fn text<'a>(data: &'a Value, key: &str, max: usize) -> Result<&'a str> {
@@ -52,6 +66,10 @@ async fn operation(app: &App, user: &str, action: &str, data: Value) -> Result<V
     let mut result = json!({"ok":true});
     match action {
         "status" => return state::status(app, user).await,
+        "get-form" => {
+            let request = text(&data, "id", 36)?;
+            return crate::forms::input_request(&app.db, user, request).await;
+        }
         "openrouter" | "openrouter-forms" => {
             let key = text(&data, "key", 8192)?;
             let model = if action == "openrouter" {

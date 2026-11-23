@@ -62,10 +62,15 @@ pub async fn ingest(
         tx.commit().await?;
         return Ok(());
     };
+    if command == "/testform" {
+        crate::forms::queue_test(&mut tx, user).await?;
+        tx.commit().await?;
+        return Ok(());
+    }
     let mut active = active_task;
     if response.is_none() {
         match command {
-            "/start" | "/help" => response = Some("Use /panel for tasks, requests, and schedules, and /settings for account setup and forms. Use /new to start a task, /cancel to stop, or /reconcile after checking an uncertain action.".into()),
+            "/start" | "/help" => response = Some("Use /panel for tasks, requests, and schedules, /settings for account setup, or /testform to try a Mini App form. Use /new to start a task, /cancel to stop, or /reconcile after checking an uncertain action.".into()),
             "/panel" => response = Some("Manage TinyBot from this chat.".into()),
             "/settings" => response = Some("Open Settings & forms to manage your account and complete forms.".into()),
             "/invite" if user == operator => {

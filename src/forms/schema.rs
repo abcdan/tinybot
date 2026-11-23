@@ -32,6 +32,8 @@ pub struct WebsiteForm {
 #[serde(deny_unknown_fields)]
 pub struct FormSpec {
     pub fields: Vec<Field>,
+    #[serde(default)]
+    pub mini_app: bool,
 }
 
 impl FormSpec {
@@ -41,7 +43,8 @@ impl FormSpec {
         };
         // One question with short options fits Telegram's 1024-byte query response,
         // including the request ID and JSON escaping.
-        (field.kind == "select"
+        (!self.mini_app
+            && field.kind == "select"
             && !field.private
             && (2..=6).contains(&field.options.len())
             && field.label.len() + field.options.iter().map(String::len).sum::<usize>() <= 420
