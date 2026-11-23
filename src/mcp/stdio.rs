@@ -32,7 +32,7 @@ impl Mcp {
         method: &str,
         params: Value,
     ) -> Result<Value> {
-        let connector = self.owned(&connector.owner, &connector.id).await?;
+        let connector = self.current_connection(connector).await?;
         let key = match connector.auth.as_str() {
             "public" => None,
             "api" => {

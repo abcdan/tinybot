@@ -1,4 +1,4 @@
-use super::{Outbound, Pending, Task, has_access};
+use super::{McpApprovalDecision, Outbound, Pending, Task, has_access, mcp_approvals};
 use crate::security::{clip, now};
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
@@ -143,28 +143,80 @@ pub async fn uncertain_action(
 }
 
 pub async fn respond(db: &SqlitePool, user: &str, pending: &str, approve: bool) -> Result<()> {
+    let decision = if approve {
+        McpApprovalDecision::Once
+    } else {
+        McpApprovalDecision::Deny
+    };
+    respond_to_request(db, user, pending, decision, false).await
+}
+
+pub async fn respond_mcp(
+    db: &SqlitePool,
+    user: &str,
+    pending: &str,
+    decision: McpApprovalDecision,
+) -> Result<()> {
+    respond_to_request(db, user, pending, decision, true).await
+}
+
+async fn respond_to_request(
+    db: &SqlitePool,
+    user: &str,
+    pending: &str,
+    decision: McpApprovalDecision,
+    mcp_only: bool,
+) -> Result<()> {
+    let approve = decision != McpApprovalDecision::Deny;
+    let state = if approve { "approved" } else { "denied" };
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     let entry: Pending = sqlx::query_as("UPDATE pending SET state=? WHERE id=? AND user=? AND expires>=?
         AND state='waiting' AND (kind IN ('approve','form-submit') OR (kind IN ('agent-spec','form','elicitation') AND ?='denied')) AND EXISTS
-        (SELECT 1 FROM tasks t WHERE t.id=pending.task AND t.revision=pending.revision AND t.state='waiting'
+        (SELECT 1 FROM tasks t WHERE t.id=pending.task AND t.user=pending.user AND t.revision=pending.revision AND t.state='waiting'
         AND (t.agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=t.agent AND
         (a.owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=?))))) RETURNING *")
-        .bind(if approve {"approved"} else {"denied"}).bind(pending).bind(user).bind(now())
-        .bind(if approve {"approved"} else {"denied"}).bind(user).bind(user)
+        .bind(state).bind(pending).bind(user).bind(now()).bind(state).bind(user).bind(user)
         .fetch_optional(&mut *tx).await?.context("request expired, changed, or already answered")?;
+    let scope = if entry.kind == "approve" {
+        mcp_approvals::request_scope(&entry.payload)?
+    } else {
+        None
+    };
+    ensure!(
+        !mcp_only || scope.is_some(),
+        "MCP approval request unavailable"
+    );
+    if let Some(scope) = &scope {
+        mcp_approvals::validate_request(&mut tx, user, entry.task.as_deref(), scope).await?;
+        if decision == McpApprovalDecision::Always {
+            mcp_approvals::remember(&mut tx, user, scope).await?;
+        }
+    }
     if let (Some(task), Some(revision)) = (&entry.task, entry.revision) {
         crate::audit::request_changed(
             &mut tx,
             task,
             revision,
             &entry.kind,
-            if approve { "approved" } else { "declined" },
+            match decision {
+                McpApprovalDecision::Once => "approved",
+                McpApprovalDecision::Always => "approved_always",
+                McpApprovalDecision::Deny => "declined",
+            },
         )
         .await?;
     }
     if !approve {
-        sqlx::query("INSERT INTO events(task,role,body) VALUES(?,'tool','User declined the pending action.')")
-            .bind(&entry.task).execute(&mut *tx).await?;
+        let message = if scope.is_some() {
+            "The user denied this MCP action. Do not request the same action again in this turn."
+        } else {
+            "User declined the pending action."
+        };
+        sqlx::query("INSERT INTO events(task,role,body) VALUES(?,'tool',?)")
+            .bind(&entry.task)
+            .bind(message)
+            .execute(&mut *tx)
+            .await?;
     }
     sqlx::query("UPDATE tasks SET state='queued',updated=? WHERE id=?")
         .bind(now())
@@ -196,6 +248,13 @@ pub async fn claim_outbox(db: &SqlitePool) -> Result<Option<Outbound>> {
 }
 
 pub async fn can_deliver(db: &SqlitePool, item: &Outbound) -> Result<bool> {
+    if let Some(request) = item
+        .button
+        .as_deref()
+        .and_then(|button| button.strip_prefix("mcp-approval/"))
+    {
+        return mcp_approvals::waiting(db, item, request).await;
+    }
     if let Some(task) = &item.task {
         let usable: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=? AND state<>'revoked')",

@@ -34,6 +34,8 @@ pub struct Connector {
     pub auth: String,
     pub transport: String,
     #[serde(skip)]
+    pub approval_epoch: i64,
+    #[serde(skip)]
     pub credential: Option<String>,
 }
 
@@ -126,7 +128,7 @@ impl Mcp {
         let sealed = self
             .vault
             .seal(&binding(&connector), &serde_json::to_vec(&credential)?)?;
-        sqlx::query("UPDATE connectors SET auth='api',credential=? WHERE id=? AND owner=?")
+        sqlx::query("UPDATE connectors SET auth='api',credential=?,approval_epoch=approval_epoch+1 WHERE id=? AND owner=?")
             .bind(sealed)
             .bind(&connector.id)
             .bind(user)
@@ -145,7 +147,7 @@ impl Mcp {
                 .tools()
                 .await?;
         }
-        sqlx::query("UPDATE connectors SET auth='public',credential=NULL WHERE id=? AND owner=?")
+        sqlx::query("UPDATE connectors SET auth='public',credential=NULL,approval_epoch=approval_epoch+1 WHERE id=? AND owner=?")
             .bind(id)
             .bind(user)
             .execute(&self.db)
@@ -191,7 +193,7 @@ impl Mcp {
 
     async fn session(&self, connector: &Connector) -> Result<Session> {
         let _refresh = self.refresh.lock().await;
-        let connector = self.owned(&connector.owner, &connector.id).await?;
+        let connector = self.current_connection(connector).await?;
         if connector.auth == "public" {
             drop(_refresh);
             return Session::open(&connector.endpoint, &connector.transport, HeaderMap::new())
@@ -222,7 +224,7 @@ impl Mcp {
                     oauth.access_token = next.access_token;
                     oauth.refresh_token = next.refresh_token.or(oauth.refresh_token);
                     oauth.expires = next.expires;
-                    self.store_oauth(&connector, &oauth).await?;
+                    self.store_oauth(&connector, &oauth, false).await?;
                 }
                 bearer(&oauth.access_token)?
             }
@@ -230,6 +232,15 @@ impl Mcp {
         };
         drop(_refresh);
         Session::open(&connector.endpoint, &connector.transport, headers).await
+    }
+
+    async fn current_connection(&self, connector: &Connector) -> Result<Connector> {
+        let current = self.owned(&connector.owner, &connector.id).await?;
+        ensure!(
+            current.approval_epoch == connector.approval_epoch,
+            "connector authorization changed"
+        );
+        Ok(current)
     }
 
     pub async fn list_tools(&self, connector: &Connector) -> Result<Value> {
