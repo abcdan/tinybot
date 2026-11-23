@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 #[derive(Clone, Copy)]
 pub(super) enum Builtin {
     Remember,
+    RecallMemory,
     SetGoal,
     Delegate,
     Discover,
@@ -31,6 +32,7 @@ pub(super) enum Builtin {
 pub fn tools() -> Vec<Box<dyn Tool>> {
     [
         Builtin::Remember,
+        Builtin::RecallMemory,
         Builtin::SetGoal,
         Builtin::Delegate,
         Builtin::Discover,
@@ -61,6 +63,7 @@ impl Tool for Builtin {
     fn name(&self) -> &'static str {
         match self {
             Self::Remember => "remember",
+            Self::RecallMemory => "recall_memory",
             Self::SetGoal => "set_goal",
             Self::Delegate => "delegate",
             Self::Discover => "discover_mcp",
@@ -85,7 +88,12 @@ impl Tool for Builtin {
 
     fn describe(&self) -> &'static str {
         match self {
-            Self::Remember => "Remember a durable user preference privately. Args: text.",
+            Self::Remember => {
+                "Save a durable user fact or preference. The default scope is the current agent's private memory. The Chief can choose group for all of the user's agents, or pass an owned agent ID for that helper's private memory."
+            }
+            Self::RecallMemory => {
+                "Search durable memory with a short keyword or phrase. Includes group notes where authorized. The Chief can supply an owned agent ID to search that agent's private notes."
+            }
             Self::SetGoal => "Record the current task goal. Args: text.",
             Self::Delegate => {
                 "Ask another agent to carry out a self-contained brief and return findings to you. Choose a matching saved agent by ID when available. Include a handoff: one short first-person message in the user's language saying what you're asking the helper and that you'll follow up. Include the helper's name if you selected one."
@@ -141,7 +149,12 @@ impl Tool for Builtin {
         let suggestions =
             json!({"type":"array","maxItems":3,"items":{"type":"string","maxLength":48}});
         let (properties, required): (Value, &[&str]) = match self {
-            Self::Remember | Self::SetGoal => (json!({"text":text}), &["text"]),
+            Self::Remember => (
+                json!({"text":text,"scope":{"type":"string","enum":["private","group"]},"agent":text}),
+                &["text"],
+            ),
+            Self::RecallMemory => (json!({"query":text,"agent":text}), &["query"]),
+            Self::SetGoal => (json!({"text":text}), &["text"]),
             Self::Delegate => (
                 json!({"brief":text,"agent":text,"handoff":{"type":"string","maxLength":180}}),
                 &["brief"],
@@ -306,7 +319,7 @@ impl Tool for Builtin {
                     Risk::Local
                 }
             }
-            Self::AgentSpec | Self::Remember => {
+            Self::AgentSpec => {
                 ensure!(
                     ctx.owner && ctx.task.agent.is_none(),
                     "use your personal Chief for this action"
