@@ -48,6 +48,41 @@ body { margin: 0; background: var(--background); color: var(--text); }
 }
 .shell.narrow { max-width: 520px; }
 .shell.narrow .app-footer { display: none; }
+.shell.onboarding { max-width: 470px; }
+.onboarding-screen { padding: clamp(16px, 5vw, 24px); }
+.onboarding-screen h2 { color: var(--text); font-size: 1.5rem; letter-spacing: -.03em; padding: 0; }
+.onboarding-screen h2:focus { outline: none; }
+.onboarding-progress {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 0;
+  margin: 0 0 20px;
+  list-style: none;
+  color: var(--secondary);
+  font-size: .78rem;
+  font-weight: 600;
+}
+.onboarding-progress li { border-block-start: 3px solid var(--line); padding-block-start: 7px; }
+.onboarding-progress li[aria-current] { border-color: var(--accent); color: var(--link); }
+.onboarding-screen form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 8px;
+}
+.onboarding-screen form > :not(button) { grid-column: 1 / -1; }
+.onboarding-screen form > label { margin: 7px 0; }
+.onboarding-screen form > button { margin-top: 13px; }
+.onboarding-key-link { justify-self: start; padding: 5px 0; font-size: .83rem; }
+.onboarding-status { margin: 8px 0 0; font-size: .86rem; }
+.onboarding-status.onboarding-error { color: var(--error); }
+@media (prefers-reduced-motion: no-preference) {
+  .onboarding-screen { animation: screen-enter 180ms ease-out; }
+  @keyframes screen-enter {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+}
 .masthead { display: flex; gap: 12px; align-items: center; margin: 0 0 14px; padding: 4px 0; }
 .masthead .quiet { margin-inline-start: auto; }
 .mark { display: flex; gap: 4px; align-items: center; justify-content: center; width: 42px; height: 42px; border-radius: 14px; background: var(--accent); flex: none; }

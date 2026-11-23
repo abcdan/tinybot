@@ -22,6 +22,99 @@ async function mockMiniApp(context, respond, bridge) {
     });
 }
 
+test('first-run setup checks one key, searches tool models and opens the named Chief', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 620}, reducedMotion: 'reduce'});
+        const page = await context.newPage();
+        const profile = {user: '1', onboarding_required: true, requests: [], tasks: []};
+        const input = {display_name: 'Lina', chief_name: 'Atlas', key: 'sk-or-fixture'};
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return profile;
+            if (action === 'onboarding-models') {
+                assert.deepEqual(data, {key: input.key});
+                return {models: [
+                    {id: 'fixture/alpha', name: 'Alpha'},
+                    {id: 'fixture/chosen', name: 'Another model'},
+                ]};
+            }
+            if (action === 'complete-onboarding') {
+                assert.deepEqual(data, {...input, model: 'fixture/chosen'});
+                Object.assign(profile, {display_name: input.display_name, chief_name: input.chief_name, provider: 'openrouter', onboarding_required: false});
+                return {ok: true};
+            }
+            assert.fail(`Unexpected Mini App action ${action}`);
+        }, `window.Telegram = {WebApp: {
+            initData: 'fixture', ready() {}, openLink(url) { window.openedLink = url; },
+        }};`);
+        await page.goto('https://tinybot.test/');
+        await page.getByRole('heading', {name: 'Set up TinyBot'}).waitFor();
+        assert.equal(await page.getByRole('navigation', {name: 'TinyBot settings'}).count(), 0);
+        assert.equal(await page.locator('.onboarding-screen').evaluate(element => getComputedStyle(element).animationName), 'none');
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
+        await page.getByRole('link', {name: 'Get an OpenRouter API key'}).click();
+        assert.equal(await page.evaluate(() => window.openedLink), 'https://openrouter.ai/settings/keys');
+        await page.getByLabel('Your name', {exact: true}).fill(input.display_name);
+        await page.getByLabel('Agent name', {exact: true}).fill(input.chief_name);
+        await page.getByLabel('OpenRouter API key', {exact: true}).fill(input.key);
+        await page.getByRole('button', {name: 'Continue', exact: true}).click();
+        const modelHeading = page.getByRole('heading', {name: 'Choose a model'});
+        await modelHeading.waitFor();
+        assert.equal(await modelHeading.evaluate(heading => heading === document.activeElement), true);
+        assert.equal(await page.locator('input[type=password]').count(), 0);
+        await page.getByRole('searchbox', {name: 'Search models'}).fill('nothing');
+        await page.getByText('No models match your search.').waitFor();
+        assert.equal(await page.getByRole('button', {name: 'Finish setup'}).isDisabled(), true);
+        await page.getByRole('searchbox', {name: 'Search models'}).fill('another');
+        await page.getByRole('combobox', {name: 'Task model'}).selectOption('fixture/chosen');
+        await page.getByRole('button', {name: 'Finish setup'}).click();
+        await page.getByRole('heading', {name: 'Requests'}).waitFor();
+        assert.equal(await page.locator('#chief-label').textContent(), input.chief_name);
+        assert.equal(await page.locator('input[type=password]').count(), 0);
+        assert.deepEqual(await page.evaluate(() => [localStorage.length, sessionStorage.length]), [0, 0]);
+    } finally {
+        await browser.close();
+    }
+});
+
+test('cancelled setup clears the key even while catalog verification is pending', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext();
+        const page = await context.newPage();
+        await mockMiniApp(context, ({action}) => {
+            assert.equal(action, 'status');
+            return {user: '1', onboarding_required: true, requests: [], tasks: []};
+        });
+        let release;
+        const gated = new Promise(resolve => { release = resolve; });
+        await page.route('**/api/mini', async route => {
+            if (route.request().postDataJSON().action !== 'onboarding-models') return route.fallback();
+            await gated;
+            return route.fulfill({json: {models: [{id: 'fixture/alpha', name: 'Alpha'}]}});
+        });
+        await page.goto('https://tinybot.test/');
+        await page.getByLabel('Your name', {exact: true}).fill('Lina');
+        await page.getByLabel('Agent name', {exact: true}).fill('Atlas');
+        await page.getByLabel('OpenRouter API key', {exact: true}).fill('sk-or-fixture');
+        await page.getByRole('button', {name: 'Continue', exact: true}).click();
+        await page.getByText('Checking OpenRouter…', {exact: true}).waitFor();
+        await page.getByRole('button', {name: 'Cancel setup', exact: true}).click();
+        assert.equal(await page.evaluate(() => window.miniAppClosed), true);
+        assert.equal(await page.locator('input[type=password]').count(), 0);
+        const response = page.waitForResponse(response => response.request().postDataJSON()?.action === 'onboarding-models');
+        release();
+        await response;
+        await page.getByRole('button', {name: 'Start setup', exact: true}).click();
+        const key = page.getByLabel('OpenRouter API key', {exact: true});
+        await key.waitFor();
+        assert.equal(await key.inputValue(), '');
+        assert.equal(await page.getByRole('heading', {name: 'Choose a model'}).count(), 0);
+    } finally {
+        await browser.close();
+    }
+});
+
 test('MCP approvals show a plain explanation and can be revoked for the exact connector tool', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
     try {
