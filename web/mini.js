@@ -3,12 +3,15 @@ import { agentForm, agents } from './mini-agents.js';
 import { audit } from './mini-audit.js';
 import { connectors } from './mini-connectors.js';
 import { memories } from './mini-memory.js';
+import { onboarding } from './mini-onboarding.js';
 import { browser, schedules, model } from './mini-settings.js';
 
 export const telegram = window.Telegram?.WebApp;
 export const content = document.querySelector('#view');
 const notice = document.querySelector('#status');
 const refreshButton = document.querySelector('#refresh');
+const chiefLabel = document.querySelector('#chief-label');
+const shell = content.closest('main');
 const tabs = document.querySelector('#tabs');
 const browserTab = tabs.querySelector('[data-tab="browser"]');
 const sourceLink = document.querySelector('#source-link');
@@ -19,6 +22,7 @@ let state;
 let tab = 'home';
 let generation = 0;
 let opened = false;
+let disposeOnboarding;
 
 export function show(text, error = false) {
     notice.textContent = text;
@@ -40,31 +44,40 @@ export async function api(action, data = {}) {
     return result;
 }
 
-export async function refresh() {
+export async function refresh(animate = false) {
     const sequence = ++generation;
     try {
         const result = formId ? await api('get-form', {id: formId}) : await api('status');
         if (sequence !== generation) return;
-        tabs.hidden = Boolean(formId);
-        refreshButton.hidden = false;
-        footer.hidden = false;
+        const needsOnboarding = !formId && result.onboarding_required === true;
+        tabs.hidden = Boolean(formId) || needsOnboarding;
+        refreshButton.hidden = needsOnboarding;
+        footer.hidden = needsOnboarding;
         if (!opened) {
             opened = true;
             openFullscreen();
         }
         show('');
+        if (needsOnboarding) {
+            state = undefined;
+            openOnboarding(result);
+            return;
+        }
+        closeOnboarding();
         if (formId) {
             const item = card('Answer a few questions', 'Your answers go to your Chief.');
             item.append(generatedForm(result));
             content.replaceChildren(item);
         } else {
             state = result;
+            chiefLabel.textContent = state.chief_name || 'Your Chief';
             browserTab.hidden = state.browser_proxy == null;
             if (tab === 'browser' && browserTab.hidden) setTab('home');
-            else render();
+            else render(animate);
         }
     } catch (error) {
         if (sequence === generation) {
+            closeOnboarding();
             state = undefined;
             tabs.hidden = true;
             footer.hidden = true;
@@ -73,6 +86,36 @@ export async function refresh() {
             show(error.status === 403 ? openInTelegram : error.message, true);
         }
     }
+}
+
+function openOnboarding(profile) {
+    if (disposeOnboarding) return;
+    shell.classList.add('onboarding');
+    content.setAttribute('aria-label', 'TinyBot setup');
+    disposeOnboarding = onboarding(content, profile, {
+        api,
+        finish: () => refresh(true),
+        cancel: () => {
+            closeOnboarding();
+            const item = card('Set up TinyBot');
+            item.append(button('Start setup', () => refresh()));
+            content.replaceChildren(item);
+            telegram?.close?.();
+        },
+        openLink: url => {
+            if (!telegram?.openLink) return false;
+            telegram.openLink(url);
+            return true;
+        },
+    });
+}
+
+function closeOnboarding() {
+    if (!disposeOnboarding) return;
+    disposeOnboarding();
+    disposeOnboarding = undefined;
+    shell.classList.remove('onboarding');
+    content.setAttribute('aria-label', 'Settings');
 }
 
 function openFullscreen() {
@@ -96,18 +139,24 @@ function openFullscreen() {
 }
 
 function setTab(next) {
+    const changed = tab !== next;
     tab = next;
     for (const item of document.querySelectorAll('#tabs button')) {
         if (item.dataset.tab === tab) item.setAttribute('aria-current', 'page');
         else item.removeAttribute('aria-current');
     }
-    render();
+    render(changed);
 }
 
-function render() {
+function render(animate = false) {
     if (!state) return;
     content.replaceChildren();
     ({home, agents, memories, connectors, browser, schedules, audit, model})[tab](state);
+    if (animate && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        content.getAnimations?.().forEach(animation => animation.cancel());
+        content.animate?.([{opacity: 0, transform: 'translateY(6px)'}, {opacity: 1, transform: 'translateY(0)'}],
+            {duration: 180, easing: 'ease-out'});
+    }
 }
 
 function home() {
@@ -196,9 +245,13 @@ function syncColorScheme() {
 }
 
 if (formId) {
-    content.closest('main').classList.add('narrow');
+    shell.classList.add('narrow');
     content.setAttribute('aria-label', 'Form');
 }
+window.addEventListener('pagehide', closeOnboarding);
+window.addEventListener('pageshow', event => {
+    if (event.persisted && !state && !formId) void refresh();
+});
 refreshButton.addEventListener('click', () => refresh());
 sourceLink.addEventListener('click', event => {
     if (!telegram?.initData || !telegram.openLink || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
