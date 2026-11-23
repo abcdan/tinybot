@@ -25,6 +25,15 @@ impl Policy {
 }
 
 impl Mcp {
+    #[cfg(test)]
+    pub(crate) fn with_read_policy(mut self, endpoint: &str, tools: &[&str]) -> Self {
+        self.policy.0.insert(
+            endpoint.to_owned(),
+            tools.iter().map(|tool| (*tool).to_owned()).collect(),
+        );
+        self
+    }
+
     pub fn read_tools(&self, endpoint: &str) -> Vec<String> {
         self.policy
             .0

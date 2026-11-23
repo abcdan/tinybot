@@ -1,1 +1,4 @@
-{}
+{
+  "https://mcp.docblock.dev/": ["list_workspaces", "search_notes", "retrieve_context", "read_note", "list_notes", "note_history", "get_file"],
+  "https://docblock.dev/mcp": ["list_workspaces", "search_notes", "retrieve_context", "read_note", "list_notes", "note_history", "get_file"]
+}
