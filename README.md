@@ -235,8 +235,9 @@ the pinned upstream image (`linux/amd64`) and a private PostgreSQL database.
 
 Back up the database volume and keep the secrets across redeployments. Start
 the stack with access restricted to you while you register the first admin.
-In Dokploy, route the gateway hostname to `anythingmcp` on port `3000`, with
-path `/` and HTTPS. The first account becomes admin. Keep the route private
+In Dokploy, route the gateway hostname to `gateway` on port `8080`, with
+path `/` and HTTPS. The proxy connects the dashboard and OAuth callbacks
+to their upstream routes. The first account becomes admin. Keep the route private
 or IP-restricted until registration is complete. The dashboard lets you skip
 email verification and license setup on a self-hosted instance. The stack
 blocks the vendor mail relay and license hostnames. To enable verification
