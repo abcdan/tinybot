@@ -193,13 +193,13 @@ impl Telegram {
         if has_entities {
             data["entities"] = json!(reply.entities);
         }
-        let has_sources = !reply.sources.is_empty();
-        if has_sources {
+        let has_links = !reply.links.is_empty();
+        if has_links {
             let mut markup = keyboard
                 .clone()
                 .unwrap_or_else(|| json!({"inline_keyboard":[]}));
             if let Some(rows) = markup["inline_keyboard"].as_array_mut() {
-                rows.extend(reply.sources.iter().map(|source| json!([source])));
+                rows.extend(reply.links.iter().map(|link| json!([link])));
             }
             data["reply_markup"] = markup;
         }
@@ -211,7 +211,7 @@ impl Telegram {
                     .remove("entities");
                 return self.send_message(data).await;
             }
-            if has_sources
+            if has_links
                 && (description.contains("button_url_invalid")
                     || description.contains("button url"))
             {
