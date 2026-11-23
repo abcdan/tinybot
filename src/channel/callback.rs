@@ -4,6 +4,8 @@ use anyhow::Result;
 use serde::Deserialize;
 use sqlx::SqlitePool;
 
+pub(super) const MCP_APPROVAL_PREFIX: &str = "mcp-approval/";
+
 #[derive(Deserialize)]
 pub struct Query {
     pub id: String,
@@ -14,6 +16,7 @@ pub struct Query {
 
 #[derive(Deserialize)]
 struct Message {
+    message_id: Option<i64>,
     chat: Chat,
 }
 
@@ -28,11 +31,23 @@ impl Query {
 enum Selection<'a> {
     Reply(&'a str),
     Choice(&'a str, usize),
+    McpApproval(&'a str, store::McpApprovalDecision),
 }
 
 fn selection(data: &str) -> Option<Selection<'_>> {
     if data.len() > 64 {
         return None;
+    }
+    if let Some(action) = data.strip_prefix(MCP_APPROVAL_PREFIX) {
+        let (request, decision) = action.split_once('/')?;
+        uuid::Uuid::parse_str(request).ok()?;
+        let decision = match decision {
+            "once" => store::McpApprovalDecision::Once,
+            "always" => store::McpApprovalDecision::Always,
+            "deny" => store::McpApprovalDecision::Deny,
+            _ => return None,
+        };
+        return Some(Selection::McpApproval(request, decision));
     }
     let (action, remainder) = data.split_once('/')?;
     match action {
@@ -49,7 +64,20 @@ fn selection(data: &str) -> Option<Selection<'_>> {
     }
 }
 
-pub(super) async fn answer(db: &SqlitePool, query: &Query) -> Result<&'static str> {
+pub(super) struct Answer {
+    pub text: &'static str,
+    pub clear_keyboard: Option<(i64, i64)>,
+}
+
+const UNAVAILABLE: Answer = Answer {
+    text: "This option is no longer available.",
+    clear_keyboard: None,
+};
+
+pub(super) async fn answer(db: &SqlitePool, query: &Query) -> Result<Answer> {
+    if !query.is_private() {
+        return Ok(UNAVAILABLE);
+    }
     let user = query.from.id.to_string();
     let accepted = match query.data.as_deref().and_then(selection) {
         Some(Selection::Reply(token)) => store::redeem_reply(db, &user, token).await?,
@@ -58,12 +86,40 @@ pub(super) async fn answer(db: &SqlitePool, query: &Query) -> Result<&'static st
                 .await
                 .is_ok()
         }
+        Some(Selection::McpApproval(request, decision)) => {
+            let Some(message_id) = query
+                .message
+                .as_ref()
+                .and_then(|message| message.message_id)
+                .filter(|id| *id > 0)
+            else {
+                return Ok(UNAVAILABLE);
+            };
+            let text = match decision {
+                store::McpApprovalDecision::Once => "Approved for this call.",
+                store::McpApprovalDecision::Always => "Always approved for this tool.",
+                store::McpApprovalDecision::Deny => "MCP call denied.",
+            };
+            if store::respond_mcp(db, &user, request, decision)
+                .await
+                .is_err()
+            {
+                return Ok(UNAVAILABLE);
+            }
+            return Ok(Answer {
+                text,
+                clear_keyboard: Some((query.from.id, message_id)),
+            });
+        }
         None => false,
     };
     Ok(if accepted {
-        "Reply sent."
+        Answer {
+            text: "Reply sent.",
+            clear_keyboard: None,
+        }
     } else {
-        "This option is no longer available."
+        UNAVAILABLE
     })
 }
 
@@ -83,9 +139,24 @@ mod tests {
             selection(&format!("choice/{id}/2")),
             Some(Selection::Choice(request, 2)) if request == id
         ));
+        assert!(matches!(
+            selection(&format!("{MCP_APPROVAL_PREFIX}{id}/once")),
+            Some(Selection::McpApproval(request, store::McpApprovalDecision::Once)) if request == id
+        ));
+        assert!(matches!(
+            selection(&format!("{MCP_APPROVAL_PREFIX}{id}/always")),
+            Some(Selection::McpApproval(request, store::McpApprovalDecision::Always)) if request == id
+        ));
+        assert!(matches!(
+            selection(&format!("{MCP_APPROVAL_PREFIX}{id}/deny")),
+            Some(Selection::McpApproval(request, store::McpApprovalDecision::Deny)) if request == id
+        ));
         assert!(selection("/cancel").is_none());
         assert!(selection("reply/not-a-token").is_none());
         assert!(selection(&format!("choice/{id}/-1")).is_none());
+        assert!(selection(&format!("{MCP_APPROVAL_PREFIX}{id}/inherit")).is_none());
+        assert!(selection(&format!("{MCP_APPROVAL_PREFIX}{id}/always/extra")).is_none());
+        assert!(selection(&format!("{MCP_APPROVAL_PREFIX}bad-id/always")).is_none());
     }
 
     #[test]

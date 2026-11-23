@@ -77,6 +77,10 @@ pub trait ChannelAdapter: Send + Sync {
         Ok(())
     }
 
+    async fn clear_inline_keyboard(&self, _chat_id: i64, _message_id: i64) -> Result<()> {
+        Ok(())
+    }
+
     async fn send_card(
         &self,
         user: &str,
