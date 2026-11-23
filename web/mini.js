@@ -128,6 +128,14 @@ function home() {
         } else if (request.kind === 'form' || request.kind === 'elicitation') {
             if (request.kind === 'elicitation') item.append(node('p', 'Your answers go to your Chief.'));
             item.append(generatedForm(request), row(action('Decline', 'deny', {id: request.id}, 'Request declined.', true)));
+        } else if (details.mcp) {
+            const data = {id: request.id};
+            const choices = [action('Approve once', 'approve', data, 'Approved for this call.')];
+            if (details.rememberable) {
+                choices.push(action('Always approve', 'always-approve-mcp', data, 'Approval saved for this tool.', true));
+            }
+            choices.push(action('Deny', 'deny', data, 'Request denied.', true));
+            item.append(node('p', details.explanation), row(...choices));
         } else {
             if (details.preview || details.details) item.append(node('pre', details.preview || details.details));
             item.append(row(action('Approve', 'approve', {id: request.id}, 'Approved. TinyBot will continue.'),

@@ -110,6 +110,7 @@ async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<
         "mcp-token" => connectors::save_token(app, user, data).await?,
         "mcp-public" => connectors::save_public(app, user, data).await?,
         "disconnect-mcp" => connectors::disconnect(app, user, data).await?,
+        "revoke-mcp-approval" => connectors::revoke_approval(app, user, data).await?,
 
         "select-agent" => bail!("Message your Chief in Telegram. It can delegate to saved agents."),
         "select-task" => tasks::select_task(app, user, data).await?,
@@ -119,6 +120,7 @@ async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<
         "time-zone" => tasks::set_time_zone(app, user, data).await?,
         "cancel-schedule" => tasks::cancel_schedule(app, user, data).await?,
         "approve" | "deny" => tasks::respond(app, user, data, action == "approve").await?,
+        "always-approve-mcp" => tasks::always_approve_mcp(app, user, data).await?,
         _ => bail!("unknown Mini App action"),
     }
     Ok(json!({"ok":true}))

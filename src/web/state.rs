@@ -35,13 +35,7 @@ pub(super) async fn status(app: &App, user: &str) -> Result<Value> {
         .await?
         .into_iter()
         .map(|entry| {
-            let mut payload: Value = serde_json::from_str(&entry.payload).unwrap_or_default();
-            if entry.kind == "approve" {
-                let mut details = payload["call"]["args"].clone();
-                mask(&mut details);
-                payload["details"] = json!(clip(&details.to_string(), 3000));
-                payload.as_object_mut().map(|map| map.remove("call"));
-            }
+            let payload = request_content(&entry.kind, &entry.payload);
             json!({"id":entry.id,"kind":entry.kind,"content":payload,"expires":entry.expires})
         })
         .collect::<Vec<_>>();
@@ -50,6 +44,11 @@ pub(super) async fn status(app: &App, user: &str) -> Result<Value> {
             .bind(user)
             .fetch_all(&app.db)
             .await?;
+    let mcp_approvals: Vec<_> = store::list_mcp_approvals(&app.db, user)
+        .await?
+        .into_iter()
+        .map(|scope| json!({"connector":scope.connector,"tool":scope.tool}))
+        .collect();
     let members: Vec<(String, String)> = sqlx::query_as(
         "SELECT g.agent,g.member FROM grants g JOIN agents a ON a.id=g.agent WHERE a.owner=?",
     )
@@ -97,8 +96,39 @@ pub(super) async fn status(app: &App, user: &str) -> Result<Value> {
         json!({"user":user,"provider":profile.0,"model":profile.1,"active_task":profile.2,
         "agents":agents,"tasks":tasks,"requests":requests,"connectors":connectors,"members":members,"memory":memory,"grants":grants,
         "schedules":schedules,"time_zone":zone.name(),"openrouter_connected":connections.openrouter_key,
-        "codex_model":connections.codex_model,"read_tools":read_tools,"browser_proxy":browser_proxy}),
+        "codex_model":connections.codex_model,"read_tools":read_tools,"browser_proxy":browser_proxy,
+        "mcp_approvals":mcp_approvals}),
     )
+}
+
+fn request_content(kind: &str, raw: &str) -> Value {
+    let mut payload: Value = serde_json::from_str(raw).unwrap_or_default();
+    if kind != "approve" || !payload.is_object() {
+        return payload;
+    }
+    if payload["call"]["name"] == "call_mcp" {
+        let operation = payload["operation"].as_str().unwrap_or("MCP call");
+        let destination = payload["destination"].as_str();
+        let explanation = payload["explanation"]
+            .as_str()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map_or("Run this connector tool to continue the task.", |text| {
+                clip(text, 1200)
+            });
+        return json!({
+            "operation": operation,
+            "destination": destination,
+            "explanation": explanation,
+            "mcp": true,
+            "rememberable": serde_json::from_value::<store::McpApprovalScope>(payload["mcp_approval"].clone()).is_ok(),
+        });
+    }
+    let mut details = payload["call"]["args"].clone();
+    mask(&mut details);
+    payload["details"] = json!(clip(&details.to_string(), 3000));
+    let _ = payload.as_object_mut().and_then(|map| map.remove("call"));
+    payload
 }
 
 fn mask(value: &mut Value) {
@@ -125,5 +155,40 @@ fn mask(value: &mut Value) {
         }
         Value::Array(array) => array.iter_mut().for_each(mask),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_requests_expose_the_explanation_without_arguments() {
+        let payload = json!({
+            "operation":"MCP tool search_and_read", "destination":"https://notes.example",
+            "call":{"name":"call_mcp","args":{"tool":"search_and_read","arguments":{"query":"fixture-private-value"}}},
+            "explanation":"Search project notes for the latest release.",
+            "mcp_approval":{"connector":"notes","tool":"search_and_read","epoch":0}
+        });
+        let projected = request_content("approve", &payload.to_string());
+        assert_eq!(
+            projected["explanation"],
+            "Search project notes for the latest release."
+        );
+        assert_eq!(projected["mcp"], true);
+        assert_eq!(projected["rememberable"], true);
+        assert!(projected["call"].is_null() && projected["details"].is_null());
+        assert!(!projected.to_string().contains("fixture-private-value"));
+
+        let mut legacy = payload;
+        legacy.as_object_mut().unwrap().remove("explanation");
+        legacy.as_object_mut().unwrap().remove("mcp_approval");
+        let projected = request_content("approve", &legacy.to_string());
+        assert_eq!(
+            projected["explanation"],
+            "Run this connector tool to continue the task."
+        );
+        assert_eq!(projected["rememberable"], false);
+        assert!(!projected.to_string().contains("fixture-private-value"));
     }
 }
