@@ -979,6 +979,73 @@ test('audit log retries, pages by message, and reveals chronological calls and r
     }
 });
 
+test('audit JSON export downloads the whole run and offers a fallback for restricted clients', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 620}});
+        await context.addInitScript(() => {
+            Object.defineProperty(navigator, 'clipboard', {value: undefined});
+        });
+        const page = await context.newPage();
+        const started = 1795380000;
+        const run = {id: 42, message: 'Debug this run', started_at: started, status: 'completed', entry_count: 2};
+        const entries = [
+            {id: 1, at: started, kind: 'model_call', name: 'fixture/model', status: 'started', detail: null},
+            {id: 2, at: started + 1, kind: 'tool', name: 'search_web', status: 'failed', detail: {category: 'timeout'}},
+        ];
+        const snapshot = {version: 1, session: run, entries, usage: {total: {calls: 1, total_tokens: 42, cost_usd: 0.02}}};
+        const exports = [];
+        await mockMiniApp(context, ({action, data}) => {
+            switch (action) {
+                case 'status': return {user: '1', requests: [], tasks: [], time_zone: 'UTC'};
+                case 'audit-sessions': return {sessions: [run], next_before: null};
+                case 'audit-session':
+                    assert.deepEqual(data, {id: run.id});
+                    return {session: run, entries: entries.slice(0, 1), next_after: 1};
+                case 'audit-export':
+                    exports.push(data);
+                    return snapshot;
+                default: assert.fail('Unexpected Mini App action ' + action);
+            }
+        });
+        let failFirstExport = true;
+        await page.route('**/api/mini', route => {
+            if (failFirstExport && route.request().postDataJSON()?.action === 'audit-export') {
+                failFirstExport = false;
+                return route.fulfill({status: 503, json: {error: 'Could not export this session.'}});
+            }
+            return route.fallback();
+        });
+        await page.goto('https://tinybot.test/mini');
+        await page.getByRole('button', {name: 'Audit', exact: true}).click();
+        const summary = page.getByText(run.message, {exact: true});
+        await summary.click();
+        await page.getByText('fixture/model', {exact: true}).waitFor();
+        assert.equal(await page.locator('.audit-timeline > li').count(), 1);
+        const save = page.getByRole('button', {name: 'Export JSON', exact: true});
+        const copy = page.getByRole('button', {name: 'Copy JSON', exact: true});
+        await save.click();
+        await page.getByText('Could not export this session.', {exact: true}).waitFor();
+        assert.equal(await copy.isVisible(), false);
+
+        const pending = page.waitForEvent('download');
+        await save.click();
+        const download = await pending;
+        assert.equal(download.suggestedFilename(), 'tinybot-audit-42.json');
+        assert.deepEqual(JSON.parse(await readFile(await download.path(), 'utf8')), snapshot);
+        assert.deepEqual(exports, [{id: 42}]);
+        assert.equal(await page.locator('.audit-timeline > li').count(), 1);
+
+        await copy.click();
+        const output = page.getByRole('textbox', {name: 'Audit JSON', exact: true});
+        assert.deepEqual(JSON.parse(await output.inputValue()), snapshot);
+        assert.equal(await output.evaluate(element => element.selectionEnd - element.selectionStart), (await output.inputValue()).length);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
+    } finally {
+        await browser.close();
+    }
+});
+
 test('audit usage shows provider, model and run totals without treating missing reports as zero', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
     const context = await browser.newContext({locale: 'en-US', viewport: {width: 320, height: 720}, colorScheme: 'light'});

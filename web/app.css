@@ -231,6 +231,8 @@ summary.audit-entry-row::-webkit-details-marker { display: none; }
 .audit-run-body { border-top: 1px solid var(--line); padding: 12px var(--audit-inset) 14px; }
 .audit-run-usage { margin-bottom: 14px; }
 .audit-run-finished { margin: 4px 0 0; }
+.audit-export { margin-bottom: 12px; }
+.audit-export textarea { font-family: monospace; font-size: .82rem; }
 .audit-timeline { list-style: none; margin: 5px 0 0; padding: 0 0 0 13px; position: relative; }
 .audit-timeline:empty { display: none; }
 .audit-timeline::before { content: ''; position: absolute; inset: 23px auto 23px 3px; border-inline-start: 1px solid var(--line); }
