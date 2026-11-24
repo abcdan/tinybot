@@ -239,7 +239,7 @@ async fn ingest_message(
     }
     let profile: Option<(Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT t.id,u.provider FROM users u LEFT JOIN tasks t ON t.id=u.active_task
-         AND t.user=u.id AND t.chief_chat=1
+         AND t.user=u.id AND t.chief_chat=1 AND t.state NOT IN ('cancelled','completed','revoked')
          AND (t.shared_memory_pair IS NULL OR (t.state<>'revoked' AND EXISTS(
               SELECT 1 FROM available_shared_memory_pairs p WHERE p.id=t.shared_memory_pair AND (p.owner=t.user OR p.guest=t.user))))
          WHERE u.id=? AND u.suspended_at IS NULL",
@@ -254,7 +254,7 @@ async fn ingest_message(
     let mut active = active_task;
     if response.is_none() {
         match command {
-            "/start" | "/help" => response = Some("Message your Chief to start a task. Use /status to see its progress, /retry to retry a saved message when available, /new to start fresh, or /cancel to stop. Open /panel for tasks and schedules or /settings for account setup and forms. After checking an uncertain action, send /reconcile.".into()),
+            "/start" | "/help" => response = Some("Message your Chief to start a task. Use /status to see its progress, /done to mark it complete, /retry to retry a saved message when available, /new to start fresh, or /cancel to stop. Open /panel for tasks and schedules or /settings for account setup and forms. After checking an uncertain action, send /reconcile.".into()),
             "/panel" => response = Some("Manage TinyBot from this chat.".into()),
             "/settings" => response = Some("Open Settings & forms to manage your account and complete forms.".into()),
             "/invite" if user == operator => {
@@ -274,13 +274,31 @@ async fn ingest_message(
                 });
             }
             "/switch" => {
-                let found = super::select_task(&mut *tx, user, argument).await?;
+                let found = super::queue::select_task_in(&mut tx, user, argument).await?;
                 response = Some(if found {"Switched tasks."} else {"Task unavailable."}.into());
             }
             "/status" => {
                 super::task_views::status(&mut tx, user, active.as_deref(), telegram.reply.as_ref()).await?;
                 tx.commit().await?;
                 return Ok(());
+            }
+            "/done" => {
+                let target = super::task_views::resolve(&mut tx, user, active.as_deref(), telegram.reply.as_ref()).await?;
+                let task = match target {
+                    Some(target) => super::task_views::visible(&mut *tx, user, &target).await?,
+                    None => None,
+                };
+                response = Some(match task {
+                    Some(task) if task.state == "completed" => "Task is already complete.",
+                    Some(task) => {
+                        if super::task_views::complete_current(&mut tx, &task).await? {
+                            "Task marked complete."
+                        } else {
+                            "This task could not be marked complete. Use /status to check what needs attention."
+                        }
+                    }
+                    None => "No task is selected. Use /tasks to find a task.",
+                }.into());
             }
             "/retry" => {
                 if super::task_failures::retry_active(&mut tx,user,active.as_deref(),telegram.reply.as_ref()).await? {
@@ -377,11 +395,16 @@ async fn ingest_message(
             None
         };
         if let Some((task, excerpt, mail_notice, mail_preview)) = target {
-            if mail_notice && telegram.reaction {
+            if telegram.reaction
+                && (mail_notice
+                    || super::task_views::visible(&mut *tx, user, &task)
+                        .await?
+                        .is_some_and(|task| task.state == "completed"))
+            {
                 tx.commit().await?;
                 return Ok(());
             }
-            if !super::select_task(&mut *tx, user, &task).await? {
+            if !super::queue::select_task_in(&mut tx, user, &task).await? {
                 if !telegram.reaction {
                     sqlx::query("INSERT INTO outbox(user,body) VALUES(?,?)")
                     .bind(user)
@@ -491,7 +514,7 @@ pub(super) async fn enqueue_input(
 ) -> Result<bool> {
     let state: Option<String> = sqlx::query_scalar(
         "UPDATE tasks SET state=CASE WHEN state IN ('running','uncertain') THEN state ELSE ? END,
-        revision=revision+1,updated=? WHERE id=? AND user=? AND chief_chat=1 AND state NOT IN ('cancelled','revoked') AND
+        revision=revision+1,updated=? WHERE id=? AND user=? AND chief_chat=1 AND state NOT IN ('cancelled','completed','revoked') AND
         EXISTS(SELECT 1 FROM users u WHERE u.id=tasks.user AND u.suspended_at IS NULL) AND
         (shared_memory_pair IS NULL OR EXISTS(SELECT 1 FROM available_shared_memory_pairs p WHERE p.id=tasks.shared_memory_pair AND (p.owner=tasks.user OR p.guest=tasks.user))) AND
         (agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=tasks.agent AND

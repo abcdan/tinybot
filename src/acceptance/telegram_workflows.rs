@@ -258,6 +258,201 @@ async fn task_status_uses_reply_target_and_stale_stop_cannot_cancel_a_new_turn()
 }
 
 #[tokio::test]
+async fn finishing_a_quoted_task_keeps_the_next_message_with_its_selected_task() {
+    let db = fixture().await;
+    store::ingest_telegram(&db, "1", 1, "2", "Write the first summary", 11)
+        .await
+        .unwrap();
+    let first = store::claim(&db).await.unwrap().unwrap();
+    store::settle_reply(&db, &first, "First summary", &[])
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE outbox SET state='sent',telegram_message_id=12 WHERE task=? AND assistant_event_id IS NOT NULL",
+    )
+    .bind(&first.id)
+    .execute(&db)
+    .await
+    .unwrap();
+    message(&db, 2, "2", "/new A second task").await;
+    let second = store::claim(&db).await.unwrap().unwrap();
+
+    store::ingest_telegram_reply(
+        &db,
+        "1",
+        3,
+        "2",
+        "/done",
+        13,
+        Some(store::ReplyContext {
+            message_id: 12,
+            excerpt: None,
+            from_bot: true,
+        }),
+    )
+    .await
+    .unwrap();
+    let completed = task_for(&db, &first.id).await;
+    assert_eq!(completed.state, "completed");
+    assert_eq!(completed.revision, first.revision + 1);
+    assert_eq!(task_for(&db, &second.id).await.state, "running");
+    assert_eq!(
+        task_views::search_in_scope(&db, "2", "first summary", 0, true)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    store::ingest_telegram_reaction(&db, "1", 4, "2", 12, "👍")
+        .await
+        .unwrap();
+    assert_eq!(task_for(&db, &first.id).await.state, "completed");
+    message(&db, 5, "2", "Another detail for the second task").await;
+    assert_eq!(
+        store::history(&db, &second.id)
+            .await
+            .unwrap()
+            .last()
+            .unwrap()
+            .2,
+        "Another detail for the second task"
+    );
+    message(&db, 6, "2", "/done").await;
+    assert_eq!(task_for(&db, &second.id).await.state, "completed");
+    message(&db, 7, "2", "An unrelated task").await;
+    let unrelated = store::claim(&db).await.unwrap().unwrap();
+    assert_ne!(unrelated.id, first.id);
+    assert_ne!(unrelated.id, second.id);
+
+    assert!(store::select_task(&db, "2", &first.id).await.unwrap());
+    assert_eq!(task_for(&db, &first.id).await.state, "idle");
+    message(&db, 8, "2", "A follow-up for the first summary").await;
+    let reopened = task_for(&db, &first.id).await;
+    assert_eq!(reopened.state, "queued");
+    assert_eq!(store::history(&db, &first.id).await.unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn task_completion_checks_the_owner_revision_and_pending_actions() {
+    let db = fixture().await;
+    message(&db, 1, "1", "Review the report").await;
+    let task = store::claim(&db).await.unwrap().unwrap();
+    assert!(
+        !task_views::complete(&db, "2", &task.id, task.revision)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !task_views::complete(&db, "1", &task.id, task.revision - 1)
+            .await
+            .unwrap()
+    );
+    assert!(store::start_action(&db, &task, "in-flight").await.unwrap());
+    assert!(
+        !task_views::complete(&db, "1", &task.id, task.revision)
+            .await
+            .unwrap()
+    );
+    store::finish_action(&db, &task, "in-flight", "Action finished.", false)
+        .await
+        .unwrap();
+    store::pause(
+        &db,
+        &task,
+        "approve",
+        &json!({}),
+        "Review this action.",
+        None,
+        600,
+        "approval",
+    )
+    .await
+    .unwrap();
+    assert!(
+        task_views::complete(&db, "1", &task.id, task.revision)
+            .await
+            .unwrap()
+    );
+    assert_eq!(task_for(&db, &task.id).await.state, "completed");
+    let state: String = sqlx::query_scalar("SELECT state FROM pending WHERE id='approval'")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(state, "superseded");
+    let entry: String = sqlx::query_scalar(
+        "SELECT status FROM audit_entries WHERE kind='task' AND name='marked_complete'",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!(entry, "completed");
+}
+
+#[tokio::test]
+async fn signed_task_completion_moves_only_the_owners_task_into_history() {
+    use axum::{
+        body::{Body, to_bytes},
+        http::Request,
+    };
+    use tower_service::Service;
+
+    let db = fixture().await;
+    let app = Arc::new(app_with_model(&db, Arc::new(GroupChief)));
+    message(&db, 1, "1", "Review a signed report").await;
+    let task = store::claim(&db).await.unwrap().unwrap();
+    store::settle(&db, &task, "idle", None).await.unwrap();
+    let mut router = web::router(app.clone());
+    let request = |user, action, data| {
+        Request::post("/api/mini")
+            .header("origin", &app.origin)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({"init":signed_mini_init(&app,user),"action":action,"data":data}).to_string(),
+            ))
+            .unwrap()
+    };
+    let target = json!({"task":task.id,"revision":task.revision});
+    assert!(
+        router
+            .call(request(2, "complete-task", target.clone()))
+            .await
+            .unwrap()
+            .status()
+            .is_client_error()
+    );
+    assert_eq!(task_for(&db, &task.id).await.state, "idle");
+    assert!(
+        router
+            .call(request(1, "complete-task", target))
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    let response = router
+        .call(request(1, "status", Value::Null))
+        .await
+        .unwrap();
+    let state: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
+            .unwrap();
+    assert!(state["active_task"].is_null());
+    let response = router
+        .call(request(
+            1,
+            "search-tasks",
+            json!({"query":"","completed_only":true}),
+        ))
+        .await
+        .unwrap();
+    let archive: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
+            .unwrap();
+    assert_eq!(archive["items"][0]["id"], task.id);
+    assert_eq!(archive["items"][0]["state"], "completed");
+}
+
+#[tokio::test]
 async fn task_output_is_encrypted_and_immutable_and_recovers_uncertain_delivery() {
     let db = fixture().await;
     let app = app_with_model(&db, Arc::new(FileChief));

@@ -1,5 +1,8 @@
 use super::{ReplyContext, Task};
-use crate::{audit, security::now};
+use crate::{
+    audit,
+    security::{clip, now},
+};
 use anyhow::Result;
 use serde::Serialize;
 use sqlx::{Executor, Sqlite, SqlitePool, Transaction};
@@ -10,6 +13,13 @@ const VISIBLE: &str = "t.user=? AND t.chief_chat=1 AND t.state<>'revoked'
       WHERE p.id=t.shared_memory_pair AND (p.owner=t.user OR p.guest=t.user)))
     AND (t.agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=t.agent
       AND (a.owner=t.user OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=t.user))))";
+
+pub(crate) fn completable(state: &str) -> bool {
+    matches!(
+        state,
+        "idle" | "blocked" | "queued" | "running" | "waiting" | "setup"
+    )
+}
 
 #[derive(sqlx::FromRow, Serialize)]
 pub(crate) struct TaskView {
@@ -25,14 +35,26 @@ pub(crate) async fn search(
     query: &str,
     offset: i64,
 ) -> Result<Vec<TaskView>> {
+    search_in_scope(db, user, query, offset, false).await
+}
+
+pub(crate) async fn search_in_scope(
+    db: &SqlitePool,
+    user: &str,
+    query: &str,
+    offset: i64,
+    completed_only: bool,
+) -> Result<Vec<TaskView>> {
     Ok(sqlx::query_as(&format!(
         "SELECT t.id,t.title,t.state,t.revision FROM tasks t WHERE {VISIBLE}
+         AND (?=0 OR t.state='completed')
          AND (?='' OR instr(lower(t.title),lower(?))>0 OR instr(lower(t.summary),lower(?))>0
          OR EXISTS(SELECT 1 FROM events e WHERE e.task=t.id AND e.role IN ('user','assistant')
                   AND instr(lower(e.body),lower(?))>0))
          ORDER BY t.updated DESC,t.id LIMIT 21 OFFSET ?"
     ))
     .bind(user)
+    .bind(completed_only)
     .bind(query)
     .bind(query)
     .bind(query)
@@ -62,17 +84,29 @@ pub(super) async fn resolve(
     active: Option<&str>,
     reply: Option<&ReplyContext>,
 ) -> Result<Option<String>> {
-    Ok(if let Some(reply) = reply.filter(|reply| reply.from_bot) {
-        sqlx::query_scalar::<_, String>(
-            "SELECT task FROM outbox WHERE user=? AND telegram_message_id=?
+    Ok(match reply {
+        Some(reply) if reply.from_bot => {
+            sqlx::query_scalar::<_, String>(
+                "SELECT task FROM outbox WHERE user=? AND telegram_message_id=?
              AND state='sent' AND task IS NOT NULL",
-        )
-        .bind(user)
-        .bind(reply.message_id)
-        .fetch_optional(&mut **tx)
-        .await?
-    } else {
-        active.map(str::to_owned)
+            )
+            .bind(user)
+            .bind(reply.message_id)
+            .fetch_optional(&mut **tx)
+            .await?
+        }
+        Some(reply) => {
+            sqlx::query_scalar::<_, String>(
+                "SELECT e.task FROM events e JOIN tasks t ON t.id=e.task
+             WHERE t.user=? AND t.chief_chat=1 AND e.telegram_message_id=? AND e.role='user'
+             ORDER BY e.id DESC LIMIT 1",
+            )
+            .bind(user)
+            .bind(reply.message_id)
+            .fetch_optional(&mut **tx)
+            .await?
+        }
+        None => active.map(str::to_owned),
     })
 }
 
@@ -116,6 +150,7 @@ fn label(state: &str) -> &str {
         "setup" => "Waiting for model setup",
         "uncertain" => "Check the destination, then use /reconcile",
         "idle" => "Ready for a follow-up",
+        "completed" => "Completed",
         "blocked" => "Stopped with an error",
         "cancelled" => "Stopped",
         _ => "Unavailable",
@@ -152,6 +187,77 @@ pub(crate) async fn stop(db: &SqlitePool, user: &str, task: &str, revision: i64)
     Ok(result)
 }
 
+pub(crate) async fn complete(
+    db: &SqlitePool,
+    user: &str,
+    task: &str,
+    revision: i64,
+) -> Result<bool> {
+    complete_with_reply(db, user, task, revision, None).await
+}
+
+pub(crate) async fn complete_with_reply(
+    db: &SqlitePool,
+    user: &str,
+    task: &str,
+    revision: i64,
+    reply: Option<&str>,
+) -> Result<bool> {
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+    let Some(current) = visible(&mut *tx, user, task).await? else {
+        return Ok(false);
+    };
+    let changed = current.revision == revision && complete_current(&mut tx, &current).await?;
+    if changed && let Some(reply) = reply.map(str::trim).filter(|text| !text.is_empty()) {
+        let reply = clip(reply, 800);
+        let event = sqlx::query("INSERT INTO events(task,role,body) VALUES(?,'assistant',?)")
+            .bind(task)
+            .bind(reply)
+            .execute(&mut *tx)
+            .await?
+            .last_insert_rowid();
+        sqlx::query(
+            "INSERT INTO outbox(user,task,agent,body,assistant_event_id,reply_to_message_id)
+             VALUES(?,?,?,?,?,(SELECT telegram_message_id FROM events WHERE task=? AND role='user'
+                               ORDER BY id DESC LIMIT 1))",
+        )
+        .bind(user)
+        .bind(task)
+        .bind(&current.agent)
+        .bind(reply)
+        .bind(event)
+        .bind(task)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(changed)
+}
+
+pub(super) async fn complete_current(
+    tx: &mut Transaction<'_, Sqlite>,
+    task: &Task,
+) -> Result<bool> {
+    if !completable(&task.state)
+        || sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM pending WHERE task=? AND state='executing')",
+        )
+        .bind(&task.id)
+        .fetch_one(&mut **tx)
+        .await?
+    {
+        return Ok(false);
+    }
+    audit::task_completed(tx, task).await?;
+    sqlx::query("UPDATE tasks SET state='completed',revision=revision+1,updated=? WHERE id=?")
+        .bind(now())
+        .bind(&task.id)
+        .execute(&mut **tx)
+        .await?;
+    clear_requests_and_selection(tx, &task.user, &task.id).await?;
+    Ok(true)
+}
+
 pub(super) async fn stop_current(
     tx: &mut Transaction<'_, Sqlite>,
     user: &str,
@@ -186,6 +292,15 @@ pub(super) async fn stop_current(
         .execute(&mut **tx)
         .await?;
     audit::cancel(tx, task, user).await?;
+    clear_requests_and_selection(tx, user, task).await?;
+    Ok(true)
+}
+
+async fn clear_requests_and_selection(
+    tx: &mut Transaction<'_, Sqlite>,
+    user: &str,
+    task: &str,
+) -> Result<()> {
     sqlx::query(
         "UPDATE pending SET state='superseded' WHERE task=? AND state IN ('waiting','approved')",
     )
@@ -197,5 +312,5 @@ pub(super) async fn stop_current(
         .bind(task)
         .execute(&mut **tx)
         .await?;
-    Ok(true)
+    Ok(())
 }

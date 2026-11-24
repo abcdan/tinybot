@@ -51,6 +51,7 @@ enum Selection<'a> {
     AcceptInvite(&'a str),
     ContinueTask(&'a str),
     StopTask(&'a str, i64),
+    CompleteTask(&'a str, i64),
     Reply(&'a str),
     Choice(&'a str, usize),
     McpApproval(&'a str, store::McpApprovalDecision),
@@ -95,6 +96,11 @@ fn selection(data: &str) -> Option<Selection<'_>> {
             let (task, revision) = remainder.split_once('/')?;
             uuid::Uuid::parse_str(task).ok()?;
             Some(Selection::StopTask(task, revision.parse().ok()?))
+        }
+        "td" => {
+            let (task, revision) = remainder.split_once('/')?;
+            uuid::Uuid::parse_str(task).ok()?;
+            Some(Selection::CompleteTask(task, revision.parse().ok()?))
         }
         "reply" => {
             uuid::Uuid::parse_str(remainder).ok()?;
@@ -190,6 +196,18 @@ pub(super) async fn answer(db: &SqlitePool, query: &Query) -> Result<Answer> {
             }
             return Ok(Answer {
                 text: "Task stopped.",
+                clear_keyboard: message_id.map(|id| (query.from.id, id)),
+            });
+        }
+        Some(Selection::CompleteTask(task, revision)) => {
+            if !store::task_views::complete(db, &user, task, revision).await? {
+                return Ok(Answer {
+                    text: "Task could not be marked complete. Use /status to check it.",
+                    clear_keyboard: None,
+                });
+            }
+            return Ok(Answer {
+                text: "Task marked complete.",
                 clear_keyboard: message_id.map(|id| (query.from.id, id)),
             });
         }

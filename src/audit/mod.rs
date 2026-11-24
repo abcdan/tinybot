@@ -248,6 +248,31 @@ pub(crate) async fn cancel(tx: &mut Transaction<'_, Sqlite>, task: &str, user: &
     Ok(())
 }
 
+pub(crate) async fn task_completed(tx: &mut Transaction<'_, Sqlite>, task: &Task) -> Result<()> {
+    let at = now();
+    sqlx::query(
+        "INSERT INTO audit_entries(session,attempt,at,kind,name,status,detail)
+         SELECT s.id,s.attempts,?,'task','marked_complete','completed','null'
+         FROM tasks t JOIN audit_sessions s ON s.id=t.audit_session_id
+         WHERE t.id=? AND s.started_at>?",
+    )
+    .bind(at)
+    .bind(&task.id)
+    .bind(at - RETENTION)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "UPDATE audit_sessions SET status='completed',finished_at=?
+         WHERE status IN ('queued','setup','running','waiting','interrupted')
+           AND id=(SELECT audit_session_id FROM tasks WHERE id=?)",
+    )
+    .bind(at)
+    .bind(&task.id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 fn session_status(state: &str, failed: bool) -> &'static str {
     match state {
         "cancelled" | "revoked" => "cancelled",

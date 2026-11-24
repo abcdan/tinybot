@@ -196,10 +196,14 @@ impl ChannelAdapter for Telegram {
                 let state = fields.next().context("missing task state")?;
                 let mut buttons = Vec::new();
                 if !matches!(state, "cancelled" | "revoked") {
-                    buttons.push(json!({"text":"Continue","callback_data":format!("tc/{task}")}));
+                    let label = if state == "completed" { "Reopen" } else { "Continue" };
+                    buttons.push(json!({"text":label,"callback_data":format!("tc/{task}")}));
                 }
                 if matches!(state, "queued" | "running" | "waiting" | "setup") {
                     buttons.push(json!({"text":"Stop","callback_data":format!("ts/{task}/{revision}")}));
+                }
+                if store::task_views::completable(state) {
+                    buttons.push(json!({"text":"Done","callback_data":format!("td/{task}/{revision}")}));
                 }
                 if matches!(state, "waiting" | "setup") {
                     buttons.push(json!({"text":"Review","web_app":{"url":format!("{}/mini",self.origin)}}));

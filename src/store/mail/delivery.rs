@@ -1,7 +1,7 @@
 use super::{MailCredentials, Vault, id, now, open_config};
 use crate::{
     security::clip,
-    store::{Outbound, Task, ingress::enqueue_input, select_task},
+    store::{Outbound, Task, ingress::enqueue_input, queue::select_task_in},
 };
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -367,7 +367,7 @@ pub async fn reveal_mail(
     .fetch_optional(&mut *tx)
     .await?;
     let Some(task) = task else { return Ok(false) };
-    if !select_task(&mut *tx, user, &task).await? {
+    if !select_task_in(&mut tx, user, &task).await? {
         return Ok(false);
     }
     let preview = sqlx::query(
