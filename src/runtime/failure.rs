@@ -6,6 +6,9 @@ use anyhow::Result;
 use serde_json::Value;
 use sqlx::SqlitePool;
 
+const INPUT_LIMIT: &str = "The model could not fit the task context into its context window.";
+const OUTPUT_LIMIT: &str = "The model reached its response limit before it finished the answer.";
+
 pub(super) struct Failure {
     pub category: &'static str,
     pub message: &'static str,
@@ -13,95 +16,73 @@ pub(super) struct Failure {
 }
 
 pub(super) fn classify(error: &anyhow::Error) -> Failure {
-    let (category, message, retryable) = match provider_failure(error) {
+    let provider = provider_failure(error);
+    let (message, retryable) = match provider {
         Some(ProviderFailure::Setup) => (
-            "model_setup_required",
             "This task needs a model. Open Settings & forms → Model to choose one.",
             false,
         ),
         Some(ProviderFailure::OpenRouterKey) => (
-            "openrouter_key_required",
             "OpenRouter needs a working key. Open Settings & forms → Model to check or replace it.",
             false,
         ),
         Some(ProviderFailure::OpenRouterCredits) => (
-            "openrouter_credit_limit",
             "OpenRouter reported a credit or spending limit. Check your OpenRouter balance and key limits.",
             false,
         ),
         Some(ProviderFailure::CodexSignIn) => (
-            "codex_sign_in_required",
             "The ChatGPT connection needs to be reauthorized. Open Settings & forms → Model to reconnect it.",
             false,
         ),
         Some(ProviderFailure::CodexService) => (
-            "codex_service_unavailable",
             "The Codex service on this TinyBot server is unavailable. Choose another connected model or ask the bot operator to check it.",
             false,
         ),
         Some(ProviderFailure::BackupDisabled) => (
-            "backup_model_disabled",
             "The backup model is no longer enabled. Check your task and backup models in Settings & forms → Model.",
             false,
         ),
         Some(ProviderFailure::ModelUnavailable) => (
-            "model_not_available",
             "The selected model is unavailable for this connection. Choose another model in Settings & forms → Model.",
             false,
         ),
         Some(ProviderFailure::RateLimited) => (
-            "model_rate_limited",
             "The model provider reached a rate or usage limit. Give it some time before continuing.",
             true,
         ),
         Some(ProviderFailure::TimedOut) => (
-            "model_timed_out",
             "The model provider took too long to respond. Your task is saved.",
             true,
         ),
         Some(ProviderFailure::Temporary) => (
-            "model_temporarily_unavailable",
             "The model provider is temporarily unavailable. Your task is saved.",
             true,
         ),
         Some(ProviderFailure::Incomplete) => (
-            "model_reply_incomplete",
             "The model didn’t return a usable reply. If it keeps happening, choose another task model in Settings & forms.",
             true,
         ),
-        Some(ProviderFailure::InputLimit) => (
-            "model_context_limit",
-            "The model could not fit the task context into its context window.",
-            false,
-        ),
-        Some(ProviderFailure::OutputLimit) => (
-            "model_output_limit",
-            "The model reached its response limit before it finished the answer.",
-            false,
-        ),
+        Some(ProviderFailure::InputLimit) => (INPUT_LIMIT, false),
+        Some(ProviderFailure::OutputLimit) => (OUTPUT_LIMIT, false),
         Some(ProviderFailure::Refused) => (
-            "model_refused",
             "The model declined this request. Send a different request to continue.",
             false,
         ),
         Some(ProviderFailure::AccessDenied) => (
-            "model_access_denied",
             "The model provider blocked this request. Check the permissions for your connected account in Settings & forms → Model.",
             false,
         ),
         Some(ProviderFailure::Rejected) => (
-            "model_request_rejected",
             "The model provider rejected this request. Check that your selected model supports tools, or choose another model in Settings & forms.",
             false,
         ),
         None => (
-            "task_failed",
             "I paused this task after an internal error. Open Audit in Settings & forms to see where the run stopped.",
             false,
         ),
     };
     Failure {
-        category,
+        category: provider.map_or("task_failed", ProviderFailure::category),
         message,
         retryable,
     }
@@ -146,29 +127,49 @@ pub(super) async fn explain(db: &SqlitePool, task: &Task, failure: &Failure) -> 
                 _ => None,
             }
         });
-    let recovery_failed = match failure.category {
-        "model_output_limit" => Some((
-            "output_limit_recovery",
-            "I tried finishing with a shorter reply, and the recovery attempt also stopped.",
-        )),
-        "model_context_limit" => Some((
-            "input_limit_recovery",
-            "I retried with less context, and the recovery attempt also stopped.",
-        )),
-        _ => None,
-    }
-    .and_then(|(name, text)| {
+    let recovery =
         entries
             .iter()
-            .any(|(kind, entry, _, _)| kind == "model" && entry == name)
-            .then_some(text)
-    });
+            .find(|(kind, _, _, _)| kind == "model")
+            .map(|(_, name, _, raw)| {
+                let detail: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
+                let timed_out = detail["category"].as_str().unwrap_or(failure.category)
+                    == ProviderFailure::TimedOut.category();
+                let (cause, explanation) = match (name.as_str(), timed_out) {
+                    ("output_limit_recovery", true) => (
+                        OUTPUT_LIMIT,
+                        "My attempt to finish with a shorter reply timed out.",
+                    ),
+                    ("output_limit_recovery", false) => (
+                        OUTPUT_LIMIT,
+                        "I tried finishing with a shorter reply. That attempt also stopped.",
+                    ),
+                    (_, true) => (INPUT_LIMIT, "My retry with less context timed out."),
+                    (_, false) => (
+                        INPUT_LIMIT,
+                        "I retried with less context. That attempt also stopped.",
+                    ),
+                };
+                (cause, explanation, timed_out)
+            });
+    let (message, recovery_failed, outcome) = match recovery {
+        Some((cause, explanation, timed_out)) => {
+            let outcome = if timed_out && failure.category == ProviderFailure::TimedOut.category() {
+                Some("Your task is saved.")
+            } else {
+                (failure.message != cause).then_some(failure.message)
+            };
+            (cause, Some(explanation), outcome)
+        }
+        None => (failure.message, None, None),
+    };
 
     Ok([
-        Some(failure.message),
+        Some(message),
+        recovery_failed,
         last_step,
         tool_problem,
-        recovery_failed,
+        outcome,
     ]
     .into_iter()
     .flatten()
@@ -280,6 +281,67 @@ mod tests {
         assert_eq!(
             explain(&db, &foreign, &failure).await.unwrap(),
             failure.message
+        );
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_limit_retry_explains_both_failures() {
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!().run(&db).await.unwrap();
+        crate::store::seed(&db, "1").await.unwrap();
+        sqlx::query("UPDATE users SET provider='codex' WHERE id='1'")
+            .execute(&db)
+            .await
+            .unwrap();
+        crate::store::ingest(&db, "1", "test", 1, "1", "Short follow-up")
+            .await
+            .unwrap();
+        let task = crate::store::claim(&db).await.unwrap().unwrap();
+        let trace = crate::audit::Trace::start(&db, &task).await.unwrap();
+        crate::audit::scope(trace, async {
+            let _: Result<()> = crate::audit::model("agent_turn_stream", async {
+                Err(ProviderFailure::OutputLimit.into())
+            })
+            .await;
+            let _: Result<()> = crate::audit::model("output_limit_recovery", async {
+                Err(anyhow::Error::new(ProviderFailure::TimedOut)
+                    .context("private provider detail"))
+            })
+            .await;
+        })
+        .await;
+
+        let failed_steps: Vec<(String, String)> = sqlx::query_as(
+            "SELECT name, json_extract(detail,'$.category') FROM audit_entries
+             WHERE kind='model' AND status='failed' ORDER BY id",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            failed_steps,
+            [
+                (
+                    "agent_turn_stream".to_owned(),
+                    "model_output_limit".to_owned()
+                ),
+                (
+                    "output_limit_recovery".to_owned(),
+                    "model_timed_out".to_owned()
+                ),
+            ]
+        );
+        let failure = classify(&ProviderFailure::TimedOut.into());
+        let notice = explain(&db, &task, &failure).await.unwrap();
+        assert_eq!(
+            notice,
+            format!(
+                "{OUTPUT_LIMIT} My attempt to finish with a shorter reply timed out. Your task is saved."
+            )
         );
     }
 }

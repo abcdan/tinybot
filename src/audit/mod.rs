@@ -7,7 +7,7 @@ pub(crate) fn request_preview(text: &str) -> String {
     details::message_preview(text)
 }
 
-use crate::{runtime::Outcome, security::now, store::Task};
+use crate::{model::provider_failure, runtime::Outcome, security::now, store::Task};
 use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -150,6 +150,13 @@ pub(crate) async fn model<T>(
     record("model", name, "started", Value::Null).await;
     let start = Instant::now();
     let output = MODEL_SCOPE.scope(name, future).await;
+    let mut detail =
+        json!({"duration_ms": start.elapsed().as_millis() as u64, "usage_tracking":true});
+    if let Err(error) = &output
+        && let Some(failure) = provider_failure(error)
+    {
+        detail["category"] = json!(failure.category());
+    }
     record(
         "model",
         name,
@@ -158,7 +165,7 @@ pub(crate) async fn model<T>(
         } else {
             "failed"
         },
-        json!({"duration_ms": start.elapsed().as_millis() as u64, "usage_tracking":true}),
+        detail,
     )
     .await;
     output
