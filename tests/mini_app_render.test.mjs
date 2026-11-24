@@ -969,6 +969,101 @@ test('a generated focused form submits text and a selected option from Telegram'
     }
 });
 
+test('TinyBot settings form shows exact changes before explicit approval', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 640}});
+        const page = await context.newPage();
+        const calls = [];
+        const before = 'Previous Chief';
+        const proposed = '<b>New Chief</b>';
+        const draft = {
+            id: 'settings-form-1',
+            kind: 'settings-form',
+            content: {operation: 'Configure TinyBot', fields: [
+                {name: 'chief_name', label: 'Chief name', type: 'text', value: before, required: true},
+                {name: 'web_search', label: 'Web search', type: 'select',
+                    options: ['enabled', 'disabled'], value: 'enabled', required: true},
+            ]},
+        };
+        const review = {
+            id: 'settings-review-1',
+            kind: 'settings-approve',
+            content: {operation: 'Approve settings changes', changes: [
+                {label: 'Chief name', before, after: proposed},
+                {label: 'Web search', before: 'Enabled', after: 'Disabled'},
+            ]},
+        };
+        await mockMiniApp(context, ({action, data}) => {
+            calls.push({action, data});
+            if (action === 'get-form') return data.id === draft.id ? draft : review;
+            if (action === 'answer-settings-form') return review;
+            assert.equal(action, 'approve-settings');
+            return {ok: true};
+        });
+        await page.goto('https://tinybot.test/mini?form=settings-form-1');
+        const name = page.getByRole('textbox', {name: 'Chief name'});
+        const search = page.getByRole('combobox', {name: 'Web search'});
+        await name.waitFor();
+        assert.equal(await name.inputValue(), before);
+        assert.equal(await search.inputValue(), 'enabled');
+        assert.equal(await page.getByRole('button', {name: 'Approve changes'}).count(), 0);
+        await name.fill(proposed);
+        await search.selectOption('disabled');
+        await page.getByRole('button', {name: 'Review changes'}).click();
+        await page.getByRole('heading', {name: 'Approve settings changes'}).waitFor();
+        assert.deepEqual(calls, [
+            {action: 'get-form', data: {id: draft.id}},
+            {action: 'answer-settings-form', data: {
+                id: draft.id, values: {chief_name: proposed, web_search: 'disabled'},
+            }},
+        ]);
+        await page.getByText(before, {exact: true}).waitFor();
+        await page.getByText(proposed, {exact: true}).waitFor();
+        assert.equal(await page.locator('.settings-changes b').count(), 0);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
+        await page.reload();
+        await page.getByText(proposed, {exact: true}).waitFor();
+        assert.deepEqual(calls.at(-1), {action: 'get-form', data: {id: review.id}});
+        await page.getByRole('button', {name: 'Approve changes'}).click();
+        await page.getByRole('heading', {name: 'Settings updated.'}).waitFor();
+        assert.deepEqual(calls.at(-1), {action: 'approve-settings', data: {id: review.id}});
+    } finally {
+        await browser.close();
+    }
+});
+
+test('a pending TinyBot settings review can be declined from Requests', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext();
+        const page = await context.newPage();
+        let pending = true;
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return {
+                user: '1', provider: 'codex', tasks: [], requests: pending ? [{
+                    id: 'pending-settings',
+                    kind: 'settings-approve',
+                    content: {changes: [
+                        {label: 'Time zone', before: 'UTC', after: 'Europe/Amsterdam'},
+                    ]},
+                }] : [],
+            };
+            assert.equal(action, 'deny');
+            assert.deepEqual(data, {id: 'pending-settings'});
+            pending = false;
+            return {ok: true};
+        });
+        await page.goto('https://tinybot.test/mini');
+        await page.getByText('Europe/Amsterdam', {exact: true}).waitFor();
+        await page.getByRole('button', {name: 'Decline', exact: true}).click();
+        await page.getByText('Settings changes declined.', {exact: true}).waitFor();
+        await page.getByText('You’re all caught up.', {exact: true}).waitFor();
+    } finally {
+        await browser.close();
+    }
+});
+
 test('helpers can be managed while only Chief tasks can be selected in chat', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
     const context = await browser.newContext();
