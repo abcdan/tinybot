@@ -56,7 +56,7 @@ pub(super) async fn mini(
                     StatusCode::NOT_FOUND,
                     "This form is no longer available. Open a fresh form from TinyBot in Telegram.",
                 )
-            } else if action == "audit-session" {
+            } else if matches!(action, "audit-session" | "audit-export") {
                 ApiError(StatusCode::NOT_FOUND, "This audit session is no longer available.")
             } else if let Some(error) = error.downcast_ref::<browser::SettingsError>() {
                 error.response()
@@ -95,6 +95,7 @@ async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<
         "complete-onboarding" => onboarding::complete(app, user, data).await?,
         "audit-sessions" => return tasks::audit_sessions(app, user, data).await,
         "audit-session" => return tasks::audit_session(app, user, data).await,
+        "audit-export" => return tasks::audit_export(app, user, data).await,
         "save-browser-proxy" => browser::save(app, user, data)?,
         "remove-browser-proxy" => browser::reset(app, user)?,
         "disable-browser-proxy" => browser::direct(app, user)?,
