@@ -7,7 +7,11 @@ from chat.
 
 Under **Model**, choose a tool-capable OpenRouter model or pair an eligible ChatGPT
 account for Codex. A saved OpenRouter key also enables voice transcription and Mercury 3
-forms and acknowledgements when Codex handles tasks. [Connect a model](setup.md).
+forms when Codex handles tasks. [Connect a model](setup.md).
+
+With both providers connected, you can choose a **Backup model**. TinyBot can make one
+attempt with that provider after a temporary model failure before tool work starts.
+The chat shows when the task switches providers.
 
 ## Take a task beyond one message
 
@@ -16,13 +20,23 @@ forms and acknowledgements when Codex handles tasks. [Connect a model](setup.md)
 - Follow up in chat to steer the current task. Reply to an earlier bot message to pick
   up that conversation and give the Chief the quoted message as context.
 - Use `/new` to start fresh, `/tasks` to see recent tasks, `/switch ID` to select one
-  again, or `/cancel` to stop the current task. An action already underway can still
-  finish after cancellation.
+  again, or `/cancel` to stop the current task. Send `/status` to check the current
+  task, or reply with `/status` to check an earlier reply. Use **Continue**, **Stop**,
+  or **Review** when TinyBot shows that action. TinyBot keeps tracking an approved
+  action until it can confirm the outcome or asks you to check the destination.
+- TinyBot sends a short message to confirm it received your private task. If an
+  earlier task has to finish first, the message tells you it queued your request.
+  Use **Tasks** on the Mini App home screen to search titles, summaries, and retained
+  chat messages.
+- When a model fails, TinyBot explains what needs attention. If the request can
+  safely run again before any tools or actions started, tap **Retry** or send
+  `/retry` to retry the saved message. If TinyBot asks you to reconnect or choose
+  a model, you can send `/retry` after updating **Settings & forms → Model**.
 - If TinyBot says it lost confirmation of an external action, check the destination and
   send `/reconcile` to continue. TinyBot holds uncertain work so it can resume without
   automatically repeating the action.
-- For longer work, TinyBot can show a typing indicator, stream a draft as it forms, or
-  send a short acknowledgement using Mercury 3. Final replies can include suggested
+- For longer work, TinyBot can show a typing indicator or stream a draft as it forms.
+  Final replies can include suggested
   responses, source buttons, formatted comparisons, and cards. Telegram renders native
   widgets where available, with formatted messages and buttons as a fallback. Send an
   emoji as a reply in private chat. Native reaction updates depend on Telegram’s Bot API
@@ -75,7 +89,10 @@ search settings.
 
 Reply directly to an earlier upload to use it again in the same task. TinyBot encrypts
 stored attachments. The Chief can also use offline Python on its task files for
-calculations and text processing.
+calculations and text processing. Ask for a CSV, Markdown, JSON, or text file to
+receive a Telegram document up to 32 KiB. Tap **Listen** on a supported reply to hear
+it as a voice message. TinyBot sends the reply text to OpenRouter using your saved
+key for speech synthesis.
 
 ## Collect details and review actions
 
@@ -90,15 +107,21 @@ and ask you to review a masked preview before submitting. It submits to the same
 over HTTPS. The website form values go to TinyBot over HTTPS and stay in memory until
 use or expiry. Use provider or connector settings for API keys and credentials.
 
-## Run something later
+## Run a task again
 
 > Every Monday at 9 am, remind me to review the weekly plan.
 
 The Chief saves your instruction and opens a new task when it’s due. The result arrives
-in Telegram, and you can reopen the run with `/tasks` and `/switch ID`. Use
-**Schedules** to set your time zone and remove upcoming runs. Five-field cron schedules
-use the time zone selected when they were created. After downtime, recurring schedules
-advance from the current time.
+in Telegram. Open **Schedules** to edit instructions and timing, pause or resume a
+schedule, start a run with **Run now**, and reopen a past run from **Run history**.
+Recurring schedules use the time zone selected when they were created. After downtime,
+they advance from the current time.
+
+Ask the Chief to save a repeatable procedure, then review its steps before saving.
+Choose whether each step runs with the Chief or one of your own helpers. A run uses
+the steps saved when it started and asks for approvals through the normal task flow.
+Start with **Inbox briefing** for messages in folders enabled for automatic handling,
+or edit **Weekly research digest** to follow a topic using public sources.
 
 ## Remember a preference
 
@@ -112,6 +135,25 @@ notes you publish through **Sharing**.
 With a saved OpenRouter key, Jev can pick relevant notes, detect lasting preferences,
 and retire earlier automatic notes when you correct them. Explicitly saved notes stay
 until you remove them.
+
+## Invite someone
+
+The bot operator can send `/invite` to get a shareable Telegram link or create an
+invitation under **Invites** to copy a sign-up command. Each invitation works once
+and expires after 24 hours. The guest accepts in Telegram and sets up their own
+Chief, model, and connections. The operator can revoke unused invitations, suspend
+guest access, or restore it.
+
+Before accepting, guests see what the operator can view. **Invites** shows setup
+status, the last active day, counts of runs started and completed, and provider-reported
+tokens and costs for the past seven days. Conversations, notes, connections, and
+individual audit runs stay private. Usage is available for guests who accepted
+an invitation with this disclosure.
+
+The operator can offer a guest a shared memory space. Once both people have joined,
+each can publish and remove their own notes under **Memory → Shared memory**.
+Use **Start shared chat** to work with those notes in a dedicated conversation.
+Either person can leave the space.
 
 ## Connect an external service
 
@@ -131,6 +173,20 @@ the connection clears its saved approvals. With an OpenRouter key, Jev can check
 a call uses an operator-verified tool for a read. Writes and ambiguous calls require
 approval unless you have explicitly saved approval for that tool.
 
+## Write and share notes in Docblock
+
+> Save these meeting decisions as a Markdown note in my project workspace.
+
+Open **Connections → Connect Docblock**, sign in, and choose the workspaces and
+permissions to grant. A task waiting for the connection can continue after sign-in.
+Ask the Chief to find, read, write, or append to a note, then review changes that
+need approval. TinyBot returns a link that follows the note’s workspace permissions.
+
+Ask for a public link when someone outside the workspace needs access. Review the
+exact note and expiry before approving publication. The default expiry is seven days.
+Anyone with the link can read the current note until the link expires or is revoked.
+Use **View public note links** on the Docblock connection to manage links.
+
 ## Follow up on email
 
 > Draft a reply saying Friday afternoon works.
@@ -143,8 +199,21 @@ can enable automatic handling for a folder to summarize incoming mail, ask you a
 question, or prepare a draft.
 
 Every SMTP send asks for one-time approval. Review the sender, recipients, subject, and
-body, then tap **Approve once** or **Deny**. TinyBot reports when the mail server
+body. Choose **Edit email draft** in the Mini App to save changes for a fresh review,
+then tap **Approve once** or **Deny**. TinyBot reports when the mail server
 accepts the message for delivery. It encrypts mail credentials and retrieved mail.
+
+## Use TinyBot in a Telegram group
+
+In the group pilot, an administrator with a TinyBot account sends
+`/tinybot_enable@BotName` in the group. The bot operator sends
+`/approve_group CHAT_ID` in private chat after receiving the request. To disable
+group access, the operator sends `/disable_group CHAT_ID` in private chat.
+
+Members with a configured TinyBot model can send `/ask@BotName` followed by a drafting
+or public research request. Reply to your own task’s result in the same group and
+topic to continue it. Results are visible in that group. Personal memories, mail,
+and connections are available in private chat only.
 
 ## See how a run unfolded
 

@@ -76,7 +76,7 @@ hostname a public DNS record before opening its dashboard.
 4. Send `/invite` to invite another user. For access to a specific read-only
    helper, create an invitation in that helper's **Sharing** settings.
 
-The OpenRouter key also enables Mercury 3 for forms and acknowledgements
+The OpenRouter key also enables Mercury 3 for forms
 when Codex is the active task model. **Model → OpenRouter tools** controls the
 hosted web search, web fetch, date and time, and model search tools.
 
