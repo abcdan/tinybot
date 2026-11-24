@@ -11,6 +11,7 @@ mod widget;
 
 pub use card::Card;
 pub use dispatch::{listen, outbox};
+pub(crate) use formatting::telegram_reply_parts;
 pub use telegram::Telegram;
 use telegram::{Chat, User};
 

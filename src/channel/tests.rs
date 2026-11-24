@@ -14,6 +14,8 @@ use tokio::{net::TcpListener, sync::Mutex};
 
 type Mock = Arc<Mutex<(Vec<(String, Value)>, VecDeque<Value>)>>;
 
+mod reply_parts;
+
 #[tokio::test]
 async fn accepted_telegram_input_only_schedules_delayed_progress() {
     let db = sqlx::sqlite::SqlitePoolOptions::new()

@@ -337,6 +337,9 @@ pub async fn claim_outbox(db: &SqlitePool) -> Result<Option<Outbound>> {
     Ok(sqlx::query_as(
         "UPDATE outbox SET state='sending' WHERE id=(SELECT o.id FROM outbox o WHERE o.state='queued'
         AND o.retry_at<=? AND (o.button IS NULL OR substr(o.button,1,?)<>?)
+        AND (o.assistant_event_id IS NULL OR NOT EXISTS(
+            SELECT 1 FROM outbox prior WHERE prior.assistant_event_id=o.assistant_event_id
+            AND prior.id<o.id AND prior.state IN ('queued','sending')))
         ORDER BY o.id LIMIT 1) RETURNING id,user,agent,task,body,button,widget,reaction_event,reply_to_message_id",
     )
     .bind(now())

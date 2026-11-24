@@ -197,30 +197,38 @@ pub(super) async fn handle_callback(
 pub async fn outbox(app: std::sync::Arc<crate::App>, adapter: std::sync::Arc<dyn ChannelAdapter>) {
     let db = &app.db;
     loop {
-        let result=async {
-            let Some(item)=store::claim_outbox(db).await? else {return Ok(false);};
-            let dispatch=if !store::can_deliver(db,&item).await? {
-                Dispatch::Failed
-            } else {
-                let sent = send_item(&app, &*adapter, &item).await;
-                match sent {
-                    Ok(MessageDelivery::Sent(id))=>Dispatch::Sent(id),
-                    Ok(MessageDelivery::Retry(delay))=>Dispatch::Retry(now()+delay),
-                    Err(error) if error.is::<super::UploadUncertain>()=>Dispatch::Uncertain,
-                    Err(_)=>Dispatch::Failed
-                }
-            };
-            let (state,retry,message_id)=match dispatch {Dispatch::Sent(message_id)=>("sent",0,message_id), Dispatch::Retry(retry)=>("queued",retry,None), Dispatch::Failed=>("failed",0,None), Dispatch::Uncertain=>("uncertain",0,None)};
-            sqlx::query("UPDATE outbox SET state=?,retry_at=?,body=CASE WHEN ?='queued' THEN body ELSE '' END,
+        let Ok(Some(item)) = store::claim_outbox(db).await else {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            continue;
+        };
+        let dispatch = match store::can_deliver(db, &item).await {
+            Ok(true) => match send_item(&app, &*adapter, &item).await {
+                Ok(MessageDelivery::Sent(id)) => Dispatch::Sent(id),
+                Ok(MessageDelivery::Retry(delay)) => Dispatch::Retry(now() + delay),
+                Err(error) if error.is::<super::UploadUncertain>() => Dispatch::Uncertain,
+                Err(_) => Dispatch::Failed,
+            },
+            Ok(false) => Dispatch::Failed,
+            Err(_) => Dispatch::Retry(now() + 2),
+        };
+        let (state, retry, message_id) = match dispatch {
+            Dispatch::Sent(message_id) => ("sent", 0, message_id),
+            Dispatch::Retry(retry) => ("queued", retry, None),
+            Dispatch::Failed => ("failed", 0, None),
+            Dispatch::Uncertain => ("uncertain", 0, None),
+        };
+        // A database error here must only retry saving the outcome, never the send itself.
+        loop {
+            let saved = sqlx::query("UPDATE outbox SET state=?,retry_at=?,body=CASE WHEN ?='queued' THEN body ELSE '' END,
                 button=CASE WHEN ?='queued' THEN button ELSE NULL END,
                 widget=CASE WHEN ?='queued' THEN widget ELSE NULL END,
                 telegram_message_id=CASE WHEN NOT EXISTS(SELECT 1 FROM telegram_group_tasks g WHERE g.task=outbox.task) THEN ? END,
                 telegram_group_message_id=CASE WHEN EXISTS(SELECT 1 FROM telegram_group_tasks g WHERE g.task=outbox.task) THEN ? END
-                WHERE id=?")
-                .bind(state).bind(retry).bind(state).bind(state).bind(state).bind(message_id).bind(message_id).bind(item.id).execute(db).await?;
-            Ok::<_,anyhow::Error>(true)
-        }.await;
-        if !matches!(result, Ok(true)) {
+                WHERE id=? AND state='sending'")
+                .bind(state).bind(retry).bind(state).bind(state).bind(state).bind(message_id).bind(message_id).bind(item.id).execute(db).await;
+            if saved.is_ok() {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
@@ -325,7 +333,9 @@ async fn send_item(
         && sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM outbox o JOIN users u ON u.id=o.user JOIN tasks t ON t.id=o.task
                            WHERE o.id=? AND o.assistant_event_id IS NOT NULL AND u.openrouter_key IS NOT NULL
-                             AND u.suspended_at IS NULL AND t.shared_memory_pair IS NULL)",
+                             AND u.suspended_at IS NULL AND t.shared_memory_pair IS NULL
+                             AND NOT EXISTS(SELECT 1 FROM outbox later
+                                WHERE later.assistant_event_id=o.assistant_event_id AND later.id>o.id))",
         )
         .bind(item.id)
         .fetch_one(&app.db)

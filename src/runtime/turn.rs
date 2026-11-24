@@ -7,8 +7,8 @@ use super::mcp_approval;
 use super::review::{Verdict, review};
 use super::suggestions::valid_suggestions;
 use super::{
-    Call, ENGINE, MAX_REPLY_BYTES, Outcome, Risk, Step, ToolContext, connector_context,
-    descriptions, tool_definitions,
+    Call, ENGINE, Outcome, Risk, Step, ToolContext, connector_context, descriptions,
+    tool_definitions,
 };
 use crate::{
     App, audit,
@@ -395,13 +395,7 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                     Some(feedback) => Some(feedback.delivery.lock().await),
                     None => None,
                 };
-                return store::settle_reply(
-                    &app.db,
-                    task,
-                    clip(&text, MAX_REPLY_BYTES),
-                    &suggestions,
-                )
-                .await;
+                return store::settle_reply(&app.db, task, &text, &suggestions).await;
             }
             Step::Tool { name, mut args } => {
                 mcp_approval::prepare_docblock_call(&ctx, &name, &mut args);
@@ -685,7 +679,7 @@ async fn finish_from_context(
     if !store::current(&app.db, task).await? {
         return store::settle(&app.db, task, "idle", None).await;
     }
-    store::settle_reply(&app.db, task, clip(&text, MAX_REPLY_BYTES), &[]).await
+    store::settle_reply(&app.db, task, &text, &[]).await
 }
 
 async fn bind_shared_delegation(db: &sqlx::SqlitePool, task: &Task, args: &Value) -> Result<bool> {

@@ -1,10 +1,106 @@
 use crate::security::clip;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use serde::Serialize;
-use std::cmp::Reverse;
+use std::{borrow::Cow, cmp::Reverse};
 use url::{Host, Url};
 
 const MAX_MESSAGE_UNITS: usize = 4096;
+
+fn bounded_prefix(body: &str, max_units: usize) -> &str {
+    if body.len() <= max_units {
+        return body;
+    }
+    let mut units = 0;
+    for (index, character) in body.char_indices() {
+        units += character.len_utf16();
+        if units > max_units {
+            return &body[..index];
+        }
+    }
+    body
+}
+
+pub(crate) fn telegram_reply_parts(body: &str) -> Vec<Cow<'_, str>> {
+    if bounded_prefix(body, MAX_MESSAGE_UNITS).len() == body.len() {
+        return vec![Cow::Borrowed(body)];
+    }
+    let mut depth = 0;
+    let mut fences = Vec::new();
+    let block_ends: Vec<_> = Parser::new_ext(body, Options::ENABLE_TABLES)
+        .into_offset_iter()
+        .filter_map(|(event, range)| match event {
+            Event::Start(tag) => {
+                if depth == 0
+                    && matches!(tag, Tag::CodeBlock(CodeBlockKind::Fenced(_)))
+                    && let Some((opening, _)) = body[range.clone()].split_once('\n')
+                    && opening.len() <= 128
+                {
+                    let content_start = range.start + opening.len() + 1;
+                    fences.push((content_start..range.end, &body[range.start..content_start]));
+                }
+                depth += 1;
+                None
+            }
+            Event::End(_) => {
+                depth -= 1;
+                (depth == 0).then_some(range.end)
+            }
+            Event::Rule if depth == 0 => Some(range.end),
+            _ => None,
+        })
+        .collect();
+    let mut parts = Vec::new();
+    let mut offset = 0;
+    while offset < body.len() {
+        let remaining = &body[offset..];
+        let reopening = fences
+            .iter()
+            .find(|(content, _)| content.contains(&offset))
+            .map(|(_, opening)| *opening);
+        let capacity =
+            MAX_MESSAGE_UNITS - reopening.map_or(0, |opening| opening.encode_utf16().count());
+        let prefix = bounded_prefix(remaining, capacity);
+        let mut end = prefix.len();
+        if end < remaining.len() {
+            let min_break = end / 2;
+            let block_limit = block_ends.partition_point(|&boundary| boundary <= offset + end);
+            let block = block_ends[..block_limit]
+                .last()
+                .copied()
+                .filter(|&boundary| boundary >= offset + min_break)
+                .map(|boundary| boundary - offset);
+            end = block
+                .or_else(|| {
+                    prefix
+                        .rfind('\n')
+                        .map(|newline| newline + 1)
+                        .filter(|&end| end >= min_break)
+                })
+                .or_else(|| {
+                    prefix
+                        .char_indices()
+                        .rev()
+                        .take_while(|&(index, _)| index >= min_break)
+                        .find_map(|(index, character)| {
+                            character
+                                .is_whitespace()
+                                .then_some(index + character.len_utf8())
+                        })
+                })
+                .unwrap_or(end);
+        }
+        let part = &remaining[..end];
+        if !part.trim().is_empty() {
+            if let Some(opening) = reopening {
+                parts.push(Cow::Owned(format!("{opening}{part}")));
+            } else {
+                parts.push(Cow::Borrowed(part));
+            }
+        }
+        offset += end;
+    }
+    parts
+}
 
 #[derive(Serialize)]
 pub(super) struct Entity {
@@ -36,31 +132,12 @@ pub(super) fn render(body: &str) -> Reply {
     if output.has_table && output.text.encode_utf16().count() > MAX_MESSAGE_UNITS {
         output = Renderer::markdown(&markdown, false);
     }
-    let oversized = output.text.encode_utf16().count() > MAX_MESSAGE_UNITS;
-    if output.text.trim().is_empty() || (!output.has_table && oversized) {
+    if output.text.trim().is_empty() || output.text.encode_utf16().count() > MAX_MESSAGE_UNITS {
         return Reply {
-            text: clip(body, 3900).to_owned(),
+            text: bounded_prefix(body, MAX_MESSAGE_UNITS).to_owned(),
             entities: Vec::new(),
             links: Vec::new(),
         };
-    }
-    if oversized {
-        // Keep the rendered table readable even when its compact form is too long.
-        let mut units = 0;
-        let end = output
-            .text
-            .char_indices()
-            .find_map(|(index, character)| {
-                units += character.len_utf16();
-                (units >= MAX_MESSAGE_UNITS).then_some(index)
-            })
-            .expect("text exceeds Telegram's limit");
-        output.text.truncate(end);
-        let units = output.text.encode_utf16().count();
-        output
-            .entities
-            .retain(|entity| entity.offset + entity.length <= units);
-        output.text.push('…');
     }
     // Telegram forbids overlapping styles on code entities and nested block quotes.
     let code: Vec<_> = output
@@ -90,7 +167,7 @@ pub(super) fn render(body: &str) -> Reply {
 }
 
 pub(super) fn normalized_markdown(body: &str) -> String {
-    let body = clip(body, 3900);
+    let body = bounded_prefix(body, MAX_MESSAGE_UNITS);
     if let Some(start) = source_start(body) {
         let prefix = body[..start].trim_end();
         let separator = if prefix.is_empty() { "" } else { "\n\n" };
@@ -594,6 +671,27 @@ mod tests {
         assert_eq!(reply.entities[0].kind, "pre");
         assert_eq!(reply.entities[0].language.as_deref(), Some("rust"));
         assert!(reply.links.is_empty());
+    }
+
+    #[test]
+    fn continues_long_fenced_code_as_code_in_each_telegram_message() {
+        let line = "# Attribute **literal** [example](https://example.org/)\n";
+        let code = line.repeat(220);
+        let body = format!("Example:\n\n```rust\n{code}```\n\nDone.");
+        let parts = telegram_reply_parts(&body);
+        let replies: Vec<_> = parts.iter().map(|part| render(part)).collect();
+        assert!(replies.len() > 2);
+        let mut rendered = String::new();
+        for reply in replies {
+            assert!(reply.text.encode_utf16().count() <= MAX_MESSAGE_UNITS);
+            assert!(reply.entities.iter().any(|entity| {
+                entity.kind == "pre" && entity.language.as_deref() == Some("rust")
+            }));
+            assert!(reply.links.is_empty());
+            rendered.push_str(&reply.text);
+        }
+        assert!(rendered.contains(&code));
+        assert!(rendered.ends_with("Done."));
     }
 
     #[test]
