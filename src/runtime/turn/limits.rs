@@ -7,7 +7,6 @@ use crate::{
 };
 use anyhow::{Result, ensure};
 use serde_json::{Value, json};
-use std::{borrow::Cow, time::Duration};
 
 const SHORTER_TURN: &str = concat!(
     "The last generation reached a model limit. Continue the user's original task automatically. ",
@@ -57,37 +56,15 @@ impl Limit {
         instructions: &str,
         input: &Value,
         tools: &[ToolDefinition],
+        feedback: Option<&Feedback>,
     ) -> Result<Option<Step>> {
-        let request = self.replan_input(input);
-        match self.complete(model, instructions, &request, tools).await {
-            Ok(step) => Ok(Some(step)),
-            Err(error)
-                if Self::from_error(&error).is_some()
-                    || provider_failure(&error) == Some(ProviderFailure::Incomplete) =>
-            {
-                Ok(None)
-            }
-            Err(error) => Err(error),
-        }
-    }
-
-    pub(super) fn replan_input(self, input: &Value) -> Cow<'_, Value> {
-        match self {
-            Self::Input => {
-                let mut request = compact(input);
-                for field in [
-                    "tools",
-                    "connectors",
-                    "saved_agents",
-                    "mail_accounts",
-                    "shared_helper_scope",
-                    "shared_memory_chat",
-                ] {
-                    request[field] = input[field].clone();
-                }
-                Cow::Owned(request)
-            }
-            Self::Output => Cow::Borrowed(input),
+        let request = replan_input(input);
+        match self
+            .complete(model, instructions, &request, tools, feedback)
+            .await
+        {
+            Err(error) if provider_failure(&error).is_some_and(try_smaller_reply) => Ok(None),
+            result => result,
         }
     }
 
@@ -104,7 +81,7 @@ impl Limit {
             return store::settle(&app.db, task, "idle", None).await;
         }
         let response = self
-            .complete(model, FINISH_WITHOUT_TOOLS, &compact(input), &[])
+            .complete(model, FINISH_WITHOUT_TOOLS, &compact(input), &[], feedback)
             .await;
         let _delivery = match feedback {
             Some(feedback) => Some(feedback.delivery.lock().await),
@@ -114,7 +91,7 @@ impl Limit {
             return store::settle(&app.db, task, "idle", None).await;
         }
         match response {
-            Ok(Step::Reply { text, .. }) => {
+            Ok(Some(Step::Reply { text, .. })) => {
                 if input["routine"]["current"].is_null() {
                     store::settle_reply(&app.db, task, &text, &[]).await
                 } else {
@@ -133,6 +110,7 @@ impl Limit {
             {
                 Err(error)
             }
+            Ok(None) => store::settle(&app.db, task, "idle", None).await,
             _ => Err(original),
         }
     }
@@ -143,23 +121,57 @@ impl Limit {
         instructions: &str,
         input: &Value,
         tools: &[ToolDefinition],
-    ) -> Result<Step> {
-        audit::model(self.audit_name(), async {
-            let response = tokio::time::timeout(
-                Duration::from_secs(20),
-                model.complete_turn(instructions, &input.to_string(), tools, None),
-            )
-            .await??;
+        feedback: Option<&Feedback>,
+    ) -> Result<Option<Step>> {
+        let run = audit::model(self.audit_name(), async {
+            // The provider owns the deadline and can finish recording its call on timeout.
+            let response = model
+                .complete_turn(instructions, &input.to_string(), tools, None)
+                .await?;
             let step = parse_json_reply(&response)?;
             let usable = match &step {
                 Step::Reply { text, .. } => !text.trim().is_empty(),
                 Step::Tool { name, .. } => tools.iter().any(|tool| tool.name == name),
             };
             ensure!(usable, ProviderFailure::Incomplete);
-            Ok(step)
-        })
-        .await
+            Ok(Some(step))
+        });
+        if let Some(feedback) = feedback {
+            tokio::select! {
+                biased;
+                () = feedback.superseded() => Ok(None),
+                result = run => result,
+            }
+        } else {
+            run.await
+        }
     }
+}
+
+fn try_smaller_reply(failure: ProviderFailure) -> bool {
+    matches!(
+        failure,
+        ProviderFailure::InputLimit
+            | ProviderFailure::OutputLimit
+            | ProviderFailure::Incomplete
+            | ProviderFailure::TimedOut
+    )
+}
+
+pub(super) fn replan_input(input: &Value) -> Value {
+    let mut request = compact(input);
+    // Tool schemas are supplied separately. Keep the data needed to pick their arguments.
+    for field in [
+        "latest_request",
+        "connectors",
+        "saved_agents",
+        "mail_accounts",
+        "shared_helper_scope",
+        "shared_memory_chat",
+    ] {
+        request[field] = input[field].clone();
+    }
+    request
 }
 
 pub(super) async fn can_replan(app: &App, task: &Task) -> Result<bool> {
@@ -202,14 +214,10 @@ fn compact(input: &Value) -> Value {
         ("goal", 800),
         ("summary", 1_500),
         ("memory", 800),
-        ("attachment", 1_600),
         ("telegram_reply", 800),
         ("profile", 400),
         ("local_time", 80),
         ("time_zone", 80),
-        ("email", 1_200),
-        ("routine", 1_200),
-        ("inbox_briefing", 1_200),
         ("tool_stop_reason", 400),
     ] {
         let value = &input[name];
@@ -227,5 +235,92 @@ fn compact(input: &Value) -> Value {
             }
         };
     }
+    if let Some(attachment) = input["attachment"].as_object() {
+        let mut attachment = attachment.clone();
+        if let Some(content) = attachment.get("content").and_then(Value::as_str)
+            && content.len() > 1_600
+        {
+            attachment.insert("content".into(), json!(clip(content, 1_600)));
+            attachment.insert("truncated".into(), json!(true));
+        }
+        request["attachment"] = Value::Object(attachment);
+    }
+    if let Some(routine) = input["routine"].as_object() {
+        let mut routine = routine.clone();
+        if let Some(results) = routine.get_mut("results").and_then(Value::as_array_mut) {
+            for result in results {
+                if let Some(text) = result.as_str() {
+                    *result = json!(clip(text, 200));
+                }
+            }
+        }
+        request["routine"] = Value::Object(routine);
+    }
+    if input["email"].is_object() {
+        let mut email = input["email"].clone();
+        compact_mail_body(&mut email["content"], 1_200);
+        request["email"] = email;
+    }
+    if let Some(briefing) = input["inbox_briefing"].as_array() {
+        let mut briefing = briefing.clone();
+        for message in &mut briefing {
+            compact_mail_body(message, 200);
+        }
+        request["inbox_briefing"] = json!(briefing);
+    }
     request
+}
+
+fn compact_mail_body(message: &mut Value, maximum: usize) {
+    if let Some(body) = message.get_mut("text")
+        && let Some(text) = body.as_str()
+        && text.len() > maximum
+    {
+        *body = json!(clip(text, maximum));
+        message["truncated"] = json!(true);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_recovery_keeps_attachment_routine_and_email_metadata() {
+        let input = json!({
+            "latest_request": "a".repeat(4_999) + "!",
+            "attachment": {"status":"read","content":"a".repeat(2_000),"truncated":false},
+            "routine": {"current":{"instruction":"Check the next train"},
+                "results":["b".repeat(1_200),"First transfer checked"],"total":3},
+            "email":{"access":"revealed","content":{"from":"sender@example.test",
+                "message_id":"message-42@example.test","text":"c".repeat(2_000)}},
+            "inbox_briefing":[{"subject":"Next train","text":"d".repeat(700)}],
+        });
+        let reduced = replan_input(&input);
+        assert_eq!(reduced["latest_request"], input["latest_request"]);
+        assert_eq!(reduced["attachment"]["status"], "read");
+        assert_eq!(reduced["attachment"]["truncated"], true);
+        assert_eq!(
+            reduced["attachment"]["content"].as_str().unwrap().len(),
+            1_600
+        );
+        assert_eq!(reduced["routine"]["current"], input["routine"]["current"]);
+        assert_eq!(reduced["routine"]["results"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            reduced["routine"]["results"][0].as_str().unwrap().len(),
+            200
+        );
+        assert_eq!(reduced["routine"]["results"][1], "First transfer checked");
+        assert_eq!(reduced["email"]["access"], "revealed");
+        assert_eq!(
+            reduced["email"]["content"]["message_id"],
+            "message-42@example.test"
+        );
+        assert_eq!(reduced["email"]["content"]["truncated"], true);
+        assert_eq!(reduced["inbox_briefing"][0]["subject"], "Next train");
+        assert_eq!(
+            reduced["inbox_briefing"][0]["text"].as_str().unwrap().len(),
+            200
+        );
+    }
 }

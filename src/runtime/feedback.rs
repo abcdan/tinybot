@@ -25,6 +25,10 @@ pub(super) struct Feedback {
 }
 
 impl Feedback {
+    pub(super) async fn superseded(&self) {
+        self.stale.notified().await;
+    }
+
     pub(super) async fn complete(
         &self,
         model: &dyn ModelProvider,

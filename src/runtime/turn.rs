@@ -200,7 +200,7 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
     let mut repeated_lookup = false;
     let mut finish_lookup = false;
     let mut asked_for_step = false;
-    let mut recovery: Option<(limits::Limit, String)> = None;
+    let mut recovery: Option<String> = None;
     loop {
         let progress = loop_guard::check(app, task, request).await?;
         if matches!(progress, Progress::Superseded) {
@@ -301,11 +301,9 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
         if finish_lookup || stop_reason.is_some() {
             return finish_from_context(app, task, feedback, &*model, &input, stop_reason).await;
         }
-        let instructions = recovery.as_ref().map_or(ENGINE, |(_, text)| text.as_str());
-        let compact_input = recovery
-            .as_ref()
-            .map(|(limit, _)| limit.replan_input(&input));
-        let model_input = compact_input.as_deref().unwrap_or(&input);
+        let instructions = recovery.as_deref().unwrap_or(ENGINE);
+        let compact_input = recovery.as_ref().map(|_| limits::replan_input(&input));
+        let model_input = compact_input.as_ref().unwrap_or(&input);
         let step = if let Some(feedback) = feedback {
             feedback
                 .complete(&*model, instructions, model_input, &definitions)
@@ -320,64 +318,67 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
             .await
         };
         let step = match step {
-            Ok(Some(step)) => step,
-            Ok(None) => return store::settle(&app.db, task, "idle", None).await,
             Err(error) => match limits::Limit::from_error(&error) {
                 Some(limit) => {
-                    let next = if recovery.is_none()
-                        && !has_work
-                        && limits::can_replan(app, task).await?
-                    {
-                        let instructions = limits::replan_instructions();
-                        let next = limit
-                            .replan(&*model, &instructions, &input, &definitions)
-                            .await?;
-                        recovery = Some((limit, instructions));
-                        next
+                    let replan =
+                        recovery.is_none() && !has_work && limits::can_replan(app, task).await?;
+                    let instructions = recovery.get_or_insert_with(limits::replan_instructions);
+                    let next = if replan {
+                        limit
+                            .replan(&*model, instructions, &input, &definitions, feedback)
+                            .await
                     } else {
-                        None
+                        Ok(None)
                     };
-                    if let Some(next) = next {
-                        next
-                    } else {
-                        return limit
+                    match next {
+                        Ok(Some(step)) => Ok(Some(step)),
+                        Ok(None) => match limit
                             .finish(app, task, feedback, &*model, &input, error)
-                            .await;
+                            .await
+                        {
+                            Ok(()) => return Ok(()),
+                            Err(error) => Err(error),
+                        },
+                        Err(error) => Err(error),
                     }
                 }
-                None => {
-                    if backup.is_none()
-                        && temporary_provider_failure(&error)
-                        && let Some(selected) = store::model_backup::begin(&app.db, task).await?
-                    {
-                        audit::record(
-                            "model",
-                            "model_backup",
-                            "switched",
-                            json!({"provider":selected.provider,"model":selected.model}),
-                        )
-                        .await;
-                        model = app.models.backup_provider(&task.user, &selected).await?;
-                        backup = Some(selected);
-                        if !store::current(&app.db, task).await? {
-                            return store::settle(&app.db, task, "idle", None).await;
-                        }
-                        tools.retain(|tool| !tool.name().starts_with("openrouter_"));
-                        definitions = tool_definitions(&tools);
-                        attachment =
-                            super::media::context(app, task, &*model, Some(request)).await?;
-                        continue;
-                    }
-                    if has_work
-                        && provider_failure(&error)
-                            .is_none_or(|failure| failure == ProviderFailure::Incomplete)
-                    {
-                        return finish_from_context(app, task, feedback, &*model, &input, None)
-                            .await;
-                    }
-                    return Err(error);
-                }
+                None => Err(error),
             },
+            step => step,
+        };
+        let step = match step {
+            Ok(Some(step)) => step,
+            Ok(None) => return store::settle(&app.db, task, "idle", None).await,
+            Err(error) => {
+                if backup.is_none()
+                    && temporary_provider_failure(&error)
+                    && let Some(selected) = store::model_backup::begin(&app.db, task).await?
+                {
+                    audit::record(
+                        "model",
+                        "model_backup",
+                        "switched",
+                        json!({"provider":selected.provider,"model":selected.model}),
+                    )
+                    .await;
+                    model = app.models.backup_provider(&task.user, &selected).await?;
+                    backup = Some(selected);
+                    if !store::current(&app.db, task).await? {
+                        return store::settle(&app.db, task, "idle", None).await;
+                    }
+                    tools.retain(|tool| !tool.name().starts_with("openrouter_"));
+                    definitions = tool_definitions(&tools);
+                    attachment = super::media::context(app, task, &*model, Some(request)).await?;
+                    continue;
+                }
+                if has_work
+                    && provider_failure(&error)
+                        .is_none_or(|failure| failure == ProviderFailure::Incomplete)
+                {
+                    return finish_from_context(app, task, feedback, &*model, &input, None).await;
+                }
+                return Err(error);
+            }
         };
         if !store::current(&app.db, task).await? {
             return store::settle(&app.db, task, "idle", None).await;
