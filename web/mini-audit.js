@@ -1,5 +1,5 @@
 import { button, card, node, row } from './mini-ui.js';
-import { api, content } from './mini.js';
+import { api, content, show } from './mini.js';
 
 const numbers = new Intl.NumberFormat();
 const dollars = new Intl.NumberFormat(undefined, {
@@ -79,7 +79,7 @@ function auditRun(run, dates) {
     const refresh = button('Refresh entries', () => load(), true);
     const actions = row(more, refresh);
     actions.hidden = true;
-    body.append(usage.section, heading, finished, timeline, status, actions);
+    body.append(usage.section, auditExport(group, run.id), heading, finished, timeline, status, actions);
     group.append(title, body);
     updateTitle(run);
     let after = null;
@@ -128,6 +128,68 @@ function auditRun(run, dates) {
         if (group.open && !loaded) void load();
     });
     return group;
+}
+
+function auditExport(group, id) {
+    const section = node('div', undefined, 'audit-export');
+    const output = node('textarea');
+    output.readOnly = true;
+    output.spellcheck = false;
+    output.setAttribute('aria-label', 'Audit JSON');
+
+    function selectJson() {
+        output.hidden = false;
+        output.focus();
+        output.select();
+    }
+
+    const copy = button('Copy JSON', async () => {
+        try {
+            await navigator.clipboard.writeText(output.value);
+            show('Audit JSON copied.');
+        } catch {
+            selectJson();
+        }
+    }, true);
+
+    function clear() {
+        output.value = '';
+        output.hidden = true;
+        copy.hidden = true;
+    }
+
+    const download = button('Export JSON', async () => {
+        clear();
+        const snapshot = await api('audit-export', {id});
+        if (!group.open || !group.isConnected) return;
+        output.value = JSON.stringify(snapshot, null, 2) + '\n';
+        copy.hidden = false;
+        try {
+            downloadJson(output.value, `tinybot-audit-${id}.json`);
+        } catch {
+            selectJson();
+        }
+    }, true);
+
+    clear();
+    group.addEventListener('toggle', () => { if (!group.open) clear(); });
+    section.append(row(download, copy), output);
+    return section;
+}
+
+function downloadJson(json, filename) {
+    const url = URL.createObjectURL(new Blob([json], {type: 'application/json'}));
+    const link = node('a');
+    link.href = url;
+    link.download = filename;
+    link.hidden = true;
+    document.body.append(link);
+    try {
+        link.click();
+    } finally {
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    }
 }
 
 function usagePanel(title, headingTag, className) {
