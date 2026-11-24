@@ -20,7 +20,7 @@ const invitesTab = tabs.querySelector('[data-tab="invites"]');
 const sourceLink = document.querySelector('#source-link');
 const footer = sourceLink.closest('footer');
 const params = new URLSearchParams(window.location.search);
-const formId = params.get('form');
+let formId = params.get('form');
 const openInTelegram = 'Open TinyBot from its Telegram profile or tap Settings & forms in the bot chat.';
 let state;
 let tab = params.get('connect') === 'docblock' ? 'connectors' : 'home';
@@ -69,8 +69,15 @@ export async function refresh(animate = false) {
         }
         closeOnboarding();
         if (formId) {
-            const item = card('Answer a few questions', 'Your answers go to your Chief.');
-            item.append(generatedForm(result));
+            let item;
+            if (result.kind === 'settings-form') {
+                item = settingsForm(result);
+            } else if (result.kind === 'settings-approve') {
+                item = settingsReview(result);
+            } else {
+                item = card('Answer a few questions', 'Your answers go to your Chief.');
+                item.append(generatedForm(result));
+            }
             content.replaceChildren(item);
         } else {
             state = result;
@@ -175,6 +182,14 @@ function home() {
     content.append(requestsHeading);
     if (!state.requests.length) content.append(card(null, 'You’re all caught up.'));
     for (const request of state.requests) {
+        if (request.kind === 'settings-form') {
+            content.append(settingsForm(request));
+            continue;
+        }
+        if (request.kind === 'settings-approve') {
+            content.append(settingsReview(request));
+            continue;
+        }
         const details = request.content;
         const title = { 'agent-spec': 'Configure a helper', form: 'Enter form details', 'form-submit': 'Submit website form', elicitation: 'Answer a few questions' }[request.kind];
         const item = card(details.operation || title, details.destination);
@@ -285,8 +300,8 @@ function taskCard(task) {
     return item;
 }
 
-function generatedForm(request) {
-    const inputs = request.content.fields.map(spec => {
+function requestInputs(fields) {
+    return fields.map(spec => {
         if (spec.type === 'checkbox') {
             const label = node('label');
             const control = node('input');
@@ -294,6 +309,7 @@ function generatedForm(request) {
             control.name = spec.name;
             control.value = 'true';
             control.required = spec.required;
+            control.checked = spec.value === 'true' || spec.value === true;
             label.append(control, document.createTextNode(spec.label));
             if (spec.hint) label.append(node('span', spec.hint, 'field-hint'));
             return label;
@@ -301,24 +317,74 @@ function generatedForm(request) {
         const choices = spec.type === 'select' ? [['', 'Choose an option'], ...spec.options.map(value => [value, value])] : undefined;
         return field(spec.name, spec.label, {
             type: spec.private && spec.type === 'text' ? 'password' : spec.type,
-            choices, required: spec.required, max: 4096, hint: spec.hint
+            choices, required: spec.required, max: 4096, hint: spec.hint, value: spec.value ?? undefined
         });
     });
+}
+
+function generatedForm(request) {
     const website = request.kind === 'form';
     const label = website ? 'Continue to review' : 'Send answers';
-    return form(label, inputs, async (values, element) => {
+    return form(label, requestInputs(request.content.fields), async (values, element) => {
         await api(website ? 'submit-form' : 'answer-form', {id: request.id, values});
         element.reset();
         if (formId) {
-            const done = card('Answers sent', 'TinyBot will continue in your chat.');
-            done.append(button('Back to chat', () => telegram?.close()));
-            content.replaceChildren(done);
-            refreshButton.hidden = true;
+            finishFocusedForm('Answers sent', 'TinyBot will continue in your chat.');
             return;
         }
         await refresh();
         show(website ? 'Details received. Review the submission below.' : 'Answers sent. TinyBot will continue.');
     });
+}
+
+function settingsForm(request) {
+    const item = card(request.content.operation || 'Configure TinyBot');
+    item.append(form('Review changes', requestInputs(request.content.fields), async values => {
+        const review = await api('answer-settings-form', {id: request.id, values});
+        if (formId) {
+            generation++;
+            formId = review.id;
+            const url = new URL(window.location.href);
+            url.searchParams.set('form', formId);
+            window.history.replaceState(null, '', url);
+            content.replaceChildren(settingsReview(review));
+        } else {
+            await refresh();
+        }
+    }), row(settingsDecision('Decline', 'deny', request.id, 'Settings changes declined.', true)));
+    return item;
+}
+
+function settingsReview(request) {
+    const item = card('Approve settings changes');
+    item.classList.add('settings-review');
+    for (const change of request.content.changes) {
+        const values = node('dl', undefined, 'settings-changes');
+        values.append(node('dt', 'Current'), node('dd', change.before),
+            node('dt', 'Proposed'), node('dd', change.after));
+        item.append(node('h4', change.label), values);
+    }
+    item.append(row(
+        settingsDecision('Approve changes', 'approve-settings', request.id, 'Settings updated.'),
+        settingsDecision('Decline', 'deny', request.id, 'Settings changes declined.', true)
+    ));
+    return item;
+}
+
+function settingsDecision(label, name, id, message, quiet = false) {
+    if (!formId) return action(label, name, {id}, message, quiet);
+    return button(label, async () => {
+        await api(name, {id});
+        finishFocusedForm(message);
+    }, quiet);
+}
+
+function finishFocusedForm(title, message) {
+    generation++;
+    const done = card(title, message);
+    done.append(button('Back to chat', () => telegram?.close()));
+    content.replaceChildren(done);
+    refreshButton.hidden = true;
 }
 
 function syncColorScheme() {

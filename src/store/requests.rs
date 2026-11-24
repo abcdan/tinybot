@@ -1,16 +1,19 @@
-use super::{McpApprovalDecision, Outbound, Pending, Task, has_access, mcp_approvals};
+use super::{
+    McpApprovalDecision, Outbound, Pending, Task, has_access, mcp_approvals, settings_requests,
+};
 use crate::security::{clip, now};
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
-use sqlx::SqlitePool;
+use sqlx::{Sqlite, SqlitePool, Transaction};
 
 pub async fn list_requests(db: &SqlitePool, user: &str) -> Result<Vec<Pending>> {
-    Ok(sqlx::query_as("SELECT p.* FROM pending p JOIN tasks t ON t.id=p.task
-        WHERE p.user=? AND p.state='waiting' AND p.expires>=? AND p.kind IN ('approve','form','form-submit','agent-spec','elicitation','email-send')
+    Ok(sqlx::query_as(&format!("SELECT p.* FROM pending p JOIN tasks t ON t.id=p.task
+        WHERE p.user=? AND p.state='waiting' AND p.expires>=? AND p.kind IN ('approve','form','form-submit','agent-spec','elicitation','email-send','settings-form','settings-approve')
         AND t.state='waiting' AND t.revision=p.revision
         AND (t.agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=t.agent
         AND (a.owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=?))))
-        ORDER BY p.expires, p.id LIMIT 30").bind(user).bind(now()).bind(user).bind(user).fetch_all(db).await?)
+        AND (p.kind NOT IN ('settings-form','settings-approve') OR (t.user=p.user AND {}))
+        ORDER BY p.expires, p.id LIMIT 30", settings_requests::TASK_SCOPE)).bind(user).bind(now()).bind(user).bind(user).fetch_all(db).await?)
 }
 
 pub async fn pause(
@@ -24,17 +27,42 @@ pub async fn pause(
     pending_id: &str,
 ) -> Result<()> {
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+    pause_in(
+        &mut tx,
+        task,
+        kind,
+        payload,
+        notification,
+        button,
+        ttl,
+        pending_id,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(super) async fn pause_in(
+    tx: &mut Transaction<'_, Sqlite>,
+    task: &Task,
+    kind: &str,
+    payload: &Value,
+    notification: &str,
+    button: Option<&str>,
+    ttl: i64,
+    pending_id: &str,
+) -> Result<()> {
     let updated = sqlx::query(
         "UPDATE tasks SET state='waiting',updated=? WHERE id=? AND revision=? AND state='running'",
     )
     .bind(now())
     .bind(&task.id)
     .bind(task.revision)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?
     .rows_affected();
     ensure!(updated == 1, "task changed before request could be created");
-    crate::audit::mark_task(&mut tx, task, "waiting").await?;
+    crate::audit::mark_task(tx, task, "waiting").await?;
     sqlx::query(
         "INSERT INTO pending(id,user,task,revision,kind,payload,expires) VALUES(?,?,?,?,?,?,?)",
     )
@@ -45,7 +73,7 @@ pub async fn pause(
     .bind(kind)
     .bind(payload.to_string())
     .bind(now() + ttl)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     sqlx::query("INSERT INTO outbox(user,task,agent,body,button) VALUES(?,?,?,?,?)")
         .bind(&task.user)
@@ -53,9 +81,8 @@ pub async fn pause(
         .bind(&task.agent)
         .bind(notification)
         .bind(button)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    tx.commit().await?;
     Ok(())
 }
 
@@ -223,11 +250,12 @@ async fn respond_to_request(
     let approve = decision != McpApprovalDecision::Deny;
     let state = if approve { "approved" } else { "denied" };
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
-    let entry: Pending = sqlx::query_as("UPDATE pending SET state=? WHERE id=? AND user=? AND expires>=?
-        AND state='waiting' AND (kind IN ('approve','form-submit','email-send') OR (kind IN ('agent-spec','form','elicitation') AND ?='denied')) AND EXISTS
+    let entry: Pending = sqlx::query_as(&format!("UPDATE pending SET state=? WHERE id=? AND user=? AND expires>=?
+        AND state='waiting' AND (kind IN ('approve','form-submit','email-send') OR (kind IN ('agent-spec','form','elicitation','settings-form','settings-approve') AND ?='denied')) AND EXISTS
         (SELECT 1 FROM tasks t WHERE t.id=pending.task AND t.user=pending.user AND t.revision=pending.revision AND t.state='waiting'
+        AND (pending.kind NOT IN ('settings-form','settings-approve') OR ({}))
         AND (t.agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=t.agent AND
-        (a.owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=?))))) RETURNING *")
+        (a.owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=?))))) RETURNING *", settings_requests::TASK_SCOPE))
         .bind(state).bind(pending).bind(user).bind(now()).bind(state).bind(user).bind(user)
         .fetch_optional(&mut *tx).await?.context("request expired, changed, or already answered")?;
     let scope = if entry.kind == "approve" {
@@ -303,6 +331,8 @@ async fn respond_to_request(
     if !approve {
         let message = if entry.kind == "email-send" {
             "The user declined this email draft. Do not send it or request approval for it again in this turn."
+        } else if settings_requests::is_settings_kind(&entry.kind) {
+            "The user declined these settings changes. No settings were changed. Do not request them again in this turn."
         } else if scope.is_some() {
             "The user denied this MCP action. Do not request the same action again in this turn."
         } else {
@@ -335,10 +365,16 @@ pub async fn notify(db: &SqlitePool, user: &str, body: &str, button: Option<&str
 
 pub async fn claim_outbox(db: &SqlitePool) -> Result<Option<Outbound>> {
     Ok(sqlx::query_as(
-        "UPDATE outbox SET state='sending' WHERE id=(SELECT id FROM outbox WHERE state='queued'
-        AND retry_at<=? ORDER BY id LIMIT 1) RETURNING id,user,agent,task,body,button,widget,reaction_event,reply_to_message_id",
+        "UPDATE outbox SET state='sending' WHERE id=(SELECT o.id FROM outbox o WHERE o.state='queued'
+        AND o.retry_at<=? AND (o.button IS NULL OR substr(o.button,1,?)<>?)
+        AND (o.assistant_event_id IS NULL OR NOT EXISTS(
+            SELECT 1 FROM outbox prior WHERE prior.assistant_event_id=o.assistant_event_id
+            AND prior.id<o.id AND prior.state IN ('queued','sending')))
+        ORDER BY o.id LIMIT 1) RETURNING id,user,agent,task,body,button,widget,reaction_event,reply_to_message_id",
     )
     .bind(now())
+    .bind(super::acknowledgements::WAIT_PREFIX.len() as i64)
+    .bind(super::acknowledgements::WAIT_PREFIX)
     .fetch_optional(db)
     .await?)
 }
@@ -353,6 +389,13 @@ pub async fn can_deliver(db: &SqlitePool, item: &Outbound) -> Result<bool> {
             .or_else(|| button.strip_prefix("mcp-approval-once/"))
     }) {
         return mcp_approvals::waiting(db, item, request).await;
+    }
+    if let Some(request) = item
+        .button
+        .as_deref()
+        .and_then(|button| button.strip_prefix(settings_requests::BUTTON_PREFIX))
+    {
+        return settings_requests::waiting_delivery(db, item, request).await;
     }
     if let Some(task) = &item.task {
         let usable: bool = sqlx::query_scalar(

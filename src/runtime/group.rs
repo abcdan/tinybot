@@ -65,7 +65,7 @@ pub(super) async fn work(app: &App, task: &Task) -> Result<()> {
         }
         match parse_json_reply::<Step>(&response)? {
             Step::Reply { text, .. } => {
-                let text = clip(text.trim(), super::MAX_REPLY_BYTES);
+                let text = text.trim();
                 return store::settle(&app.db, task, "idle", (!text.is_empty()).then_some(text))
                     .await;
             }

@@ -241,23 +241,33 @@ async fn settle_task(
                     .execute(&mut *tx)
                     .await?
                     .last_insert_rowid();
-            let outbox = sqlx::query(
-                "INSERT INTO outbox(user,task,agent,body,widget,assistant_event_id,reply_to_message_id)
-                 VALUES(?,?,?,?,?,?,(SELECT CASE WHEN telegram_reply_message_id IS NOT NULL
-                    THEN COALESCE(telegram_message_id, telegram_reply_message_id) END
-                    FROM events WHERE task=? AND role='user' ORDER BY id DESC LIMIT 1))",
-            )
+            let parts = if widget.is_some() {
+                vec![message.into()]
+            } else {
+                crate::channel::telegram_reply_parts(message)
+            };
+            let mut parts = parts.into_iter().peekable();
+            while let Some(part) = parts.next() {
+                let outbox = sqlx::query(
+                    "INSERT INTO outbox(user,task,agent,body,widget,assistant_event_id,reply_to_message_id)
+                     VALUES(?,?,?,?,?,?,(SELECT CASE WHEN telegram_reply_message_id IS NOT NULL
+                        THEN COALESCE(telegram_message_id, telegram_reply_message_id) END
+                        FROM events WHERE task=? AND role='user' ORDER BY id DESC LIMIT 1))",
+                )
                     .bind(&task.user)
                     .bind(&task.id)
                     .bind(&task.agent)
-                    .bind(message)
+                    .bind(part.as_ref())
                     .bind(widget)
                     .bind(assistant_event)
                     .bind(&task.id)
                     .execute(&mut *tx)
                     .await?
                     .last_insert_rowid();
-            replies::insert(&mut tx, outbox, task.revision, suggestions).await?;
+                if parts.peek().is_none() {
+                    replies::insert(&mut tx, outbox, task.revision, suggestions).await?;
+                }
+            }
         }
     }
     tx.commit().await?;
@@ -291,18 +301,22 @@ pub async fn compaction_batch(
     before: i64,
 ) -> Result<Vec<(i64, String, String)>> {
     let rows: Vec<(i64, String, String)> = sqlx::query_as(
-        "SELECT id,role,body FROM events WHERE task=? AND id<?
-         AND id IS NOT (SELECT max(id) FROM events WHERE task=? AND role='user')
+        "SELECT id,role,body FROM events WHERE task=?1 AND id<COALESCE((
+             SELECT min(pending.id) FROM events pending WHERE pending.task=?1 AND pending.id<?2
+             AND EXISTS(SELECT 1 FROM outbox o WHERE o.assistant_event_id=pending.id
+                 AND o.state IN ('queued','sending'))
+         ),?2)
+         AND id IS NOT (SELECT max(id) FROM events WHERE task=?1 AND role='user')
         ORDER BY id LIMIT 28",
     )
     .bind(task)
     .bind(before)
-    .bind(task)
     .fetch_all(db)
     .await?;
     let mut bytes = 0;
     Ok(rows
         .into_iter()
+        .map(|(id, role, text)| (id, role, clip(&text, 12000).to_owned()))
         .take_while(|(_, _, text)| {
             bytes += text.len();
             bytes <= 28000
@@ -330,7 +344,9 @@ pub async fn compact(
     }
     sqlx::query(
         "DELETE FROM events WHERE task=? AND id<=?
-         AND id IS NOT (SELECT max(id) FROM events WHERE task=? AND role='user')",
+         AND id IS NOT (SELECT max(id) FROM events WHERE task=? AND role='user')
+         AND NOT EXISTS(SELECT 1 FROM outbox o WHERE o.assistant_event_id=events.id
+             AND o.state IN ('queued','sending'))",
     )
     .bind(&task.id)
     .bind(boundary)
@@ -339,4 +355,71 @@ pub async fn compact(
     .await?;
     tx.commit().await?;
     Ok(Some(summary.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store;
+
+    #[tokio::test]
+    async fn compaction_waits_at_the_earliest_undelivered_reply() {
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!().run(&db).await.unwrap();
+        store::seed(&db, "42").await.unwrap();
+        sqlx::query("UPDATE users SET provider='codex' WHERE id='42'")
+            .execute(&db)
+            .await
+            .unwrap();
+        store::ingest(&db, "42", "fixture", 1, "42", "Write a long reply.")
+            .await
+            .unwrap();
+        let task = claim(&db).await.unwrap().unwrap();
+        settle_reply(&db, &task, &"a".repeat(5000), &[])
+            .await
+            .unwrap();
+        store::ingest(&db, "42", "fixture", 2, "42", "Follow-up request.")
+            .await
+            .unwrap();
+        let task = claim(&db).await.unwrap().unwrap();
+        append(&db, &task.id, "tool", "Result from the follow-up.")
+            .await
+            .unwrap();
+
+        let original = history(&db, &task.id).await.unwrap();
+        let [first_request, reply, _, followup_result] = original.as_slice() else {
+            panic!("expected both requests and their results");
+        };
+        let before = followup_result.0 + 1;
+        let batch = compaction_batch(&db, &task.id, before).await.unwrap();
+        assert_eq!(batch.as_slice(), std::slice::from_ref(first_request));
+
+        let mut delivered = 0;
+        while let Some(part) = store::claim_outbox(&db).await.unwrap() {
+            let while_sending = compaction_batch(&db, &task.id, before).await.unwrap();
+            assert_eq!(while_sending, batch);
+            sqlx::query("UPDATE outbox SET state='sent' WHERE id=?")
+                .bind(part.id)
+                .execute(&db)
+                .await
+                .unwrap();
+            delivered += 1;
+        }
+        assert_eq!(delivered, 2);
+
+        let boundary = batch.last().unwrap().0;
+        assert!(
+            compact(&db, &task, boundary, "The user asked for a long reply.")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(history(&db, &task.id).await.unwrap(), original[1..]);
+        let resumed_batch = compaction_batch(&db, &task.id, before).await.unwrap();
+        assert_eq!(resumed_batch, [reply.clone(), followup_result.clone()]);
+    }
 }

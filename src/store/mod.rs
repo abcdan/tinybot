@@ -1,3 +1,4 @@
+pub(crate) mod acknowledgements;
 pub mod attachments;
 pub(crate) mod groups;
 mod ingress;
@@ -11,6 +12,7 @@ mod queue;
 mod reactions;
 mod replies;
 mod requests;
+pub(crate) mod settings_requests;
 pub(crate) mod shared_memory;
 pub(crate) mod task_failures;
 pub(crate) mod task_views;

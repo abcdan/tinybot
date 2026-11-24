@@ -1,6 +1,77 @@
 use super::*;
 use crate::store::{groups::GroupRoute, outputs, task_views};
 
+struct ReplyChannel(tokio::sync::mpsc::UnboundedSender<String>);
+
+#[async_trait]
+impl crate::channel::ChannelAdapter for ReplyChannel {
+    fn name(&self) -> &'static str {
+        "telegram"
+    }
+
+    async fn receive(&self, _: i64) -> anyhow::Result<(Vec<crate::channel::Inbound>, i64)> {
+        unreachable!()
+    }
+
+    async fn send(
+        &self,
+        _: &str,
+        body: &str,
+        _: Option<&str>,
+        _: Option<i64>,
+    ) -> anyhow::Result<crate::channel::MessageDelivery> {
+        self.0.send(body.to_owned())?;
+        Ok(crate::channel::MessageDelivery::Sent(None))
+    }
+}
+
+#[tokio::test]
+async fn split_delivery_retries_recording_an_outcome_without_resending() {
+    let db = fixture().await;
+    let app = Arc::new(app_with_model(&db, Arc::new(GroupChief)));
+    message(&db, 1, "1", "Write a long summary.").await;
+    let task = store::claim(&db).await.unwrap().unwrap();
+    let first = "a".repeat(4095);
+    store::settle_reply(&db, &task, &format!("{first}\nSecond part"), &[])
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "CREATE TABLE delivery_fixture_failures (id INTEGER PRIMARY KEY);
+         CREATE TRIGGER fail_delivery_write_once BEFORE UPDATE OF state ON outbox
+         WHEN NEW.state='sent' AND NOT EXISTS (SELECT 1 FROM delivery_fixture_failures)
+         BEGIN
+           INSERT INTO delivery_fixture_failures VALUES (OLD.id);
+           SELECT RAISE(FAIL, 'fixture delivery write failure');
+         END;",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+
+    let (send, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let worker = tokio::spawn(crate::channel::outbox(app, Arc::new(ReplyChannel(send))));
+    let parts = tokio::time::timeout(Duration::from_secs(3), async {
+        [
+            received.recv().await.unwrap(),
+            received.recv().await.unwrap(),
+        ]
+    })
+    .await;
+    worker.abort();
+
+    let [first_part, last_part] = parts.unwrap();
+    assert_eq!(first_part.trim_end(), first);
+    assert_eq!(last_part, "Second part");
+    let saved_first: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM outbox o JOIN delivery_fixture_failures f ON f.id=o.id
+                       WHERE o.state='sent')",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert!(saved_first);
+}
+
 struct GroupChief;
 
 #[async_trait]

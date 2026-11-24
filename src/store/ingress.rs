@@ -464,20 +464,12 @@ async fn ingest_message(
                 attachments::save(&mut tx, &task, message_id, attachment).await?;
             }
             if let Some(message_id) = telegram.message_id.filter(|message_id| *message_id > 0) {
-                super::task_views::acknowledge_input(
+                super::acknowledgements::schedule(
                     &mut tx,
                     user,
                     &task,
                     message_id,
                     matches!(previous_state.as_deref(), Some("queued" | "running")),
-                )
-                .await?;
-            } else {
-                super::task_views::notify_if_queued(
-                    &mut tx,
-                    user,
-                    &task,
-                    previous_state.as_deref() == Some("queued"),
                 )
                 .await?;
             }

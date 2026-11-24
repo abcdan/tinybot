@@ -5,10 +5,8 @@ use crate::{
     store::{self, Pending, Task},
 };
 use anyhow::{Context, Result, ensure};
-#[cfg(test)]
-pub use schema::Field;
 use schema::validate_values;
-pub use schema::{FormSpec, WebsiteForm};
+pub use schema::{Field, FormSpec, WebsiteForm};
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
 use std::collections::{BTreeMap, HashMap};

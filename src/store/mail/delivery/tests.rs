@@ -136,8 +136,7 @@ async fn owner_can_read_one_message_then_act_on_it_without_exposing_other_mail()
     store::ingest_telegram(&db, "1", 2, "1", "Something else", 203)
         .await
         .unwrap();
-    let acknowledgement = store::claim_outbox(&db).await.unwrap().unwrap();
-    assert_eq!(acknowledgement.reply_to_message_id, Some(203));
+    assert!(store::claim_outbox(&db).await.unwrap().is_none());
     let unrelated = store::claim(&db).await.unwrap().unwrap();
     assert_ne!(unrelated.id, mail_task);
     assert!(
@@ -208,8 +207,7 @@ async fn exact_reply_opens_the_email_for_that_request_while_switching_alone_keep
     store::ingest_telegram(&db, "1", 1, "1", "What arrived?", 202)
         .await
         .unwrap();
-    let acknowledgement = store::claim_outbox(&db).await.unwrap().unwrap();
-    assert_eq!(acknowledgement.reply_to_message_id, Some(202));
+    assert!(store::claim_outbox(&db).await.unwrap().is_none());
     let hidden = store::claim(&db).await.unwrap().unwrap();
     let context = task_context(&db, &vault, &hidden).await.unwrap().unwrap();
     assert!(matches!(context.access, MailAccess::Redacted));
@@ -232,8 +230,6 @@ async fn exact_reply_opens_the_email_for_that_request_while_switching_alone_keep
     .await
     .unwrap();
     let opened = store::claim(&db).await.unwrap().unwrap();
-    let acknowledgement = store::claim_outbox(&db).await.unwrap().unwrap();
-    assert_eq!(acknowledgement.reply_to_message_id, Some(203));
     assert_eq!(opened.id, mail_task);
     assert_eq!(
         store::history(&db, &opened.id)

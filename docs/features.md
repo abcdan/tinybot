@@ -24,11 +24,15 @@ The chat shows when the task switches providers.
   task, or reply with `/status` to check an earlier reply. Use **Continue**, **Stop**,
   or **Review** when TinyBot shows that action. TinyBot keeps tracking an approved
   action until it can confirm the outcome or asks you to check the destination.
-- TinyBot sends a short message to confirm it received your private task. If an
-  earlier task has to finish first, the message tells you it queued your request.
+- Quick questions go straight to the answer. If a private task is still queued
+  or running after a short wait, TinyBot can generate a brief update in your
+  language. An answer, draft, or helper handoff can take the place of that update.
   Use **Tasks** on the Mini App home screen to search titles, summaries, and retained
   chat messages.
-- When a model fails, TinyBot explains what needs attention. If the request can
+- When a model reaches its response limit on a private task, TinyBot tries a
+  smaller next step or finishes with the results it already has. Long replies
+  can arrive in multiple Telegram messages. If recovery fails, TinyBot uses the
+  audit log to explain the last confirmed step and what it tried. If the request can
   safely run again before any tools or actions started, tap **Retry** or send
   `/retry` to retry the saved message. If TinyBot asks you to reconnect or choose
   a model, you can send `/retry` after updating **Settings & forms → Model**.
@@ -93,6 +97,21 @@ calculations and text processing. Ask for a CSV, Markdown, JSON, or text file to
 receive a Telegram document up to 32 KiB. Tap **Listen** on a supported reply to hear
 it as a voice message. TinyBot sends the reply text to OpenRouter using your saved
 key for speech synthesis.
+
+## Ask TinyBot about its settings
+
+> What model are you using? Change your name to Atlas and set my timezone to Europe/Amsterdam.
+
+In a private chat, your Chief can read your personal settings and see which
+services are connected. When you ask for a change, TinyBot opens a form with the
+requested fields. Submit the form to compare the current and proposed values,
+then tap **Approve changes** to save them. If a setting changed since you opened
+the form, ask for a fresh one.
+
+You can change your display name, your Chief’s name, your timezone, your models
+from already-connected providers, and your OpenRouter tool toggles. Use the
+existing **Settings & forms** screens to connect accounts or manage credentials
+and access.
 
 ## Collect details and review actions
 

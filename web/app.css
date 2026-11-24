@@ -121,6 +121,19 @@ legend { font-size: .83rem; font-weight: 650; }
 .actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
 .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; justify-content: space-between; }
 .meta { font-size: .82rem; color: var(--secondary); }
+.settings-review h4 { font-size: .88rem; margin: 14px 0 5px; }
+.settings-changes {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 12px;
+  margin: 0;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--background);
+  font-size: .84rem;
+}
+.settings-changes dt { color: var(--secondary); }
+.settings-changes dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
 .mail-card h3, .mail-folder-list strong { overflow-wrap: anywhere; }
 .mail-folder-list { margin: 12px 0; padding: 0; list-style: none; }
 .mail-folder-list li { display: flex; align-items: baseline; flex-wrap: wrap; column-gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); }

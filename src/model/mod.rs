@@ -11,6 +11,7 @@ mod transcription;
 pub(crate) use connections::BackupModel;
 pub(crate) use connections::OnboardingError;
 pub use connections::OpenRouterSettingsError;
+pub(crate) use connections::{ModelPreferences, ModelSelection, display_label};
 pub(crate) use failure::{ProviderFailure, provider_failure, temporary_provider_failure};
 pub use media::{AttachmentInput, AttachmentRead};
 pub(crate) use server_tools::{ServerTool, ServerToolInput};

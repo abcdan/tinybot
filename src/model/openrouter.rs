@@ -70,7 +70,8 @@ impl ModelProvider for OpenRouter {
             let request = attachment_request(&self.model, input, attachment);
             let deadline = Instant::now() + Duration::from_secs(60);
             let response = timeout_at(deadline, self.send(request)).await??;
-            let reply = read_buffered(response, &[], call, deadline).await?;
+            let body = read_buffered(response, deadline).await?;
+            let reply = buffered_response(&body, &[], BufferedReply::Attachment, call)?;
             Ok(Some(read_report(&reply)?))
         })
         .await
@@ -98,22 +99,19 @@ impl ModelProvider for OpenRouter {
             let response = timeout_at(deadline, self.send(req)).await??;
             match delta {
                 Some(delta) => stream_response(response, tools, delta, call, deadline).await,
-                None => read_buffered(response, tools, call, deadline).await,
+                None => {
+                    let body = read_buffered(response, deadline).await?;
+                    buffered_response(&body, tools, BufferedReply::Completion, call)
+                }
             }
         })
         .await
     }
 }
 
-async fn read_buffered(
-    response: reqwest::Response,
-    tools: &[ToolDefinition],
-    call: &mut ModelCall,
-    deadline: Instant,
-) -> Result<String> {
+async fn read_buffered(response: reqwest::Response, deadline: Instant) -> Result<Value> {
     let body = timeout_at(deadline, net::body(response, MAX_STREAM_BYTES)).await??;
-    let reply: Value = serde_json::from_slice(&body).context(ProviderFailure::Incomplete)?;
-    buffered_response(&reply, tools, call)
+    serde_json::from_slice(&body).context(ProviderFailure::Incomplete)
 }
 
 fn check_provider_error(response: &Value) -> Result<()> {
@@ -159,9 +157,16 @@ fn upstream_failure(error: &Value, status: Option<u64>) -> ProviderFailure {
     }
 }
 
+#[derive(PartialEq, Eq)]
+enum BufferedReply {
+    Completion,
+    Attachment,
+}
+
 fn buffered_response(
     reply: &Value,
     tools: &[ToolDefinition],
+    purpose: BufferedReply,
     call: &mut ModelCall,
 ) -> Result<String> {
     check_provider_error(reply)?;
@@ -179,6 +184,9 @@ fn buffered_response(
             .is_some_and(|parts| parts.iter().any(|part| part["type"] == "refusal"))
     {
         return Err(ProviderFailure::Refused.into());
+    }
+    if finish == Some("length") && purpose == BufferedReply::Completion {
+        return Err(ProviderFailure::OutputLimit.into());
     }
     ensure!(message["role"] == "assistant", ProviderFailure::Incomplete);
     if finish == Some("tool_calls") {
@@ -210,7 +218,7 @@ fn buffered_response(
             .collect::<String>(),
         _ => String::new(),
     };
-    if finish == Some("length") && (!tools.is_empty() || text.trim().is_empty()) {
+    if finish == Some("length") && text.trim().is_empty() {
         return Err(ProviderFailure::OutputLimit.into());
     }
     ensure!(
@@ -395,7 +403,7 @@ impl StreamTurn {
         }
         match choice["finish_reason"].as_str() {
             None => Ok(None),
-            Some("stop" | "length") if tools.is_empty() && !self.text.trim().is_empty() => {
+            Some("stop") if tools.is_empty() && !self.text.trim().is_empty() => {
                 Ok(Some(std::mem::take(&mut self.text)))
             }
             Some("stop") if self.calls.is_empty() && !self.text.trim().is_empty() => {
@@ -441,6 +449,7 @@ mod tests {
         let error = buffered_response(
             &json!({"choices":[{"finish_reason":"content_filter"}]}),
             &[],
+            BufferedReply::Completion,
             &mut call,
         )
         .unwrap_err();
@@ -572,7 +581,8 @@ data: [DONE]
             "usage":{"prompt_tokens":5,"total_tokens":9,"cost":0.0}
         });
         audit::provider_call("openrouter", "fixture/requested", async |call| {
-            let output = buffered_response(&reply, &definitions(), call)?;
+            let output =
+                buffered_response(&reply, &definitions(), BufferedReply::Completion, call)?;
             assert_eq!(
                 serde_json::from_str::<Value>(&output)?,
                 json!({
@@ -588,14 +598,46 @@ data: [DONE]
             );
             let mut invalid = reply;
             invalid["choices"][0]["message"]["tool_calls"][0]["type"] = json!("other");
-            assert!(buffered_response(&invalid, &definitions(), call).is_err());
+            assert!(
+                buffered_response(&invalid, &definitions(), BufferedReply::Completion, call)
+                    .is_err()
+            );
             invalid["choices"][0]["message"]["tool_calls"][0]["type"] = json!("function");
             invalid["choices"][0]["message"]["role"] = json!("user");
-            assert!(buffered_response(&invalid, &definitions(), call).is_err());
+            assert!(
+                buffered_response(&invalid, &definitions(), BufferedReply::Completion, call)
+                    .is_err()
+            );
             Ok(())
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn buffered_completion_reports_an_output_limit_for_truncated_json_without_tools() {
+        let response = axum::http::Response::new(
+            r#"{"choices":[{"finish_reason":"length","message":{"role":"assistant","content":"{\"text\":\"Partial"}}]}"#,
+        );
+        let reply = read_buffered(response.into(), Instant::now() + Duration::from_secs(2))
+            .await
+            .unwrap();
+        let mut call = ModelCall::new("openrouter", "fixture");
+        let error =
+            buffered_response(&reply, &[], BufferedReply::Completion, &mut call).unwrap_err();
+        assert_eq!(error.downcast_ref(), Some(&ProviderFailure::OutputLimit));
+    }
+
+    #[test]
+    fn a_length_limited_attachment_can_still_contain_a_complete_report() {
+        let reply = json!({"choices":[{"finish_reason":"length","message":{
+            "role":"assistant","content":"{\"content\":\"Printed instructions\"}"
+        }}]});
+        let mut call = ModelCall::new("openrouter", "fixture");
+        let report = buffered_response(&reply, &[], BufferedReply::Attachment, &mut call)
+            .and_then(|reply| read_report(&reply))
+            .unwrap();
+        assert_eq!(report.text, "Printed instructions");
     }
 
     #[test]
@@ -671,5 +713,15 @@ data: [DONE]
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn streaming_completion_reports_an_output_limit_without_tools() {
+        let truncated = json!({"choices":[{"delta":{"content":"{\"text\":\"Partial"},
+            "finish_reason":"length"}]});
+        let error = StreamTurn::default()
+            .accept(&truncated, &[], &mut |_| {})
+            .unwrap_err();
+        assert_eq!(error.downcast_ref(), Some(&ProviderFailure::OutputLimit));
     }
 }

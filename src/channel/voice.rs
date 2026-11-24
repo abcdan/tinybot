@@ -258,9 +258,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let acknowledgement = store::claim_outbox(&db).await.unwrap().unwrap();
-        assert_eq!(acknowledgement.reply_to_message_id, Some(51));
-        assert!(acknowledgement.button.unwrap().starts_with("ta/"));
+        assert!(store::claim_outbox(&db).await.unwrap().is_none());
         assert!(!eligible(&db, "telegram", &note).await.unwrap());
         let task = store::claim(&db).await.unwrap().unwrap();
         let events: Vec<(String, String, Option<i64>)> =

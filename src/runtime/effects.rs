@@ -108,13 +108,7 @@ pub(super) async fn execute(tool: Builtin, ctx: &ToolContext<'_>, args: Value) -
         Builtin::SendReply => {
             let text = string(&args, "text", 12_000)?;
             let suggestions = valid_suggestions(&args["suggested_replies"]);
-            store::settle_reply(
-                &app.db,
-                task,
-                clip(text, super::MAX_REPLY_BYTES),
-                &suggestions,
-            )
-            .await?;
+            store::settle_reply(&app.db, task, text, &suggestions).await?;
             return Ok(Outcome::Pause);
         }
         Builtin::SendCard => {

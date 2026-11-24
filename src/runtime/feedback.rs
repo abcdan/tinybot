@@ -1,4 +1,4 @@
-use super::{ENGINE, MAX_REPLY_BYTES, Step};
+use super::{MAX_REPLY_BYTES, Step};
 use crate::{
     audit,
     channel::ChannelAdapter,
@@ -28,6 +28,7 @@ impl Feedback {
     pub(super) async fn complete(
         &self,
         model: &dyn ModelProvider,
+        instructions: &str,
         input: &Value,
         tools: &[ToolDefinition],
     ) -> Result<Option<Step>> {
@@ -44,7 +45,7 @@ impl Feedback {
             biased;
             _ = self.stale.notified() => return Ok(None),
             result = audit::model("agent_turn_stream", async {
-                let response = model.complete_turn(ENGINE, &input, tools, Some(&mut append)).await?;
+                let response = model.complete_turn(instructions, &input, tools, Some(&mut append)).await?;
                 parse_json_reply(&response)
             }) => result,
         };
@@ -69,7 +70,7 @@ impl Feedback {
             biased;
             _ = self.stale.notified() => return Ok(None),
             result = audit::model("agent_turn_buffered", async {
-                let response = model.complete_turn(ENGINE, &input, tools, None).await?;
+                let response = model.complete_turn(instructions, &input, tools, None).await?;
                 parse_json_reply(&response)
             }) => result?,
         };
@@ -106,7 +107,14 @@ impl Feedback {
                 && text != last_draft
             {
                 match channel.draft(&task.user, draft_id, &text).await {
-                    Ok(None) => last_draft = text,
+                    Ok(None) => {
+                        if last_draft.is_empty()
+                            && store::acknowledgements::suppress(db, task).await.is_err()
+                        {
+                            tracing::debug!("could not suppress progress after streaming a draft");
+                        }
+                        last_draft = text;
+                    }
                     Ok(Some(delay)) => retry_at = Instant::now() + delay,
                     Err(_) => draft_supported = false,
                 }
@@ -193,6 +201,7 @@ fn complete_string_prefix(source: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::ENGINE;
     use crate::{channel::Inbound, model::TextDelta};
     use async_trait::async_trait;
     use serde_json::json;
@@ -276,7 +285,10 @@ mod tests {
                 buffering: Notify::new(),
             };
             let feedback = Feedback::default();
-            let result = feedback.complete(&model, &json!({}), &[]).await.unwrap();
+            let result = feedback
+                .complete(&model, ENGINE, &json!({}), &[])
+                .await
+                .unwrap();
             assert!(matches!(result, Some(Step::Reply { text, .. }) if text == "Recovered"));
             assert_eq!(model.calls.load(Ordering::Relaxed), 1);
             assert!(feedback.source.lock().unwrap().is_empty());
@@ -306,7 +318,7 @@ mod tests {
     async fn a_provider_rate_limit_does_not_retry_immediately_without_streaming() {
         let model = LimitedModel(AtomicUsize::new(0));
         let error = Feedback::default()
-            .complete(&model, &json!({}), &[])
+            .complete(&model, ENGINE, &json!({}), &[])
             .await
             .err()
             .unwrap();
@@ -324,7 +336,7 @@ mod tests {
         };
         let feedback = Feedback::default();
         let input = json!({});
-        let complete = feedback.complete(&model, &input, &[]);
+        let complete = feedback.complete(&model, ENGINE, &input, &[]);
         let change_revision = async {
             model.buffering.notified().await;
             feedback.stale.notify_one();
@@ -430,7 +442,7 @@ mod tests {
         let ((), result, ()) = tokio::time::timeout(Duration::from_secs(8), async {
             tokio::join!(
                 feedback.show(&db, &task, &channel),
-                feedback.complete(&model, &input, &[]),
+                feedback.complete(&model, ENGINE, &input, &[]),
                 revise,
             )
         })
