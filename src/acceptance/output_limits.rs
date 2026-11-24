@@ -1,7 +1,7 @@
 use super::{app_with_model, fixture, message};
 use crate::{
     audit,
-    model::{ModelProvider, ProviderFailure, TextDelta, ToolDefinition},
+    model::{ModelProvider, Models, ProviderFailure, TextDelta, ToolDefinition},
     runtime, store,
 };
 use anyhow::Result;
@@ -14,11 +14,19 @@ use std::sync::{
 
 const GOAL: &str = "Compare three train routes";
 const SAVED: &str = "I saved the goal to compare three train routes.";
+const OLD_CONTEXT: &str = "Long context fixture. ";
 
 enum Stage {
     Limit,
+    LimitWithLongContext,
+    CompactReplanTimeout,
+    CompactFinishTimeout,
     Incomplete,
     LookupLimit,
+    ReactToMessage,
+    EmptyFinish {
+        reaction_queued: bool,
+    },
     ShortAnswer {
         text: &'static str,
         without_tools: bool,
@@ -57,8 +65,39 @@ impl ModelProvider for LimitModel {
         let plan = instructions.contains("take one small next step");
         let reply = match &self.steps[index] {
             Stage::Limit => return Err(ProviderFailure::OutputLimit.into()),
+            Stage::LimitWithLongContext => {
+                assert!(input.contains(&OLD_CONTEXT.repeat(500)));
+                assert!(serde_json::from_str::<Value>(input)?["tools"].is_array());
+                return Err(ProviderFailure::OutputLimit.into());
+            }
+            Stage::CompactReplanTimeout => {
+                assert!(plan && !tools.is_empty());
+                assert!(!input.contains(&OLD_CONTEXT.repeat(100)));
+                let context: Value = serde_json::from_str(input)?;
+                assert_eq!(context["latest_request"], "Wie is Yeat?");
+                assert!(!context.as_object().unwrap().contains_key("tools"));
+                return Err(ProviderFailure::TimedOut.into());
+            }
+            Stage::CompactFinishTimeout => {
+                assert!(tools.is_empty());
+                assert!(!input.contains(&OLD_CONTEXT.repeat(100)));
+                return Err(ProviderFailure::TimedOut.into());
+            }
             Stage::Incomplete => return Err(ProviderFailure::Incomplete.into()),
             Stage::LookupLimit => panic!("expected the saved-work finalizer"),
+            Stage::ReactToMessage => {
+                assert!(tools.iter().any(|tool| tool.name == "react_to_message"));
+                json!({"kind":"tool","name":"react_to_message","args":{"emoji":"🎉"}})
+            }
+            Stage::EmptyFinish { reaction_queued } => {
+                assert!(tools.is_empty());
+                let context: Value = serde_json::from_str(input)?;
+                assert_eq!(
+                    context["telegram_reaction_queued"] == true,
+                    *reaction_queued
+                );
+                json!({"kind":"reply","text":""})
+            }
             Stage::ShortAnswer {
                 text,
                 without_tools,
@@ -66,6 +105,7 @@ impl ModelProvider for LimitModel {
                 assert_eq!(plan, !without_tools);
                 assert_eq!(tools.is_empty(), *without_tools);
                 assert!(input.contains("Wie is Yeat?"));
+                assert!(!input.contains(&OLD_CONTEXT.repeat(100)));
                 json!({"kind":"reply","text":text})
             }
             Stage::SaveGoal { during_replan } => {
@@ -120,6 +160,128 @@ async fn a_quick_question_gets_a_concise_automatic_answer() {
 }
 
 #[tokio::test]
+async fn a_timed_out_smaller_plan_gets_a_tool_free_reply() {
+    let db = fixture().await;
+    let reply = "Yeat is een Amerikaanse rapper.";
+    let model = Arc::new(LimitModel {
+        steps: vec![
+            Stage::LimitWithLongContext,
+            Stage::CompactReplanTimeout,
+            Stage::ShortAnswer {
+                text: reply,
+                without_tools: true,
+            },
+        ],
+        calls: AtomicUsize::new(0),
+    });
+    let app = app_with_model(&db, model.clone());
+    message(&db, 1, "1", "Wie is Yeat?").await;
+    let task = store::claim(&db).await.unwrap().unwrap();
+    store::append(&db, &task.id, "assistant", &OLD_CONTEXT.repeat(500))
+        .await
+        .unwrap();
+
+    runtime::work(&app, &task).await.unwrap();
+
+    assert_eq!(store::claim_outbox(&db).await.unwrap().unwrap().body, reply);
+    assert_eq!(model.calls.load(Ordering::Relaxed), 3);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM task_tool_attempts WHERE task=?")
+        .bind(&task.id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    let recovery: Vec<String> = sqlx::query_scalar(
+        "SELECT status FROM audit_entries WHERE name='output_limit_recovery' AND kind='model'
+         AND status IN ('completed','failed') ORDER BY id",
+    )
+    .fetch_all(&db)
+    .await
+    .unwrap();
+    assert_eq!(recovery, ["failed", "completed"]);
+}
+
+#[tokio::test]
+async fn a_queued_telegram_reaction_allows_a_silent_recovery_finish() {
+    let db = fixture().await;
+    let model = Arc::new(LimitModel {
+        steps: vec![
+            Stage::ReactToMessage,
+            Stage::Limit,
+            Stage::EmptyFinish {
+                reaction_queued: true,
+            },
+        ],
+        calls: AtomicUsize::new(0),
+    });
+    let app = app_with_model(&db, model.clone());
+    store::ingest_telegram(&db, "1", 1, "1", "Goed nieuws, het is gelukt!", 42)
+        .await
+        .unwrap();
+    let task = store::claim(&db).await.unwrap().unwrap();
+
+    runtime::work(&app, &task).await.unwrap();
+
+    assert_eq!(super::task_for(&db, &task.id).await.state, "idle");
+    let reaction = store::claim_outbox(&db).await.unwrap().unwrap();
+    assert_eq!(reaction.body, "🎉");
+    assert_eq!(
+        store::reaction_target(&db, &reaction).await.unwrap(),
+        Some(42)
+    );
+    assert!(store::claim_outbox(&db).await.unwrap().is_none());
+    assert_eq!(model.calls.load(Ordering::Relaxed), 3);
+}
+
+#[tokio::test]
+async fn a_configured_backup_can_finish_a_timed_out_recovery() {
+    let db = fixture().await;
+    let reply = "Yeat is een Amerikaanse rapper.";
+    let primary = Arc::new(LimitModel {
+        steps: vec![
+            Stage::LimitWithLongContext,
+            Stage::CompactReplanTimeout,
+            Stage::CompactFinishTimeout,
+        ],
+        calls: AtomicUsize::new(0),
+    });
+    let backup = Arc::new(LimitModel {
+        steps: vec![Stage::ShortAnswer {
+            text: reply,
+            without_tools: false,
+        }],
+        calls: AtomicUsize::new(0),
+    });
+    let mut app = app_with_model(&db, primary.clone());
+    app.models = Models::new(db.clone(), app.vault.clone(), "codex".into(), None, None)
+        .with_fixture(primary.clone())
+        .with_backup_fixture(backup.clone());
+    sqlx::query(
+        "UPDATE users SET codex_model='test-backup',codex_credential='fixture' WHERE id='1'",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    app.models
+        .save_backup("1", "codex", "test-backup")
+        .await
+        .unwrap();
+    message(&db, 1, "1", "Wie is Yeat?").await;
+    let task = store::claim(&db).await.unwrap().unwrap();
+    store::append(&db, &task.id, "assistant", &OLD_CONTEXT.repeat(500))
+        .await
+        .unwrap();
+
+    runtime::work(&app, &task).await.unwrap();
+
+    let notice = store::claim_outbox(&db).await.unwrap().unwrap();
+    assert!(notice.body.contains("ChatGPT for Codex · test-backup"));
+    assert_eq!(store::claim_outbox(&db).await.unwrap().unwrap().body, reply);
+    assert_eq!(primary.calls.load(Ordering::Relaxed), 3);
+    assert_eq!(backup.calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
 async fn a_smaller_plan_uses_the_normal_tool_broker() {
     let db = fixture().await;
     let model = Arc::new(LimitModel {
@@ -158,6 +320,12 @@ async fn saved_work_is_reported_without_enabling_more_tools() {
             true,
         ),
         (Stage::RepeatGoalWithoutTools, false),
+        (
+            Stage::EmptyFinish {
+                reaction_queued: false,
+            },
+            false,
+        ),
     ] {
         let db = fixture().await;
         let model = Arc::new(LimitModel {

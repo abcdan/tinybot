@@ -21,6 +21,29 @@ pub(crate) enum ProviderFailure {
     Rejected,
 }
 
+impl ProviderFailure {
+    pub(crate) fn category(self) -> &'static str {
+        match self {
+            Self::Setup => "model_setup_required",
+            Self::OpenRouterKey => "openrouter_key_required",
+            Self::OpenRouterCredits => "openrouter_credit_limit",
+            Self::CodexSignIn => "codex_sign_in_required",
+            Self::CodexService => "codex_service_unavailable",
+            Self::BackupDisabled => "backup_model_disabled",
+            Self::ModelUnavailable => "model_not_available",
+            Self::RateLimited => "model_rate_limited",
+            Self::TimedOut => "model_timed_out",
+            Self::Temporary => "model_temporarily_unavailable",
+            Self::Incomplete => "model_reply_incomplete",
+            Self::InputLimit => "model_context_limit",
+            Self::OutputLimit => "model_output_limit",
+            Self::Refused => "model_refused",
+            Self::AccessDenied => "model_access_denied",
+            Self::Rejected => "model_request_rejected",
+        }
+    }
+}
+
 impl std::fmt::Display for ProviderFailure {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         out.write_str(match self {
