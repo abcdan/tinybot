@@ -1,7 +1,7 @@
 use super::{Task, replies};
 use crate::security::{clip, now};
 use anyhow::Result;
-use sqlx::{Executor, Sqlite, SqlitePool};
+use sqlx::{Executor, Sqlite, SqlitePool, Transaction};
 
 pub async fn list_tasks<'a>(
     db: impl Executor<'a, Database = Sqlite>,
@@ -13,15 +13,22 @@ pub async fn list_tasks<'a>(
          WHERE p.id=t.shared_memory_pair AND (p.owner=t.user OR p.guest=t.user)))
          AND (t.agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=t.agent
          AND (a.owner=t.user OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=t.user))))
-         ORDER BY t.updated DESC, t.id LIMIT 40",
+         ORDER BY t.state IN ('completed','cancelled'), t.updated DESC, t.id LIMIT 40",
     )
     .bind(user)
     .fetch_all(db)
     .await?)
 }
 
-pub async fn select_task<'a>(
-    db: impl Executor<'a, Database = Sqlite>,
+pub async fn select_task(db: &SqlitePool, user: &str, task: &str) -> Result<bool> {
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+    let selected = select_task_in(&mut tx, user, task).await?;
+    tx.commit().await?;
+    Ok(selected)
+}
+
+pub(super) async fn select_task_in(
+    tx: &mut Transaction<'_, Sqlite>,
     user: &str,
     task: &str,
 ) -> Result<bool> {
@@ -31,7 +38,18 @@ pub async fn select_task<'a>(
         WHERE p.id=t.shared_memory_pair AND (p.owner=t.user OR p.guest=t.user)))
         AND (t.agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=t.agent
         AND (a.owner=t.user OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=t.user)))))")
-        .bind(task).bind(user).bind(task).execute(db).await?.rows_affected();
+        .bind(task).bind(user).bind(task).execute(&mut **tx).await?.rows_affected();
+    if changed == 1 {
+        sqlx::query(
+            "UPDATE tasks SET state='idle',revision=revision+1,updated=?
+             WHERE id=? AND user=? AND state='completed'",
+        )
+        .bind(now())
+        .bind(task)
+        .bind(user)
+        .execute(&mut **tx)
+        .await?;
+    }
     Ok(changed == 1)
 }
 

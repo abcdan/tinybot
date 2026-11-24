@@ -183,6 +183,7 @@ async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<
         "select-task" => tasks::select_task(app, user, data).await?,
         "search-tasks" => return task_views::search(app, user, data).await,
         "stop-task" => task_views::stop(app, user, data).await?,
+        "complete-task" => task_views::complete(app, user, data).await?,
         "edit-email-draft" => return mail::edit_draft(app, user, data).await,
         "get-form" => return settings::get_form(app, user, data).await,
         "answer-settings-form" => return settings::answer_form(app, user, data).await,

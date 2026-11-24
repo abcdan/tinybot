@@ -636,6 +636,7 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                     "request_form"
                         | "request_input"
                         | "configure_settings"
+                        | "complete_task"
                         | "propose_agent"
                         | "delegate"
                         | "connect_mcp"
