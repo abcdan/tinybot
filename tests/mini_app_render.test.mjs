@@ -1368,7 +1368,8 @@ test('audit usage shows provider, model and run totals without treating missing 
             case 'audit-session':
                 assert.deepEqual(data, {id: 42});
                 return {session: run, next_after: null, usage: runUsage, entries: [
-                    {id: 1, at: started, kind: 'model_call', name: modelName, status: 'completed', detail: {usage: free}},
+                    {id: 1, at: started, kind: 'model_call', name: modelName, status: 'completed',
+                        detail: {usage: {...free, reasoning_tokens: 12}}},
                 ]};
             default: assert.fail('Unexpected Mini App action ' + action);
         }
@@ -1409,7 +1410,8 @@ test('audit usage shows provider, model and run totals without treating missing 
         await entry.locator('.audit-metrics').waitFor({state: 'hidden'});
         await modelCall.click();
         await entry.locator('.audit-metrics').waitFor();
-        assert.deepEqual(await values(entry), ['$0.00', '234', '20', '254']);
+        assert.deepEqual(await values(entry), ['$0.00', '234', '20', '254', '12']);
+        await entry.getByText('Reasoning tokens (included in output)', {exact: true}).waitFor();
         assert.equal(await entry.locator('script').count(), 0);
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
 
