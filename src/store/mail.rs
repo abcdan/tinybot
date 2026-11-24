@@ -2,8 +2,8 @@ mod delivery;
 
 pub(super) use delivery::reveal_reply;
 pub use delivery::{
-    MailAccess, MailContent, MailTaskContext, PollMailbox, advance_cursor, initialize_cursor,
-    mail_preview, poll_mailboxes, record_delivery, reveal_mail, task_context,
+    MailAccess, MailContent, MailTaskContext, PollMailbox, advance_cursor, briefing,
+    initialize_cursor, mail_preview, poll_mailboxes, record_delivery, reveal_mail, task_context,
 };
 
 use crate::security::{Vault, id, now};

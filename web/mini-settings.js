@@ -42,17 +42,175 @@ export function schedules(state) {
         await refresh();
         show('Time zone saved.');
     }));
-    content.append(zone, node('h2', 'Reminders and scheduled tasks'));
+    const editor = node('div');
+    const templates = card('Create a routine');
+    const choose = (draft = {}) => {
+        editor.replaceChildren(routineForm(state, draft, false));
+        editor.querySelector('input').focus();
+    };
+    templates.append(row(
+        button('New routine', () => choose()),
+        button('Inbox briefing', () => choose({
+            title: 'Inbox briefing',
+            instructions: 'Summarize recent messages in folders enabled for automatic handling.',
+            source: 'inbox',
+            steps: [
+                {instruction: 'Identify messages that need attention. Omit codes, secrets and credentials.'},
+                {instruction: 'Summarize what needs action and what is informational.'},
+            ],
+        }), true),
+        button('Weekly research digest', () => choose({
+            title: 'Weekly research digest',
+            instructions: 'Track public developments in [topic].',
+            cron: '0 9 * * 1',
+            steps: [
+                {instruction: 'Find public developments on the topic from the last seven days. Open sources to verify each item.'},
+                {instruction: 'Write a short digest with source links, dates, and why each item matters.'},
+            ],
+        }), true),
+    ), editor);
+    content.append(zone, templates, node('h2', 'Reminders, scheduled tasks, and routines'));
     if (!state.schedules.length) content.append(card(null, 'No schedules yet.'));
-    for (const schedule of state.schedules) {
-        const next = schedule.next_run ? new Intl.DateTimeFormat(undefined, {
-            dateStyle: 'medium', timeStyle: 'short', timeZone: schedule.time_zone
-        }).format(new Date(schedule.next_run * 1000)) : '';
-        const item = card(schedule.title, next ? next + ' · ' + schedule.time_zone : schedule.state);
-        if (schedule.cron) item.append(node('p', schedule.cron, 'meta'));
-        if (schedule.state === 'active') item.append(action('Cancel schedule', 'cancel-schedule', {id: schedule.id}, 'Schedule cancelled.', true));
-        content.append(item);
+    for (const schedule of state.schedules) content.append(scheduleCard(state, schedule));
+}
+
+function scheduleCard(state, schedule) {
+    const active = schedule.state === 'active';
+    const editable = active || ['paused', 'manual'].includes(schedule.state);
+    const label = {paused: 'Paused', manual: 'Manual', done: 'Completed', cancelled: 'Cancelled', invalid: 'Invalid schedule'};
+    const next = active && schedule.next_run
+        ? scheduleTime(schedule.next_run, schedule.time_zone) + ' · ' + schedule.time_zone
+        : label[schedule.state];
+    const item = card(schedule.title, next);
+    const {id, revision} = schedule;
+    const controls = row();
+    if (editable || schedule.state === 'done') {
+        const request_id = crypto.randomUUID();
+        controls.append(action('Run now', 'run-schedule', {id, revision, request_id}, 'Run queued.'));
     }
+    if (active || schedule.state === 'paused') {
+        controls.append(active
+            ? action('Pause', 'pause-schedule', {id, revision}, 'Schedule paused.', true)
+            : action('Resume', 'resume-schedule', {id, revision}, 'Schedule resumed.', true));
+    }
+    if (editable) {
+        controls.append(action('Cancel schedule', 'cancel-schedule', {id}, 'Schedule cancelled.', true));
+        item.append(controls, schedulePanel('Edit schedule', async () => {
+            const draft = await api('schedule-details', {id});
+            return routineForm(state, draft, true);
+        }));
+    } else if (controls.childElementCount) item.append(controls);
+    item.append(schedulePanel('Run history', async () => {
+        const {runs} = await api('schedule-history', {id});
+        const history = node('div');
+        if (!runs.length) history.append(node('p', 'No runs yet.'));
+        for (const run of runs) {
+            const status = {idle: 'Finished', setup: 'Needs setup'};
+            const type = {manual: 'Manual', schedule: 'Scheduled'};
+            const details = [
+                scheduleTime(run.started_at ?? run.updated, schedule.time_zone),
+                type[run.trigger],
+                status[run.state] ?? run.state,
+            ].filter(Boolean).join(' · ');
+            const entry = card(run.title, details);
+            if (run.state !== 'cancelled') entry.append(action('Continue in chat', 'select-task', {task: run.task}, 'Send your next message in Telegram.', true));
+            history.append(entry);
+        }
+        return history;
+    }));
+    return item;
+}
+
+function scheduleTime(time, timeZone) {
+    return new Intl.DateTimeFormat(undefined, {
+        dateStyle: 'medium', timeStyle: 'short', timeZone
+    }).format(new Date(time * 1000));
+}
+
+function schedulePanel(label, load) {
+    const panel = node('details');
+    const target = node('div');
+    panel.append(node('summary', label), target);
+    let requested = false;
+    panel.addEventListener('toggle', async () => {
+        if (!panel.open || requested) return;
+        requested = true;
+        target.replaceChildren(node('p', 'Loading…', 'meta'));
+        try { target.replaceChildren(await load()); }
+        catch (error) {
+            requested = false;
+            target.replaceChildren(node('p', error.message));
+        }
+    });
+    return panel;
+}
+
+function routineForm(state, draft, editing) {
+    const timing = field('timing', 'When to run', {
+        choices: [['manual', 'Manually'], ['once', 'Once'], ['recurring', 'On a schedule']],
+        value: draft.cron ? 'recurring' : draft.local_at ? 'once' : 'manual',
+    });
+    const timezone = draft.time_zone ?? state.time_zone;
+    const at = field('at', 'Date and time', {type: 'datetime-local', value: draft.local_at, hint: timezone});
+    const cron = field('cron', 'Cron expression', {value: draft.cron ?? '', max: 110, hint: `Five fields in ${timezone}, such as 0 9 * * 1 for Mondays at 9 am.`});
+    const scheduleControls = [at, cron];
+    const timingControl = timing.querySelector('select');
+    const updateTiming = () => scheduleControls.forEach((label, index) => {
+        label.hidden = timingControl.value !== ['once', 'recurring'][index];
+        label.querySelector('input').disabled = label.hidden;
+    });
+    timingControl.addEventListener('change', updateTiming);
+    updateTiming();
+    const steps = node('div');
+    if (draft.kind !== 'reminder') routineSteps(steps, state, draft);
+    return form(editing ? 'Save changes' : 'Save routine', [
+        field('title', 'Title', {value: draft.title, max: 100}),
+        field('input', 'Instructions', {type: 'textarea', value: draft.instructions, max: 2000}),
+        timing, ...scheduleControls, steps,
+    ], async data => {
+        const names = [...steps.querySelectorAll('fieldset')];
+        const routine = {
+            title: data.title, input: data.input,
+            steps: names.map(entry => {
+                const instruction = entry.querySelector('textarea').value;
+                const agent = entry.querySelector('select')?.value;
+                return {instruction, agent: agent || null};
+            }),
+        };
+        if (data.at) routine.at = data.at === draft.local_at ? draft.scheduled_at : data.at;
+        if (data.cron) routine.cron = data.cron;
+        if (editing) await api('edit-schedule', {id: draft.id, revision: draft.revision, routine});
+        else await api('create-routine', {source: draft.source, routine});
+        await refresh();
+        show(editing ? 'Schedule updated.' : 'Routine saved.');
+    });
+}
+
+function routineSteps(steps, state, draft) {
+    const owned = (state.agents ?? []).filter(agent => agent.owner === state.user);
+    const list = node('div');
+    const add = button('Add step', () => appendStep({}), true);
+    const update = () => {
+        add.hidden = list.children.length >= 6;
+        [...list.children].forEach((entry, index) => {
+            entry.querySelector('legend').textContent = `Step ${index + 1}`;
+        });
+    };
+    const appendStep = step => {
+        const entry = node('fieldset');
+        const instruction = field('instruction', 'Step instructions', {type: 'textarea', max: 600, value: step.instruction});
+        entry.append(node('legend'), instruction);
+        if (draft.source !== 'inbox') {
+            const choices = [['', 'Chief'], ...owned.map(agent => [agent.id, agent.name])];
+            if (step.agent && !owned.some(agent => agent.id === step.agent)) choices.push([step.agent, 'Unavailable helper']);
+            entry.append(field('agent', 'Assigned to', {choices, value: step.agent ?? '', required: false}));
+        }
+        entry.append(button('Remove step', () => { entry.remove(); update(); }, true));
+        list.append(entry);
+        update();
+    };
+    steps.append(list, add);
+    for (const step of draft.steps ?? [{}]) appendStep(step);
 }
 
 export function model(state) {
@@ -61,10 +219,38 @@ export function model(state) {
         const current = card('Task model', provider + ' · ' + state.model);
         current.append(action('Disconnect task model', 'disconnect-model', {}, 'Task model disconnected.', true));
         content.append(current);
+        content.append(backupModel(state));
     }
     content.append(openRouter(state));
     if (state.openrouter_server_tools) content.append(openRouterTools(state.openrouter_server_tools));
     content.append(codexSettings(state));
+}
+
+function backupModel(state) {
+    const backup = state.backup_model;
+    const providers = {codex: 'ChatGPT for Codex', openrouter: 'OpenRouter'};
+    const item = card('Backup model', backup ? `${providers[backup.provider]} · ${backup.model}` : 'Off');
+    item.append(node('p', 'TinyBot can switch once if the task model is temporarily unavailable, before any tools run.'));
+    if (backup) item.append(action('Turn off backup model', 'clear-backup-model', {}, 'Backup model turned off.', true));
+    if (state.provider === 'openrouter' && state.codex_model && backup?.model !== state.codex_model) {
+        item.append(action('Use Codex as backup', 'save-backup-model', {provider: 'codex', model: state.codex_model}, 'Backup model saved.'));
+    } else if (state.provider === 'codex' && state.openrouter_connected) {
+        const options = node('div');
+        item.append(button('Choose OpenRouter backup', async () => {
+            const {models} = await api('openrouter-models');
+            const choices = [['', 'Choose a model'], ...models.map(({id, name}) => [id, name || id])];
+            options.replaceChildren(form('Save backup model', [field('model', 'OpenRouter backup model', {
+                choices, value: models.some(({id}) => id === backup?.model) ? backup.model : ''
+            })], async data => {
+                await api('save-backup-model', {...data, provider: 'openrouter'});
+                await refresh();
+                show('Backup model saved.');
+            }));
+        }, true), options);
+    } else if (!backup) {
+        item.append(node('p', 'Connect the other provider below to choose a backup.'));
+    }
+    return item;
 }
 
 function openRouterTools(settings) {
@@ -96,7 +282,7 @@ function openRouterTools(settings) {
 let prefetchedModels;
 
 function openRouter(state) {
-    const router = card('OpenRouter', 'Use one API key for OpenRouter task models and Mercury 3 forms and acknowledgements.');
+    const router = card('OpenRouter', 'Use one API key for OpenRouter task models and Mercury 3 forms.');
     const key = form('Save API key', [field('key', 'OpenRouter API key', {type: 'password', max: 8192})], async (data, element) => {
         show('Checking your OpenRouter key…');
         try {

@@ -22,6 +22,97 @@ async function mockMiniApp(context, respond, bridge) {
     });
 }
 
+test('schedules edit instructions, pause and run a saved routine', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 640}});
+        const page = await context.newPage();
+        const schedule = {
+            id: 'fixture-routine', title: 'Weekly review', state: 'active', revision: 0,
+            time_zone: 'Europe/Amsterdam', cron: '0 9 * * 1',
+        };
+        const state = {
+            user: '1', time_zone: 'Europe/Amsterdam', provider: 'openrouter',
+            requests: [], tasks: [], agents: [], schedules: [schedule],
+        };
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return state;
+            assert.equal(data.id, schedule.id);
+            if (action === 'schedule-details') {
+                return {...schedule, instructions: 'Draft the review.', steps: [{instruction: 'Collect updates.'}]};
+            }
+            if (action === 'edit-schedule') {
+                assert.equal(data.revision, 0);
+                assert.deepEqual(data.routine, {
+                    title: 'Weekly review', input: 'Prepare a concise review.',
+                    cron: '0 9 * * 1', steps: [{instruction: 'Collect updates.', agent: null}],
+                });
+                schedule.revision++;
+                return {ok: true};
+            }
+            if (action === 'pause-schedule') {
+                assert.equal(data.revision, 1);
+                schedule.state = 'paused';
+                schedule.revision++;
+                return {ok: true};
+            }
+            if (action === 'run-schedule') {
+                assert.equal(data.revision, 2);
+                assert.match(data.request_id, /^[a-f0-9-]{36}$/);
+                return {task: 'fixture-run'};
+            }
+            if (action === 'schedule-history') {
+                return {runs: [{task: 'fixture-run', title: 'Weekly review', state: 'idle', trigger: 'manual', started_at: 1795526400}]};
+            }
+            assert.fail(`Unexpected Mini App action ${action}`);
+        });
+        await page.goto('https://tinybot.test/');
+        await page.getByRole('button', {name: 'Schedules'}).click();
+        await page.getByText('Edit schedule', {exact: true}).click();
+        await page.getByLabel('Instructions', {exact: true}).fill('Prepare a concise review.');
+        await page.getByRole('button', {name: 'Save changes'}).click();
+        await page.getByText('Schedule updated.').waitFor();
+        await page.getByRole('button', {name: 'Pause', exact: true}).click();
+        await page.getByRole('button', {name: 'Resume', exact: true}).waitFor();
+        await page.getByRole('button', {name: 'Run now', exact: true}).click();
+        await page.getByText('Run queued.').waitFor();
+        await page.getByText('Run history', {exact: true}).click();
+        await page.getByText('Manual · Finished', {exact: false}).waitFor();
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
+    } finally {
+        await browser.close();
+    }
+});
+
+test('task search stops the specific returned revision', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 640}});
+        const page = await context.newPage();
+        const state = {user: '1', provider: 'openrouter', requests: [], tasks: []};
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return state;
+            if (action === 'search-tasks') {
+                assert.deepEqual(data, {query: 'release summary', offset: 0});
+                return {items: [{id:'fixture-task', title:'Release notes', state:'running', revision:3}], next_offset:null};
+            }
+            if (action === 'stop-task') {
+                assert.deepEqual(data, {task: 'fixture-task', revision: 3});
+                return {ok: true};
+            }
+            assert.fail(`Unexpected Mini App action ${action}`);
+        });
+        await page.goto('https://tinybot.test/');
+        await page.getByLabel('Search retained messages and tasks').fill('release summary');
+        await page.getByRole('button', {name:'Search tasks'}).click();
+        const task = page.getByRole('heading', {name:'Release notes'}).locator('..');
+        await task.getByRole('button', {name:'Stop',exact:true}).click();
+        await page.getByText('Task stopped.', {exact:true}).waitFor();
+    } finally {
+        await browser.close();
+    }
+});
+
 test('first-run setup checks one key, searches tool models and opens the named Chief', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
     try {
@@ -157,6 +248,110 @@ test('MCP approvals show a plain explanation and can be revoked for the exact co
         await page.getByRole('button', {name: 'Revoke approval for search_and_read', exact: true}).click();
         await page.getByText('Approval revoked.', {exact: true}).waitFor();
         assert.equal(await page.getByRole('heading', {name: 'Always approved tools', exact: true}).count(), 0);
+    } finally {
+        await browser.close();
+    }
+});
+
+test('a paired Codex model becomes the backup only after enabling it', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext();
+        const page = await context.newPage();
+        const state = {user: '1', provider: 'openrouter', model: 'fixture/model', codex_model: 'fixture-codex',
+            requests: [], tasks: [], openrouter_connected: true};
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return state;
+            if (action === 'openrouter-models') return {models: [{id: 'fixture/model', name: 'Main model'}]};
+            if (action === 'save-backup-model') {
+                assert.deepEqual(data, {provider: 'codex', model: 'fixture-codex'});
+                state.backup_model = data;
+                return {ok: true};
+            }
+            if (action === 'clear-backup-model') {
+                state.backup_model = null;
+                return {ok: true};
+            }
+            assert.fail(action);
+        });
+        await page.goto('https://tinybot.test/mini');
+        await page.locator('[data-tab="model"]').click();
+        const backup = page.locator('section').filter({has: page.getByRole('heading', {name: 'Backup model', exact: true})});
+        await backup.getByText('Off', {exact: true}).waitFor();
+        await backup.getByRole('button', {name: 'Use Codex as backup'}).click();
+        await backup.getByText('ChatGPT for Codex · fixture-codex', {exact: true}).waitFor();
+        await backup.getByRole('button', {name: 'Turn off backup model'}).click();
+        await backup.getByText('Off', {exact: true}).waitFor();
+        assert.equal(state.provider, 'openrouter');
+    } finally {
+        await browser.close();
+    }
+});
+
+test('Docblock sign-in and note link management stay inside the signed Mini App', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext();
+        const page = await context.newPage();
+        const state = {user: '1', provider: 'codex', requests: [], tasks: [], connectors: []};
+        const connector = {id: 'docs', name: 'Docblock', auth: 'oauth', endpoint: 'https://mcp.docblock.dev/'};
+        const share = {id: 'test-share', target: 'minutes/weekly', expires_at: '2026-12-01T08:00:00Z'};
+        let revoked = false;
+        let approved = false;
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return state;
+            if (action === 'docblock-oauth') {
+                assert.deepEqual(data, state.connectors.length ? {id: 'docs'} : {});
+                return {consent_url: 'https://docblock.dev/oauth/authorize?state=synthetic'};
+            }
+            if (action === 'docblock-workspaces') {
+                assert.deepEqual(data, {id: 'docs'});
+                return {workspaces: [{id: 'my-workspace', name: 'Personal', role: 'owner'}]};
+            }
+            if (action === 'docblock-shares') {
+                assert.deepEqual(data, {id: 'docs', workspace: 'my-workspace'});
+                return {shares: revoked ? [] : [share]};
+            }
+            if (action === 'revoke-docblock-share') {
+                assert.deepEqual(data, {id: 'docs', workspace: 'my-workspace', share: 'test-share'});
+                revoked = true;
+                return {ok: true};
+            }
+            if (action === 'approve-docblock-share') {
+                assert.deepEqual(data, {id: 'approval', expires_in_days: 14});
+                approved = true;
+                state.requests = [];
+                return {ok: true};
+            }
+            assert.fail(action);
+        }, 'window.Telegram = {WebApp: {initData: "fixture", ready() {}, openLink(url) { window.openedLink = url; }}};');
+        await page.goto('https://tinybot.test/mini?connect=docblock');
+        await page.getByRole('button', {name: 'Connect Docblock'}).click();
+        await page.getByRole('button', {name: 'Open Docblock sign-in'}).click();
+        assert.equal(await page.evaluate(() => window.openedLink), 'https://docblock.dev/oauth/authorize?state=synthetic');
+        state.connectors = [connector];
+        state.docblock_access = {docs: 'read'};
+        await page.getByRole('button', {name: 'Check connection'}).click();
+        await page.getByText('Read-only access').waitFor();
+        assert.equal(await page.getByRole('button', {name: 'Manage public note links'}).count(), 0);
+        await page.getByRole('button', {name: 'Sign in again'}).click();
+        state.docblock_access.docs = 'write';
+        state.requests = [{id: 'approval', kind: 'approve', content: {operation: 'Publish Docblock note', mcp: true,
+            docblock: {workspace: 'Personal', target: 'minutes/weekly', change: 'Later edits appear at the same link.', expires_in_days: 7}}}];
+        await page.getByRole('button', {name: 'Check connection'}).click();
+        await page.getByRole('button', {name: 'Manage public note links'}).click();
+        await page.getByRole('button', {name: 'Revoke link', exact: true}).click();
+        await page.getByRole('button', {name: 'Confirm revocation'}).click();
+        await page.getByText('Link revoked.').waitFor();
+        assert.equal(revoked, true);
+        await page.locator('[data-tab="home"]').click();
+        assert.equal(await page.getByRole('button', {name: 'Always approve'}).count(), 0);
+        const expiry = page.getByLabel('Expires after (days)');
+        assert.equal(await expiry.inputValue(), '7');
+        await expiry.fill('14');
+        await page.getByRole('button', {name: 'Approve once'}).click();
+        await page.getByText('Publication approved.').waitFor();
+        assert.equal(approved, true);
     } finally {
         await browser.close();
     }
@@ -802,7 +997,7 @@ test('helpers can be managed while only Chief tasks can be selected in chat', as
         await page.getByRole('heading', {name: 'Chief research task'}).waitFor();
         await page.getByRole('heading', {name: 'Chief task in a shared workspace'}).waitFor();
         await page.locator('.card').filter({has: page.getByRole('heading', {name: 'Chief research task'})})
-            .getByRole('button', {name: 'Switch to task'}).click();
+            .getByRole('button', {name: 'Continue', exact: true}).click();
         await page.getByText('Current Chief task', {exact: true}).waitFor();
         await page.getByRole('button', {name: 'Helpers', exact: true}).click();
         await page.getByRole('heading', {name: 'Research helper', exact: true}).waitFor();
@@ -1166,6 +1361,59 @@ test('OpenRouter server tool toggles save independently and restore on rejection
         await page.getByRole('button', {name: 'Model', exact: true}).click();
         assert.equal(await search.isChecked(), false);
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
+    } finally {
+        await browser.close();
+    }
+});
+
+test('operator invitations and guest shared memory respect the signed account view', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const state = {time_zone: 'UTC', provider: 'openrouter', requests: [], tasks: [], agents: []};
+        const ownerContext = await browser.newContext({viewport: {width: 320, height: 640}});
+        await mockMiniApp(ownerContext, ({action, data}) => {
+            if (action === 'status') return {...state, user: '1', operator: true};
+            if (action === 'list-invites') return {pending: [], guests: [{
+                id: '2', display_name: 'Guest Sample', setup_complete: true, suspended: false, accepted_at: 1795526400,
+                active_day: null, runs_started: 1, runs_completed: 1, tokens: null, cost_usd: 0,
+            }]};
+            if (action === 'create-invite') {
+                assert.deepEqual(data, {});
+                return {command: '/start fixture-invite'};
+            }
+            throw new Error('Unexpected owner action ' + action);
+        });
+        const owner = await ownerContext.newPage();
+        await owner.goto('https://tinybot.test/mini');
+        await owner.getByRole('button', {name: 'Invites', exact: true}).click();
+        await owner.getByRole('heading', {name: 'Guest Sample'}).waitFor();
+        assert.equal(await owner.getByText('Not reported', {exact: true}).count(), 1);
+        await owner.getByRole('button', {name: 'Create invitation'}).click();
+        await owner.getByText('/start fixture-invite', {exact: true}).waitFor();
+
+        let joined = false;
+        const guestContext = await browser.newContext({viewport: {width: 320, height: 640}});
+        await mockMiniApp(guestContext, ({action, data}) => {
+            if (action === 'status') return {...state, user: '2', operator: false, shared_memory_available: true};
+            if (action === 'list-memories') return {entries: [], next_before: null};
+            if (action === 'shared-memory-pairs') return {pairs: [{
+                id: 'fixture-pair', peer: '1', joined, peer_joined: true, ready: joined,
+            }]};
+            if (action === 'join-shared-memory') {
+                assert.deepEqual(data, {pair: 'fixture-pair'});
+                joined = true;
+                return {ok: true};
+            }
+            if (action === 'shared-memory-notes') return {notes: [{id: 'note', body: 'A published reference.', own: false}]};
+            throw new Error('Unexpected guest action ' + action);
+        });
+        const guest = await guestContext.newPage();
+        await guest.goto('https://tinybot.test/mini');
+        await guest.getByRole('button', {name: 'Memory', exact: true}).click();
+        assert.equal(await guest.getByRole('button', {name: 'Invites', exact: true}).count(), 0);
+        await guest.getByRole('button', {name: 'Join shared memory'}).click();
+        await guest.getByText('A published reference.', {exact: true}).waitFor();
+        assert.equal(await guest.getByRole('button', {name: 'Remove shared note'}).count(), 0);
     } finally {
         await browser.close();
     }

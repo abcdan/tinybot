@@ -65,6 +65,7 @@ pub async fn poll_mailboxes(db: &SqlitePool, vault: &Vault) -> Result<Vec<PollMa
     let rows: Vec<PollRow> = sqlx::query_as(
         "SELECT a.owner,a.id AS account,a.epoch,f.name AS folder,f.uid_validity,f.last_uid,a.encrypted
          FROM mail_folders f JOIN mail_accounts a ON a.id=f.account
+         JOIN users u ON u.id=a.owner AND u.suspended_at IS NULL
          WHERE f.next_poll<=? ORDER BY f.next_poll,f.account,f.name LIMIT 8",
     )
     .bind(timestamp)
@@ -154,7 +155,8 @@ async fn update_cursor(
     let updated = sqlx::query(
         "UPDATE mail_folders SET uid_validity=?,last_uid=? WHERE account=? AND name=?
          AND uid_validity IS ? AND last_uid=?
-         AND EXISTS(SELECT 1 FROM mail_accounts WHERE id=? AND owner=? AND epoch=?)",
+         AND EXISTS(SELECT 1 FROM mail_accounts a JOIN users u ON u.id=a.owner
+             WHERE a.id=? AND a.owner=? AND a.epoch=? AND u.suspended_at IS NULL)",
     )
     .bind(uid_validity)
     .bind(last_uid)
@@ -316,6 +318,35 @@ pub async fn task_context(
         content,
         automated_turn: row.automated_revision == Some(task.revision),
     }))
+}
+
+/// Reads a bounded digest from folders the user has enabled for automatic handling.
+pub async fn briefing(db: &SqlitePool, vault: &Vault, task: &Task) -> Result<Vec<MailContent>> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT m.id,m.encrypted FROM mail_messages m
+         JOIN mail_accounts a ON a.id=m.account AND a.epoch=m.account_epoch
+         JOIN mail_folders f ON f.account=a.id AND f.name=m.folder
+         JOIN tasks t ON t.id=? AND t.user=a.owner AND t.revision=? AND t.state='running'
+         JOIN schedule_runs r ON r.task=t.id AND r.source='inbox'
+         JOIN users u ON u.id=t.user AND u.suspended_at IS NULL
+         WHERE a.owner=? AND f.automate=1 AND m.automated_revision IS NOT NULL
+           AND t.agent IS NULL AND t.shared_memory_pair IS NULL
+         ORDER BY m.rowid DESC LIMIT 12",
+    )
+    .bind(&task.id)
+    .bind(task.revision)
+    .bind(&task.user)
+    .fetch_all(db)
+    .await?;
+    rows.into_iter()
+        .map(|(id, encrypted)| {
+            let mut message = open_message(vault, &task.user, &id, &encrypted)?;
+            message.text = clip(&message.text, 700).to_owned();
+            message.reply_to = None;
+            message.message_id = None;
+            Ok(message)
+        })
+        .collect()
 }
 
 pub async fn reveal_mail(

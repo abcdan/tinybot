@@ -76,6 +76,7 @@ async fn chief_reads_telegram_attachments_and_rechecks_a_quoted_upload() {
     store::ingest_telegram_attachment(&db, "1", 1, "1", "Read the attached sign.", 50, None, photo)
         .await
         .unwrap();
+    super::expect_telegram_ack(&db, 50).await;
     let first = store::claim(&db).await.unwrap().unwrap();
     runtime::work(&app, &first).await.unwrap();
     assert_eq!(
@@ -99,6 +100,7 @@ async fn chief_reads_telegram_attachments_and_rechecks_a_quoted_upload() {
     .await
     .unwrap();
     let follow_up = store::claim(&db).await.unwrap().unwrap();
+    super::expect_telegram_ack(&db, 51).await;
     assert_eq!(follow_up.id, first.id);
     runtime::work(&app, &follow_up).await.unwrap();
     assert_eq!(
@@ -118,6 +120,7 @@ async fn chief_reads_telegram_attachments_and_rechecks_a_quoted_upload() {
     store::ingest_telegram_attachment(&db, "1", 3, "1", "Read this text file.", 52, None, doc)
         .await
         .unwrap();
+    super::expect_telegram_ack(&db, 52).await;
     let third = store::claim(&db).await.unwrap().unwrap();
     runtime::work(&app, &third).await.unwrap();
     assert_eq!(

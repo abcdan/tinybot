@@ -199,6 +199,7 @@ mod tests {
             client: reqwest::Client::new(),
             api: format!("http://{}/botTEST", listener.local_addr().unwrap()),
             origin: "https://example.test".into(),
+            identity: Default::default(),
         };
         let fixture = Router::new().route(
             "/botTEST/getUpdates",
@@ -257,6 +258,9 @@ mod tests {
                 .await
                 .unwrap();
         }
+        let acknowledgement = store::claim_outbox(&db).await.unwrap().unwrap();
+        assert_eq!(acknowledgement.reply_to_message_id, Some(51));
+        assert!(acknowledgement.button.unwrap().starts_with("ta/"));
         assert!(!eligible(&db, "telegram", &note).await.unwrap());
         let task = store::claim(&db).await.unwrap().unwrap();
         let events: Vec<(String, String, Option<i64>)> =

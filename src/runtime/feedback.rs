@@ -2,7 +2,7 @@ use super::{ENGINE, MAX_REPLY_BYTES, Step};
 use crate::{
     audit,
     channel::ChannelAdapter,
-    model::{ModelProvider, ToolDefinition, parse_json_reply},
+    model::{ModelProvider, ProviderFailure, ToolDefinition, parse_json_reply, provider_failure},
     security::clip,
     store::{self, Task},
 };
@@ -48,11 +48,22 @@ impl Feedback {
                 parse_json_reply(&response)
             }) => result,
         };
-        if let Ok(step) = streamed {
-            return Ok(Some(step));
+        match streamed {
+            Ok(step) => return Ok(Some(step)),
+            Err(error) => {
+                self.source.lock().expect("draft buffer").clear();
+                if provider_failure(&error).is_some_and(|failure| {
+                    !matches!(
+                        failure,
+                        ProviderFailure::Incomplete
+                            | ProviderFailure::TimedOut
+                            | ProviderFailure::Temporary
+                    )
+                }) {
+                    return Err(error);
+                }
+            }
         }
-
-        self.source.lock().expect("draft buffer").clear();
         tracing::debug!("streamed model response failed; retrying with buffered completion");
         let buffered = tokio::select! {
             biased;
@@ -270,6 +281,37 @@ mod tests {
             assert_eq!(model.calls.load(Ordering::Relaxed), 1);
             assert!(feedback.source.lock().unwrap().is_empty());
         }
+    }
+
+    struct LimitedModel(AtomicUsize);
+
+    #[async_trait]
+    impl ModelProvider for LimitedModel {
+        async fn complete(&self, _: &str, _: &str) -> Result<String> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(r#"{"kind":"reply","text":"Unexpected buffered call"}"#.into())
+        }
+
+        async fn complete_streaming(
+            &self,
+            _: &str,
+            _: &str,
+            _: &mut TextDelta<'_>,
+        ) -> Result<String> {
+            Err(ProviderFailure::RateLimited.into())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_provider_rate_limit_does_not_retry_immediately_without_streaming() {
+        let model = LimitedModel(AtomicUsize::new(0));
+        let error = Feedback::default()
+            .complete(&model, &json!({}), &[])
+            .await
+            .err()
+            .unwrap();
+        assert!(error.is::<ProviderFailure>());
+        assert_eq!(model.0.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]

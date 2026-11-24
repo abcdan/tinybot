@@ -65,6 +65,7 @@ async fn telegram_attachments_preserve_captions_and_skip_duplicate_or_unauthoriz
         client: reqwest::Client::new(),
         api: format!("http://{}/botTEST", listener.local_addr().unwrap()),
         origin: "https://tinybot.test".into(),
+        identity: Default::default(),
     };
     let router = Router::new().route(
         "/botTEST/getUpdates",
@@ -155,6 +156,9 @@ async fn telegram_attachments_preserve_captions_and_skip_duplicate_or_unauthoriz
             ),
         ]
     );
+    let acknowledgement = store::claim_outbox(&db).await.unwrap().unwrap();
+    assert_eq!(acknowledgement.reply_to_message_id, Some(21));
+    assert!(acknowledgement.button.unwrap().starts_with("ta/"));
     let notification = store::claim_outbox(&db).await.unwrap().unwrap();
     assert_eq!(notification.reply_to_message_id, Some(23));
     assert!(notification.body.contains("8 MB"));

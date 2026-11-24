@@ -28,16 +28,11 @@ pub async fn run(app: Arc<App>, channel: Arc<dyn ChannelAdapter>) {
                         jobs.spawn(async move {
                             let trace = start_audit(&app, &task).await;
                             audit::scope(trace.clone(), audit::record("session", "agent", "running", Value::Null)).await;
-                            let acknowledgement = tokio::spawn({
-                                let app = app.clone();
-                                let task = task.clone();
-                                audit::scope(trace.clone(), async move {
-                                    if super::acknowledgement::send(&app, &task).await.is_err() {
-                                        tracing::debug!(task=%task.id, "Mercury acknowledgement unavailable");
-                                    }
-                                })
-                            });
+                            let group = store::groups::is_group_task(&app.db, &task.id).await.unwrap_or(true);
                             let result = audit::scope(trace.clone(), async {
+                                if group {
+                                    return work_task(&app, &task, None).await;
+                                }
                                 let feedback=Feedback::default();
                                 let processing=work_task(&app,&task,Some(&feedback));
                                 tokio::pin!(processing);
@@ -47,13 +42,8 @@ pub async fn run(app: Arc<App>, channel: Arc<dyn ChannelAdapter>) {
                                     ()=feedback.show(&app.db,&task,&*channel)=>processing.await,
                                 }
                             }).await;
-                            acknowledgement.abort();
-                            let _ = acknowledgement.await;
-                            if result.is_err() {
-                                tracing::warn!(task=%task.id,"task paused");
-                                let _=store::settle(&app.db,&task,"blocked",Some(
-                                    "I couldn’t finish this turn. Your task is saved. Send a follow-up to try again."
-                                )).await;
+                            if let Err(error) = &result {
+                                record_failure(&app, &task, trace.clone(), group, error).await;
                             }
                             finish_audit(trace, &task, result.is_err()).await;
                         });
@@ -66,6 +56,41 @@ pub async fn run(app: Arc<App>, channel: Arc<dyn ChannelAdapter>) {
     }
 }
 
+async fn record_failure(
+    app: &App,
+    task: &Task,
+    trace: Option<audit::Trace>,
+    group: bool,
+    error: &anyhow::Error,
+) {
+    let failure = super::failure::classify(error);
+    tracing::warn!(task=%task.id,category=failure.category,"task paused");
+    audit::scope(
+        trace,
+        audit::record(
+            "session",
+            "failure",
+            "blocked",
+            serde_json::json!({"category":failure.category}),
+        ),
+    )
+    .await;
+    let recorded = if group {
+        store::settle(
+            &app.db,
+            task,
+            "blocked",
+            Some("I couldn’t finish this group task. Reply here to continue."),
+        )
+        .await
+    } else {
+        store::task_failures::record(&app.db, task, failure.message, failure.retryable).await
+    };
+    if recorded.is_err() {
+        tracing::warn!(task=%task.id,"could not save task failure");
+    }
+}
+
 #[cfg(test)]
 pub(crate) async fn work(app: &App, task: &Task) -> anyhow::Result<()> {
     let trace = start_audit(app, task).await;
@@ -74,6 +99,10 @@ pub(crate) async fn work(app: &App, task: &Task) -> anyhow::Result<()> {
         work_task(app, task, None).await
     })
     .await;
+    if let Err(error) = &result {
+        let group = store::groups::is_group_task(&app.db, &task.id).await?;
+        record_failure(app, task, trace.clone(), group, error).await;
+    }
     finish_audit(trace, task, result.is_err()).await;
     result
 }

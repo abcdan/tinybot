@@ -24,6 +24,12 @@ pub(super) async fn select_openrouter_model(app: &App, user: &str, data: &Value)
         .await
 }
 
+pub(super) async fn save_backup_model(app: &App, user: &str, data: &Value) -> Result<()> {
+    app.models
+        .save_backup(user, text(data, "provider", 20)?, text(data, "model", 150)?)
+        .await
+}
+
 pub(super) async fn pair_codex(app: &App, user: &str, data: &Value) -> Result<Value> {
     let model = text(data, "model", 150)?;
     ensure!(

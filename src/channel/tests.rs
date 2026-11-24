@@ -1,5 +1,5 @@
 use super::{
-    dispatch::{handle_callback, send_outbound},
+    dispatch::{handle_callback, send_outbound, show_invitation},
     telegram::{suggested_keyboard, widget_rejection},
     *,
 };
@@ -13,6 +13,249 @@ use std::{collections::VecDeque, sync::Arc};
 use tokio::{net::TcpListener, sync::Mutex};
 
 type Mock = Arc<Mutex<(Vec<(String, Value)>, VecDeque<Value>)>>;
+
+#[tokio::test]
+async fn accepted_telegram_input_sends_one_reply_and_notices_when_work_waits() {
+    let mock: Mock = Arc::new(Mutex::new((
+        Vec::new(),
+        VecDeque::from([
+            json!({"ok":true,"result":{"message_id":70}}),
+            json!({"ok":true,"result":{"message_id":71}}),
+        ]),
+    )));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let telegram = Telegram {
+        client: reqwest::Client::new(),
+        api: format!("http://{}/botTEST", listener.local_addr().unwrap()),
+        origin: "https://example.test".into(),
+        identity: Default::default(),
+    };
+    let router = Router::new()
+        .route("/botTEST/{method}", post(record))
+        .with_state(mock.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let db = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&db).await.unwrap();
+    store::seed(&db, "42").await.unwrap();
+    sqlx::query("UPDATE users SET provider='codex' WHERE id='42'")
+        .execute(&db)
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        store::ingest_telegram(&db, "42", 1, "42", "Draft the plan.", 20)
+            .await
+            .unwrap();
+    }
+    let first_ack = store::claim_outbox(&db).await.unwrap().unwrap();
+    let first = store::claim(&db).await.unwrap().unwrap();
+    store::ingest_telegram(&db, "42", 2, "42", "Add milestones.", 21)
+        .await
+        .unwrap();
+    assert!(store::claim_outbox(&db).await.unwrap().is_none());
+    assert_eq!(
+        send_outbound(&db, &telegram, &first_ack).await.unwrap(),
+        MessageDelivery::Sent(Some(70))
+    );
+
+    store::ingest_telegram(&db, "42", 3, "42", "/new Queue a second task.", 22)
+        .await
+        .unwrap();
+    let queued_ack = store::claim_outbox(&db).await.unwrap().unwrap();
+    assert_eq!(
+        send_outbound(&db, &telegram, &queued_ack).await.unwrap(),
+        MessageDelivery::Sent(Some(71))
+    );
+
+    store::ingest_telegram(&db, "42", 4, "42", "/new Cancel this task.", 23)
+        .await
+        .unwrap();
+    let stale = store::claim_outbox(&db).await.unwrap().unwrap();
+    assert!(
+        store::task_views::stop(&db, "42", stale.task.as_deref().unwrap(), 1)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        send_outbound(&db, &telegram, &stale).await.unwrap(),
+        MessageDelivery::Sent(None)
+    );
+
+    let calls = mock.lock().await;
+    assert_eq!(calls.0.len(), 2);
+    assert_eq!(calls.0[0].0, "sendMessage");
+    let accepted = &calls.0[0].1;
+    assert_eq!(accepted["text"], "Got it. I’ll get to work.");
+    assert_eq!(accepted["reply_parameters"]["message_id"], 20);
+    assert_eq!(
+        accepted["reply_markup"]["inline_keyboard"][0][1]["callback_data"],
+        format!("ts/{}/{}", first.id, first.revision + 1)
+    );
+    let queued = &calls.0[1].1;
+    assert_eq!(
+        queued["text"],
+        "Got it. I’ve queued your task behind your other work."
+    );
+    assert_eq!(queued["reply_parameters"]["message_id"], 22);
+    server.abort();
+}
+
+#[tokio::test]
+async fn telegram_invite_discloses_usage_before_private_account_acceptance() {
+    let mock: Mock = Arc::new(Mutex::new((
+        Vec::new(),
+        VecDeque::from([
+            json!({"ok":true,"result":{"message_id":70}}),
+            json!({"ok":true,"result":true}),
+            json!({"ok":true,"result":true}),
+            json!({"ok":true,"result":true}),
+        ]),
+    )));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let telegram = Telegram {
+        client: reqwest::Client::new(),
+        api: format!("http://{}/botTEST", listener.local_addr().unwrap()),
+        origin: "https://example.test".into(),
+        identity: Default::default(),
+    };
+    let router = Router::new()
+        .route("/botTEST/{method}", post(record))
+        .with_state(mock.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let db = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&db).await.unwrap();
+    store::seed(&db, "1").await.unwrap();
+    let mut tx = db.begin().await.unwrap();
+    let invite = store::invitations::create(&mut tx, "1").await.unwrap();
+    tx.commit().await.unwrap();
+    assert!(
+        show_invitation(&db, &telegram, "1", 1, "42", &invite.command)
+            .await
+            .unwrap()
+    );
+    assert!(!store::invitations::available(&db, "42").await.unwrap());
+    let callback_data = {
+        let captured = mock.lock().await;
+        assert_eq!(captured.0[0].0, "sendMessage");
+        let sent = &captured.0[0].1;
+        assert_eq!(sent["chat_id"], 42);
+        assert!(
+            sent["text"]
+                .as_str()
+                .unwrap()
+                .contains("bot operator can see")
+        );
+        assert!(!sent["text"].as_str().unwrap().contains(&invite.command));
+        let button = &sent["reply_markup"]["inline_keyboard"][0][0];
+        assert_eq!(button["text"], "Accept invitation");
+        button["callback_data"].clone()
+    };
+    for user in [43, 42] {
+        let query: callback::Query = serde_json::from_value(json!({
+            "id":format!("callback-{user}"),"from":{"id":user,"is_bot":false},
+            "message":{"message_id":70,"chat":{"id":user,"type":"private"}},"data":callback_data,
+        }))
+        .unwrap();
+        handle_callback(&db, &telegram, &query).await.unwrap();
+    }
+    assert!(!store::invitations::available(&db, "43").await.unwrap());
+    assert!(store::invitations::available(&db, "42").await.unwrap());
+    assert!(
+        show_invitation(&db, &telegram, "1", 1, "42", &invite.command)
+            .await
+            .unwrap()
+    );
+    assert!(mock.lock().await.1.is_empty());
+    server.abort();
+}
+
+#[tokio::test]
+async fn sends_group_replies_to_the_registered_chat_topic_and_anchor() {
+    let mock: Mock = Arc::new(Mutex::new((
+        Vec::new(),
+        VecDeque::from([json!({"ok":true,"result":{"message_id":45}})]),
+    )));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let telegram = Telegram {
+        client: reqwest::Client::new(),
+        api: format!("http://{}/botTEST", listener.local_addr().unwrap()),
+        origin: "https://example.test".into(),
+        identity: Default::default(),
+    };
+    let app = Router::new()
+        .route("/botTEST/{method}", post(record))
+        .with_state(mock.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let scope = crate::store::groups::GroupRoute {
+        chat: -1020,
+        topic: 12,
+    };
+    assert_eq!(
+        telegram
+            .send_group(scope, "Result", Some(44))
+            .await
+            .unwrap(),
+        MessageDelivery::Sent(Some(45))
+    );
+    let captured = mock.lock().await;
+    assert_eq!(captured.0[0].0, "sendMessage");
+    assert_eq!(captured.0[0].1["chat_id"], -1020);
+    assert_eq!(captured.0[0].1["message_thread_id"], 12);
+    assert_eq!(captured.0[0].1["reply_parameters"]["message_id"], 44);
+    server.abort();
+}
+
+#[tokio::test]
+async fn uploads_telegram_files_and_retries_only_the_explicit_rate_limit() {
+    use axum::{body::Bytes, http::HeaderMap};
+    let mock = Arc::new(Mutex::new(VecDeque::from([
+        json!({"ok":false,"error_code":429,"parameters":{"retry_after":7}}).to_string(),
+        json!({"ok":true,"result":{"message_id":45}}).to_string(),
+        json!({"ok":false,"error_code":400}).to_string(),
+        "gateway returned an unreadable response".into(),
+    ])));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let telegram = Telegram {
+        client: reqwest::Client::new(),
+        api: format!("http://{}/botTEST", listener.local_addr().unwrap()),
+        origin: "https://example.test".into(),
+        identity: Default::default(),
+    };
+    let app = Router::new().route(
+        "/botTEST/sendDocument",
+        post(move |headers: HeaderMap, body: Bytes| {
+            let mock = mock.clone();
+            async move {
+                let boundary = headers["content-type"]
+                    .to_str()
+                    .unwrap()
+                    .strip_prefix("multipart/form-data; boundary=")
+                    .unwrap();
+                let body = std::str::from_utf8(&body).unwrap();
+                assert!(body.contains(&format!("--{boundary}")));
+                assert!(body.contains("name=\"document\"; filename=\"report.csv\""));
+                assert!(body.contains("column\nvalue"));
+                assert!(body.contains("\"message_id\":44"));
+                mock.lock().await.pop_front().unwrap()
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let upload =
+        || telegram.upload_file("42", "document", "report.csv", b"column\nvalue", Some(44));
+    assert_eq!(upload().await.unwrap(), MessageDelivery::Retry(7));
+    assert_eq!(upload().await.unwrap(), MessageDelivery::Sent(Some(45)));
+    assert!(!upload().await.unwrap_err().is::<UploadUncertain>());
+    assert!(upload().await.unwrap_err().is::<UploadUncertain>());
+    server.abort();
+}
 
 async fn record(
     State(mock): State<Mock>,
@@ -40,6 +283,7 @@ async fn email_buttons_and_previews_use_native_telegram_messages() {
         client: reqwest::Client::new(),
         api: format!("http://{}/botTEST", listener.local_addr().unwrap()),
         origin: "https://example.test".into(),
+        identity: Default::default(),
     };
     let app = Router::new()
         .route("/botTEST/{method}", post(record))
@@ -121,6 +365,8 @@ async fn mcp_approval_buttons_resume_only_the_owners_waiting_request() {
     store::ingest_telegram(&db, "42", 1, "42", "Find the roadmap", 70)
         .await
         .unwrap();
+    let acknowledgement = store::claim_outbox(&db).await.unwrap().unwrap();
+    assert_eq!(acknowledgement.reply_to_message_id, Some(70));
     let task = store::claim(&db).await.unwrap().unwrap();
     let request = crate::security::id();
     let body = "Search Docs for the roadmap. This sends your search query to Docs.";
@@ -175,6 +421,7 @@ async fn mcp_approval_buttons_resume_only_the_owners_waiting_request() {
         client: reqwest::Client::new(),
         api: format!("http://{}/botTEST", listener.local_addr().unwrap()),
         origin: "https://example.test".into(),
+        identity: Default::default(),
     };
     let app = Router::new()
         .route("/botTEST/{method}", post(record))
@@ -267,6 +514,7 @@ async fn polling_extracts_private_quotes_and_only_new_user_emoji() {
         client: reqwest::Client::new(),
         api: format!("http://{}/botTEST", listener.local_addr().unwrap()),
         origin: "https://example.test".into(),
+        identity: Default::default(),
     };
     let app = Router::new()
         .route("/botTEST/{method}", post(record))
@@ -324,6 +572,7 @@ async fn reactions_use_the_latest_private_telegram_message_id() {
         client: reqwest::Client::new(),
         api: format!("http://{}/botTEST", listener.local_addr().unwrap()),
         origin: "https://example.test".into(),
+        identity: Default::default(),
     };
     let app = Router::new()
         .route("/botTEST/{method}", post(record))
@@ -360,6 +609,8 @@ async fn reactions_use_the_latest_private_telegram_message_id() {
     store::ingest_telegram(&db, user, *external_id, user, text, *message_id)
         .await
         .unwrap();
+    let acknowledgement = store::claim_outbox(&db).await.unwrap().unwrap();
+    assert_eq!(acknowledgement.reply_to_message_id, Some(*message_id));
     let task = store::claim(&db).await.unwrap().unwrap();
 
     assert!(store::REACTION_EMOJIS.contains(&"👍"));
@@ -428,6 +679,7 @@ async fn drafts_use_native_entities_without_a_source_keyboard() {
         client: reqwest::Client::new(),
         api,
         origin: "https://example.test".into(),
+        identity: Default::default(),
     };
     let body = "**Gevonden**. Source: https://example.test/docs";
     assert_eq!(telegram.draft("42", 5, body).await.unwrap(), None);
@@ -481,6 +733,7 @@ async fn sends_formatted_replies_and_keeps_original_reply_buttons_on_rejection()
         client: reqwest::Client::new(),
         api,
         origin: "https://example.test".into(),
+        identity: Default::default(),
     };
     let body = "😀 **Gevonden**. Bronnen: [Documentatie](https://example.test/docs)";
     let replies = [store::SuggestedReply {
@@ -566,6 +819,7 @@ async fn sends_native_tables_and_falls_back_only_on_explicit_telegram_rejection(
         client: reqwest::Client::new(),
         api,
         origin: "https://example.test".into(),
+        identity: Default::default(),
     };
     let table = "| Abonnement | Maandprijs |\n| --- | ---: |\n| Lite | €15 |\n\n\
                  Bronnen: [Tarieven](https://example.test/tarieven)";
@@ -664,6 +918,7 @@ async fn sends_native_cards_and_direct_choices_with_honest_delivery_fallbacks() 
         client: reqwest::Client::new(),
         api,
         origin: "https://example.test".into(),
+        identity: Default::default(),
     };
 
     let card = Card::new("Hi 👋", "</p><script>&", &["A short item".into()]).unwrap();

@@ -16,7 +16,7 @@ pub(super) async fn eligible(
         return Ok(false);
     }
     Ok(sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM users WHERE id=?
+        "SELECT EXISTS(SELECT 1 FROM users WHERE id=? AND suspended_at IS NULL
         AND NOT EXISTS (SELECT 1 FROM updates WHERE channel=? AND external_id=?))",
     )
     .bind(user)

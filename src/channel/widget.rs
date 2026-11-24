@@ -85,6 +85,10 @@ pub(super) async fn answer(db: &SqlitePool, query: &Query) -> String {
 }
 
 async fn query_reply(db: &SqlitePool, user: &str, data: &str) -> Result<Value> {
+    ensure!(
+        store::invitations::available(db, user).await?,
+        "account unavailable"
+    );
     ensure!(data.len() <= 64, "oversized widget query");
     if let Some(request) = data.strip_prefix("choice/") {
         uuid::Uuid::parse_str(request)?;

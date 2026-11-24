@@ -1,5 +1,6 @@
 use super::{
-    AttachmentInput, AttachmentRead, ModelProvider, TextDelta, ToolDefinition,
+    AttachmentInput, AttachmentRead, ModelProvider, ProviderFailure, TextDelta, ToolDefinition,
+    failure::{http_transport_failure, transient_status},
     media::{READ_ATTACHMENT, data_url, read_report},
     native_reply, native_tool_proposal,
 };
@@ -7,9 +8,9 @@ use crate::{
     audit::{self, ModelCall},
     net,
 };
-use anyhow::{Context, Result, anyhow, ensure};
+use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
-use eventsource_stream::Eventsource;
+use eventsource_stream::{EventStreamError, Eventsource};
 use futures::StreamExt;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, time::Duration};
@@ -26,7 +27,7 @@ pub(super) struct OpenRouter {
 
 impl OpenRouter {
     async fn send(&self, request: Value) -> Result<reqwest::Response> {
-        reqwest::Client::builder()
+        let response = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(10))
@@ -36,8 +37,21 @@ impl OpenRouter {
             .json(&request)
             .send()
             .await
-            .and_then(reqwest::Response::error_for_status)
-            .map_err(|_| anyhow!("OpenRouter could not complete the request"))
+            .map_err(|error| http_transport_failure(&error).unwrap_or(ProviderFailure::Rejected))?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(response);
+        }
+        let metadata = tokio::time::timeout(Duration::from_secs(2), net::body(response, 32_768))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .and_then(|body| serde_json::from_slice::<Value>(&body).ok());
+        let error = metadata
+            .as_ref()
+            .map(|data| &data["error"])
+            .unwrap_or(&Value::Null);
+        Err(upstream_failure(error, Some(u64::from(status.as_u16()))).into())
     }
 }
 
@@ -98,9 +112,51 @@ async fn read_buffered(
     deadline: Instant,
 ) -> Result<String> {
     let body = timeout_at(deadline, net::body(response, MAX_STREAM_BYTES)).await??;
-    let reply: Value =
-        serde_json::from_slice(&body).context("invalid OpenRouter completion response")?;
+    let reply: Value = serde_json::from_slice(&body).context(ProviderFailure::Incomplete)?;
     buffered_response(&reply, tools, call)
+}
+
+fn check_provider_error(response: &Value) -> Result<()> {
+    let error = if response["error"].is_null() {
+        &response["choices"][0]["error"]
+    } else {
+        &response["error"]
+    };
+    if error.is_null() {
+        return Ok(());
+    }
+    Err(upstream_failure(error, None).into())
+}
+
+fn upstream_failure(error: &Value, status: Option<u64>) -> ProviderFailure {
+    use ProviderFailure::*;
+
+    match error["metadata"]["error_type"].as_str() {
+        Some("authentication") => return OpenRouterKey,
+        Some("payment_required") => return OpenRouterCredits,
+        Some("rate_limit_exceeded") => return RateLimited,
+        Some("timeout") => return TimedOut,
+        Some("provider_overloaded" | "provider_unavailable" | "server") => return Temporary,
+        Some("content_policy_violation" | "refusal" | "content_filter") => return Refused,
+        Some("context_length_exceeded") => return InputLimit,
+        Some("permission_denied") => return AccessDenied,
+        Some("not_found") => return ModelUnavailable,
+        _ => {}
+    }
+    let code = status.or_else(|| {
+        error["code"]
+            .as_u64()
+            .or_else(|| error["code"].as_str()?.parse().ok())
+    });
+    match code {
+        Some(401) => OpenRouterKey,
+        Some(402) => OpenRouterCredits,
+        Some(403) => AccessDenied,
+        Some(404) => ModelUnavailable,
+        Some(413) => InputLimit,
+        Some(code) => transient_status(code).unwrap_or(Rejected),
+        None => Rejected,
+    }
 }
 
 fn buffered_response(
@@ -108,14 +164,23 @@ fn buffered_response(
     tools: &[ToolDefinition],
     call: &mut ModelCall,
 ) -> Result<String> {
+    check_provider_error(reply)?;
     call.openrouter(reply);
     let choice = &reply["choices"][0];
     let message = &choice["message"];
-    ensure!(
-        message["role"] == "assistant",
-        "OpenRouter did not return an assistant message"
-    );
     let finish = choice["finish_reason"].as_str();
+    let content = &message["content"];
+    if finish == Some("content_filter")
+        || message["refusal"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+        || content
+            .as_array()
+            .is_some_and(|parts| parts.iter().any(|part| part["type"] == "refusal"))
+    {
+        return Err(ProviderFailure::Refused.into());
+    }
+    ensure!(message["role"] == "assistant", ProviderFailure::Incomplete);
     if finish == Some("tool_calls") {
         for item in message["tool_calls"].as_array().into_iter().flatten() {
             if let Some(kind) = item.get("type")
@@ -134,22 +199,23 @@ fn buffered_response(
             }
         }
     }
-    let content = &message["content"];
     let text = match content {
         Value::String(text) => text.clone(),
         Value::Array(parts) => parts
             .iter()
             .filter_map(|part| match part["type"].as_str() {
                 Some("text") => part["text"].as_str(),
-                Some("refusal") => part["refusal"].as_str(),
                 _ => None,
             })
             .collect::<String>(),
-        _ => message["refusal"].as_str().unwrap_or_default().to_owned(),
+        _ => String::new(),
     };
+    if finish == Some("length") && (!tools.is_empty() || text.trim().is_empty()) {
+        return Err(ProviderFailure::OutputLimit.into());
+    }
     ensure!(
         (tools.is_empty() || finish == Some("stop")) && !text.trim().is_empty(),
-        "OpenRouter did not complete a reply or tool proposal"
+        ProviderFailure::Incomplete
     );
     if tools.is_empty() {
         Ok(text)
@@ -196,7 +262,8 @@ async fn stream_response(
         let event = match event {
             Ok(event) => event,
             Err(_) if result.is_some() => break,
-            Err(_) => return Err(anyhow!("OpenRouter stream failed")),
+            Err(EventStreamError::Transport(error)) => return Err(error),
+            Err(_) => return Err(ProviderFailure::Incomplete.into()),
         };
         if event.data == "[DONE]" {
             break;
@@ -204,7 +271,7 @@ async fn stream_response(
         let value: Value = match serde_json::from_str(&event.data) {
             Ok(value) => value,
             Err(_) if result.is_some() => continue,
-            Err(_) => return Err(anyhow!("invalid OpenRouter stream frame")),
+            Err(_) => return Err(ProviderFailure::Incomplete.into()),
         };
         call.openrouter(&value);
         if result.is_some()
@@ -220,7 +287,7 @@ async fn stream_response(
             }
         }
     }
-    result.context("OpenRouter stream ended without a completed reply or tool proposal")?
+    result.context(ProviderFailure::Incomplete)?
 }
 
 fn chat_request(
@@ -286,10 +353,7 @@ impl StreamTurn {
         tools: &[ToolDefinition],
         delta: &mut TextDelta<'_>,
     ) -> Result<Option<String>> {
-        ensure!(
-            event["error"].is_null(),
-            "OpenRouter reported a stream error"
-        );
+        check_provider_error(event)?;
         let Some(choice) = event["choices"]
             .as_array()
             .and_then(|choices| choices.first())
@@ -298,12 +362,19 @@ impl StreamTurn {
             return Ok(None);
         };
         let update = &choice["delta"];
+        if choice["finish_reason"] == "content_filter"
+            || update["refusal"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        {
+            return Err(ProviderFailure::Refused.into());
+        }
         if let Some(calls) = update["tool_calls"].as_array() {
             for call in calls {
                 let index = call["index"]
                     .as_u64()
-                    .context("missing OpenRouter tool index")?;
-                ensure!(index < 16, "too many OpenRouter tool proposals");
+                    .context(ProviderFailure::Incomplete)?;
+                ensure!(index < 16, ProviderFailure::Incomplete);
                 let pending = self.calls.entry(index).or_default();
                 if let Some(id) = call["id"].as_str() {
                     pending.id = id.to_owned();
@@ -338,9 +409,10 @@ impl StreamTurn {
                         return Ok(Some(proposal));
                     }
                 }
-                Err(anyhow!("OpenRouter did not complete a valid tool proposal"))
+                Err(ProviderFailure::Incomplete.into())
             }
-            Some(_) => Err(anyhow!("OpenRouter did not finish the tool turn")),
+            Some("length") => Err(ProviderFailure::OutputLimit.into()),
+            Some(_) => Err(ProviderFailure::Incomplete.into()),
         }
     }
 }
@@ -348,6 +420,32 @@ impl StreamTurn {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classifies_http_and_stream_failures_without_using_provider_text() {
+        for (status, expected) in [
+            (401, ProviderFailure::OpenRouterKey),
+            (402, ProviderFailure::OpenRouterCredits),
+            (403, ProviderFailure::AccessDenied),
+            (429, ProviderFailure::RateLimited),
+            (503, ProviderFailure::Temporary),
+        ] {
+            assert_eq!(upstream_failure(&Value::Null, Some(status)), expected);
+        }
+        let response = json!({"choices":[{"error":{"code":400,"message":"private test raw payload",
+            "metadata":{"error_type":"content_policy_violation"}}}]});
+        let error = check_provider_error(&response).unwrap_err();
+        assert_eq!(error.downcast_ref(), Some(&ProviderFailure::Refused));
+        assert!(!error.to_string().contains("private test raw payload"));
+        let mut call = ModelCall::new("openrouter", "fixture");
+        let error = buffered_response(
+            &json!({"choices":[{"finish_reason":"content_filter"}]}),
+            &[],
+            &mut call,
+        )
+        .unwrap_err();
+        assert_eq!(error.downcast_ref(), Some(&ProviderFailure::Refused));
+    }
 
     fn definitions() -> [ToolDefinition; 1] {
         [ToolDefinition {

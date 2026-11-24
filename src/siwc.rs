@@ -43,11 +43,9 @@ async fn exchange(params: &[(&str, &str)]) -> Result<Tokens> {
         .await?
         .form(params)
         .send()
-        .await?;
-    ensure!(
-        response.status().is_success(),
-        "OpenAI declined the token request"
-    );
+        .await?
+        .error_for_status()
+        .context("OpenAI declined the token request")?;
     Ok(serde_json::from_slice(&net::body(response, 65536).await?)?)
 }
 

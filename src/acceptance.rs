@@ -21,7 +21,10 @@ mod browsing;
 mod mail_settings;
 mod mail_workflow;
 mod mcp_approvals;
+mod model_backup;
 mod model_settings;
+mod routines;
+mod telegram_workflows;
 mod tool_budget;
 
 async fn fixture() -> SqlitePool {
@@ -68,6 +71,16 @@ async fn message(db: &SqlitePool, id: i64, user: &str, text: &str) {
     store::ingest(db, "1", "test", id, user, text)
         .await
         .unwrap();
+}
+
+async fn expect_telegram_ack(db: &SqlitePool, message_id: i64) {
+    let acknowledgement = store::claim_outbox(db).await.unwrap().unwrap();
+    assert!(
+        acknowledgement
+            .button
+            .is_some_and(|button| button.starts_with("ta/"))
+    );
+    assert_eq!(acknowledgement.reply_to_message_id, Some(message_id));
 }
 
 async fn task_for(db: &SqlitePool, id: &str) -> Task {
@@ -236,6 +249,7 @@ async fn the_agent_can_react_without_sending_a_text_reply() {
     store::ingest_telegram(&db, "1", 1, "1", "React with a thumbs-up.", 42)
         .await
         .unwrap();
+    expect_telegram_ack(&db, 42).await;
     let task = store::claim(&db).await.unwrap().unwrap();
     runtime::work(&app, &task).await.unwrap();
     let reaction = store::claim_outbox(&db).await.unwrap().unwrap();

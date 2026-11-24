@@ -83,6 +83,95 @@ struct Draft {
     send: SmtpSend,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DraftEdit {
+    pub to: Vec<String>,
+    pub subject: String,
+    pub body: String,
+}
+
+pub(crate) fn smtp_editable_fields(
+    vault: &Vault,
+    user: &str,
+    request: &str,
+    payload: &Value,
+) -> Result<Value> {
+    let (_, draft) = open(vault, user, request, payload)?;
+    Ok(json!({"to":draft.send.to,"subject":draft.send.subject,"body":draft.send.text}))
+}
+
+pub(crate) async fn edit_draft(
+    app: &crate::App,
+    user: &str,
+    request: &str,
+    edit: DraftEdit,
+) -> Result<String> {
+    let mut tx = app.db.begin_with("BEGIN IMMEDIATE").await?;
+    let old: Pending = sqlx::query_as(
+        "SELECT p.* FROM pending p JOIN tasks t ON t.id=p.task AND t.user=p.user AND t.revision=p.revision
+         WHERE p.id=? AND p.user=? AND p.kind='email-send' AND p.state='waiting' AND p.expires>=?
+             AND t.state='waiting' AND t.agent IS NULL
+             AND EXISTS(SELECT 1 FROM mail_accounts m WHERE m.owner=p.user AND m.can_send=1
+                 AND m.id=json_extract(p.payload,'$.smtp_approval.account') AND m.epoch=json_extract(p.payload,'$.smtp_approval.epoch'))",
+    )
+    .bind(request)
+    .bind(user)
+    .bind(now())
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(DraftError("This email draft has expired or changed."))?;
+    let (mut approval, mut draft) = open(
+        &app.vault,
+        user,
+        request,
+        &serde_json::from_str(&old.payload)?,
+    )?;
+    draft.send.to = edit.to;
+    draft.send.subject = edit.subject.trim().to_owned();
+    draft.send.text = edit.body;
+    draft.send.validate().map_err(|_| {
+        DraftError("Provide valid recipients, a subject, and a plain-text message.")
+    })?;
+    render_preview(&draft)?;
+    let next = id();
+    let body = serde_json::to_vec(&draft)?;
+    let task = old
+        .task
+        .as_deref()
+        .ok_or(DraftError("The email task is unavailable."))?;
+    let revision = old
+        .revision
+        .ok_or(DraftError("The email task is unavailable."))?;
+    approval.fingerprint = hash(&format!(
+        "{task}:{revision}:{}:{}",
+        approval.account,
+        std::str::from_utf8(&body)?
+    ));
+    approval.sealed = app.vault.seal(&binding(user, &next), &body)?;
+    sqlx::query("UPDATE pending SET state='superseded' WHERE id=?")
+        .bind(request)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("INSERT INTO pending(id,user,task,revision,kind,payload,expires) VALUES(?,?,?,?,'email-send',?,?)")
+        .bind(&next)
+        .bind(user)
+        .bind(task)
+        .bind(revision)
+        .bind(json!({"smtp_approval":approval}).to_string())
+        .bind(old.expires)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("INSERT INTO outbox(user,task,body,button) VALUES(?,?,'Review the updated email before sending.',?)")
+        .bind(user)
+        .bind(task)
+        .bind(format!("mail-send/{next}"))
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(next)
+}
+
 pub(super) async fn request(
     ctx: &ToolContext<'_>,
     args: &Value,
@@ -270,6 +359,21 @@ fn open(vault: &Vault, user: &str, request_id: &str, payload: &Value) -> Result<
     let draft: Draft =
         serde_json::from_slice(&vault.open(&binding(user, request_id), &approval.sealed)?)?;
     Ok((approval, draft))
+}
+
+#[cfg(test)]
+pub(crate) fn smtp_approved_message(
+    vault: &Vault,
+    user: &str,
+    pending: &Pending,
+) -> Result<Vec<u8>> {
+    let (_, draft) = open(
+        vault,
+        user,
+        &pending.id,
+        &serde_json::from_str(&pending.payload)?,
+    )?;
+    Ok(draft.send.message(&draft.from, &pending.id)?.formatted())
 }
 
 fn binding(user: &str, request_id: &str) -> String {

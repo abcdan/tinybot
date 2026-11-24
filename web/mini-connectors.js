@@ -2,8 +2,14 @@ import { action, button, card, field, form, node, row } from './mini-ui.js';
 import { api, content, refresh, show, telegram } from './mini.js';
 
 export function connectors(state) {
+    const docblockAccess = state.docblock_access || {};
+    if (!Object.keys(docblockAccess).length) content.append(docblockCard());
     content.append(anythingMcpSetup(state.anything_mcp_origin), findConnector(), node('h2', 'Connections'));
     for (const connector of state.connectors || []) {
+        if (docblockAccess[connector.id]) {
+            content.append(docblockCard(connector, docblockAccess[connector.id]));
+            continue;
+        }
         const gateway = connector.kind === 'anythingmcp';
         const connected = connector.auth !== 'pending';
         const item = card(connector.name, connector.endpoint);
@@ -23,6 +29,71 @@ export function connectors(state) {
         item.append(row(action('Remove connection', 'disconnect-mcp', {id: connector.id}, 'Connection removed.', true)));
         content.append(item);
     }
+}
+
+function docblockCard(connector, access) {
+    const status = {write: 'Read and write access', read: 'Read-only access', propose: 'Read and propose access', reauthorize: 'Sign in again to verify access'};
+    const item = card('Docblock', status[access] || 'Save Markdown notes and share links from Telegram.');
+    const consent = node('div');
+    const label = access && access !== 'sign-in' ? 'Sign in again' : 'Connect Docblock';
+    item.append(row(button(label, async () => {
+        const {consent_url} = await api('docblock-oauth', connector ? {id: connector.id} : {});
+        const url = new URL(consent_url);
+        if (url.origin !== 'https://docblock.dev' || url.pathname !== '/oauth/authorize' || url.username || url.password) {
+            throw new Error('Docblock returned an invalid sign-in link.');
+        }
+        consent.replaceChildren(row(
+            button('Open Docblock sign-in', () => telegram.openLink(url.href, {try_instant_view: false})),
+            button('Check connection', () => refresh(), true)
+        ));
+        consent.querySelector('button').focus();
+    })), consent);
+    if (access !== 'write') {
+        item.append(node('p', 'To save or publish notes, choose Write notes directly during sign-in.'));
+    }
+    if (access === 'write') item.append(docblockShares(connector));
+    if (connector) item.append(row(action('Remove connection', 'disconnect-mcp', {id: connector.id}, 'Connection removed.', true)));
+    return item;
+}
+
+function docblockShares(connector) {
+    const panel = node('div');
+    const workspaceList = node('div');
+    const shares = node('div');
+    const loadShares = async workspace => {
+        const details = {id: connector.id, workspace};
+        const result = await api('docblock-shares', details);
+        shares.replaceChildren();
+        if (!result.shares.length) shares.append(node('p', 'No active public note links.'));
+        for (const share of result.shares) {
+            const item = card(share.target, share.expires_at ? `Expires ${new Date(share.expires_at).toLocaleDateString()}` : 'No expiry');
+            const confirmation = node('div');
+            item.append(button('Revoke link', () => confirmation.replaceChildren(
+                node('p', 'Anyone using this link will lose access.'),
+                row(button('Confirm revocation', async () => {
+                    await api('revoke-docblock-share', {...details, share: share.id});
+                    await loadShares(workspace);
+                    show('Link revoked.');
+                }), button('Keep link', () => confirmation.replaceChildren(), true))
+            ), true), confirmation);
+            shares.append(item);
+        }
+    };
+    panel.append(button('Manage public note links', async () => {
+        const result = await api('docblock-workspaces', {id: connector.id});
+        const workspaces = result.workspaces.filter(workspace => ['owner', 'editor'].includes(workspace.role));
+        workspaceList.replaceChildren();
+        shares.replaceChildren();
+        if (!workspaces.length) {
+            workspaceList.append(node('p', 'No writable workspaces available.'));
+            return;
+        }
+        workspaceList.append(form('View public note links', [field('workspace', 'Docblock workspace', {
+            choices: workspaces.map(workspace => [workspace.id, workspace.name])
+        })], ({workspace}) => loadShares(workspace)));
+        await loadShares(workspaces[0].id);
+    }, true), workspaceList, shares);
+    return panel;
 }
 
 function anythingMcpSetup(origin) {

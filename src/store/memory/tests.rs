@@ -424,10 +424,7 @@ async fn migration_preserves_private_notes_and_the_published_revocation_path() {
     .await
     .unwrap();
     let guest = running(&db, "guest", Some("one")).await;
-    for migration in migrator
-        .iter()
-        .filter(|migration| (14..=15).contains(&migration.version))
-    {
+    for migration in migrator.iter().filter(|migration| migration.version >= 14) {
         sqlx::raw_sql(&migration.sql).execute(&db).await.unwrap();
     }
 

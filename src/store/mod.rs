@@ -1,12 +1,19 @@
 pub mod attachments;
+pub(crate) mod groups;
 mod ingress;
+pub(crate) mod invitations;
 pub mod mail;
 mod mcp_approvals;
 pub mod memory;
+pub(crate) mod model_backup;
+pub(crate) mod outputs;
 mod queue;
 mod reactions;
 mod replies;
 mod requests;
+pub(crate) mod shared_memory;
+pub(crate) mod task_failures;
+pub(crate) mod task_views;
 pub mod tool_budget;
 
 #[cfg(test)]
@@ -27,8 +34,9 @@ pub use queue::{
 pub use reactions::{REACTION_EMOJIS, queue_reaction, reaction_target};
 pub use replies::{SuggestedReply, redeem_reply, suggested_replies};
 pub use requests::{
-    can_deliver, claim_approval, claim_outbox, finish_action, list_requests, notify, pause,
-    respond, respond_email, respond_mcp, start_action, uncertain_action,
+    approve_docblock_share, can_deliver, claim_approval, claim_outbox, finish_action,
+    list_requests, notify, pause, respond, respond_email, respond_mcp, start_action,
+    uncertain_action,
 };
 
 use crate::security::{id, now};
@@ -50,6 +58,9 @@ pub struct Task {
     pub revision: i64,
     pub summary: String,
     pub goal: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[sqlx(default)]
+    pub shared_memory_pair: Option<String>,
 }
 
 #[derive(Clone, FromRow, Serialize)]

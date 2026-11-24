@@ -9,6 +9,8 @@ pub async fn list_tasks<'a>(
 ) -> Result<Vec<Task>> {
     Ok(sqlx::query_as(
         "SELECT t.* FROM tasks t WHERE t.user=? AND t.chief_chat=1 AND t.state<>'revoked'
+         AND (t.shared_memory_pair IS NULL OR EXISTS(SELECT 1 FROM available_shared_memory_pairs p
+         WHERE p.id=t.shared_memory_pair AND (p.owner=t.user OR p.guest=t.user)))
          AND (t.agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=t.agent
          AND (a.owner=t.user OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=t.user))))
          ORDER BY t.updated DESC, t.id LIMIT 40",
@@ -23,8 +25,10 @@ pub async fn select_task<'a>(
     user: &str,
     task: &str,
 ) -> Result<bool> {
-    let changed=sqlx::query("UPDATE users SET active_task=? WHERE id=? AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=?
+    let changed=sqlx::query("UPDATE users SET active_task=? WHERE id=? AND suspended_at IS NULL AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=?
         AND t.user=users.id AND t.chief_chat=1 AND t.state NOT IN ('cancelled','revoked')
+        AND (t.shared_memory_pair IS NULL OR EXISTS(SELECT 1 FROM available_shared_memory_pairs p
+        WHERE p.id=t.shared_memory_pair AND (p.owner=t.user OR p.guest=t.user)))
         AND (t.agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=t.agent
         AND (a.owner=t.user OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=t.user)))))")
         .bind(task).bind(user).bind(task).execute(db).await?.rows_affected();
@@ -106,6 +110,10 @@ pub async fn expire(db: &SqlitePool) -> Result<()> {
         .bind(now())
         .execute(&mut *tx)
         .await?;
+    sqlx::query("DELETE FROM bot_invitations WHERE member IS NULL AND expires<?")
+        .bind(now() - crate::audit::RETENTION)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM pending WHERE expires<? AND state<>'executing'")
         .bind(now() - 86400)
         .execute(&mut *tx)
@@ -126,6 +134,9 @@ pub async fn expire(db: &SqlitePool) -> Result<()> {
 }
 
 pub async fn has_access(db: &SqlitePool, user: &str, agent: Option<&str>) -> Result<bool> {
+    if !super::invitations::available(db, user).await? {
+        return Ok(false);
+    }
     let Some(agent) = agent else { return Ok(true) };
     Ok(sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(SELECT 1 FROM agents a WHERE a.id=? AND
@@ -140,8 +151,9 @@ pub async fn has_access(db: &SqlitePool, user: &str, agent: Option<&str>) -> Res
 
 pub async fn current(db: &SqlitePool, task: &Task) -> Result<bool> {
     let valid = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=? AND user=? AND revision=?
-        AND state IN ('running','waiting'))",
+        "SELECT EXISTS(SELECT 1 FROM tasks t WHERE id=? AND user=? AND revision=?
+        AND state IN ('running','waiting') AND (t.shared_memory_pair IS NULL OR EXISTS(
+        SELECT 1 FROM available_shared_memory_pairs p WHERE p.id=t.shared_memory_pair AND (p.owner=t.user OR p.guest=t.user))))",
     )
     .bind(&task.id)
     .bind(&task.user)
@@ -154,6 +166,9 @@ pub async fn current(db: &SqlitePool, task: &Task) -> Result<bool> {
 pub async fn claim(db: &SqlitePool) -> Result<Option<Task>> {
     Ok(sqlx::query_as(
         "UPDATE tasks SET state='running' WHERE id=(SELECT id FROM tasks q WHERE state='queued'
+        AND EXISTS(SELECT 1 FROM users u WHERE u.id=q.user AND u.suspended_at IS NULL)
+        AND (q.shared_memory_pair IS NULL OR EXISTS(SELECT 1 FROM available_shared_memory_pairs p
+        WHERE p.id=q.shared_memory_pair AND (p.owner=q.user OR p.guest=q.user)))
         AND NOT EXISTS(SELECT 1 FROM tasks r WHERE r.user=q.user AND r.state='running')
         AND NOT EXISTS(SELECT 1 FROM pending p WHERE p.task=q.id AND p.state='executing')
         ORDER BY updated,id LIMIT 1) RETURNING *",

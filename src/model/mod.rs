@@ -1,13 +1,17 @@
 mod codex;
 mod connections;
 mod decisions;
+mod failure;
 mod media;
 mod openrouter;
 mod server_tools;
+mod speech;
 mod transcription;
 
+pub(crate) use connections::BackupModel;
 pub(crate) use connections::OnboardingError;
 pub use connections::OpenRouterSettingsError;
+pub(crate) use failure::{ProviderFailure, provider_failure, temporary_provider_failure};
 pub use media::{AttachmentInput, AttachmentRead};
 pub(crate) use server_tools::{ServerTool, ServerToolInput};
 pub(crate) use transcription::MAX_VOICE_BYTES;
@@ -36,11 +40,11 @@ pub struct ToolDefinition {
 fn native_tool_proposal(tools: &[ToolDefinition], name: &str, args: Value) -> Result<String> {
     ensure!(
         tools.iter().any(|tool| tool.name == name),
-        "unavailable native tool"
+        ProviderFailure::Incomplete
     );
-    ensure!(args.is_object(), "invalid native tool arguments");
+    ensure!(args.is_object(), ProviderFailure::Incomplete);
     let args = serde_json::to_string(&args)?;
-    ensure!(args.len() < 30_000, "oversized native tool arguments");
+    ensure!(args.len() < 30_000, ProviderFailure::Incomplete);
     Ok(format!(
         r#"{{"kind":"tool","name":{},"args":{args}}}"#,
         serde_json::to_string(name)?
@@ -49,10 +53,7 @@ fn native_tool_proposal(tools: &[ToolDefinition], name: &str, args: Value) -> Re
 
 fn native_reply(response: String) -> Result<String> {
     if let Ok(value) = parse_json_reply::<Value>(&response) {
-        ensure!(
-            value["kind"] != "tool",
-            "expected a native provider tool call"
-        );
+        ensure!(value["kind"] != "tool", ProviderFailure::Incomplete);
     }
     Ok(response)
 }
@@ -102,6 +103,8 @@ pub struct Models {
     #[cfg(test)]
     fixture: Option<Arc<dyn ModelProvider>>,
     #[cfg(test)]
+    backup_fixture: Option<Arc<dyn ModelProvider>>,
+    #[cfg(test)]
     memory_decisions_fixture: Option<Arc<dyn ModelProvider>>,
 }
 
@@ -123,6 +126,8 @@ impl Models {
             #[cfg(test)]
             fixture: None,
             #[cfg(test)]
+            backup_fixture: None,
+            #[cfg(test)]
             memory_decisions_fixture: None,
         }
     }
@@ -130,6 +135,12 @@ impl Models {
     #[cfg(test)]
     pub fn with_fixture(mut self, model: Arc<dyn ModelProvider>) -> Self {
         self.fixture = Some(model);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_backup_fixture(mut self, model: Arc<dyn ModelProvider>) -> Self {
+        self.backup_fixture = Some(model);
         self
     }
 
@@ -142,9 +153,9 @@ impl Models {
     }
 
     async fn openrouter_key(&self, user: &str) -> Result<String> {
-        self.configured_openrouter_key(user).await?.context(
-            "Add an OpenRouter key under Settings & forms for the configured decision model.",
-        )
+        self.configured_openrouter_key(user)
+            .await?
+            .context(ProviderFailure::OpenRouterKey)
     }
 
     pub async fn mercury(&self, user: &str) -> Result<Option<Arc<dyn ModelProvider>>> {
@@ -180,16 +191,47 @@ impl Models {
                 model: model.clone(),
             }));
         }
+        self.task_provider(user, review, None).await
+    }
+
+    pub(crate) async fn backup_provider(
+        &self,
+        user: &str,
+        backup: &BackupModel,
+    ) -> Result<Arc<dyn ModelProvider>> {
+        ensure!(
+            self.backup_setting(user).await?.as_ref() == Some(backup),
+            ProviderFailure::BackupDisabled
+        );
+        #[cfg(test)]
+        if let Some(model) = &self.backup_fixture {
+            return Ok(model.clone());
+        }
+        self.task_provider(user, false, Some(backup)).await
+    }
+
+    async fn task_provider(
+        &self,
+        user: &str,
+        review: bool,
+        backup: Option<&BackupModel>,
+    ) -> Result<Arc<dyn ModelProvider>> {
         let _refresh = self.refresh.lock().await;
         let (kind, model, credential): (Option<String>, Option<String>, Option<String>) =
             sqlx::query_as(
-                "SELECT provider,model,COALESCE(codex_credential,credential) FROM users WHERE id=?",
+                "SELECT provider,model,COALESCE(codex_credential,CASE WHEN provider='codex' THEN credential END) FROM users WHERE id=?",
             )
             .bind(user)
             .fetch_one(&self.db)
             .await?;
-        let kind = kind.context("Choose a provider in the Mini App first.")?;
-        let model = model.context("Choose a model in the Mini App first.")?;
+        let (kind, model) = if let Some(backup) = backup {
+            (backup.provider.clone(), backup.model.clone())
+        } else {
+            (
+                kind.context(ProviderFailure::Setup)?,
+                model.context(ProviderFailure::Setup)?,
+            )
+        };
         if kind == "openrouter" {
             crate::audit::model_selected("openrouter", &model, review).await;
             let key = self
@@ -201,17 +243,20 @@ impl Models {
                 model,
             }));
         }
-        ensure!(kind == "codex", "unknown model provider");
+        ensure!(kind == "codex", ProviderFailure::Setup);
         crate::audit::model_selected("codex", &model, review).await;
         let binding = format!("model:{user}");
-        let credential = credential.context("model credential missing")?;
-        let secret = self.vault.open(&binding, &credential)?;
-        let mut profile: Profile = serde_json::from_slice(&secret)?;
+        let credential = credential.context(ProviderFailure::CodexSignIn)?;
+        let secret = self
+            .vault
+            .open(&binding, &credential)
+            .context(ProviderFailure::CodexSignIn)?;
+        let mut profile: Profile =
+            serde_json::from_slice(&secret).context(ProviderFailure::CodexSignIn)?;
         if profile.expires <= now() + 90 {
-            profile
-                .refresh()
-                .await
-                .context("Reconnect ChatGPT in the Mini App.")?;
+            profile.refresh().await.map_err(|error| {
+                provider_failure(&error).unwrap_or(ProviderFailure::CodexSignIn)
+            })?;
             let enc = self.vault.seal(&binding, &serde_json::to_vec(&profile)?)?;
             sqlx::query(
                 "UPDATE users SET codex_credential=?, codex_model=COALESCE(codex_model,model), credential=NULL
@@ -249,7 +294,7 @@ pub fn parse_json_reply<T: DeserializeOwned>(response: &str) -> Result<T> {
         .and_then(|fenced| fenced.strip_suffix("```"))
         .unwrap_or(text)
         .trim();
-    Ok(serde_json::from_str(text).context("model returned an invalid structured response")?)
+    Ok(serde_json::from_str(text).context(ProviderFailure::Incomplete)?)
 }
 
 #[cfg(test)]

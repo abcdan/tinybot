@@ -1,4 +1,5 @@
 mod discovery;
+pub(crate) mod docblock;
 mod oauth;
 mod policy;
 mod protocol;
@@ -200,6 +201,15 @@ impl Mcp {
     }
 
     pub async fn wake_connected(&self, user: &str, id: &str) -> Result<()> {
+        self.wake_connected_with_access(user, id, None).await
+    }
+
+    async fn wake_connected_with_access(
+        &self,
+        user: &str,
+        id: &str,
+        docblock_access: Option<&str>,
+    ) -> Result<()> {
         let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
         let matches: Vec<(String, String, i64)> = sqlx::query_as(
             "SELECT p.id,p.task,p.revision FROM pending p
@@ -212,6 +222,18 @@ impl Mcp {
         .bind(id)
         .fetch_all(&mut *tx)
         .await?;
+        let message = match docblock_access {
+            Some("write") => format!(
+                "The user connected Docblock connector {id} with write access. Continue the request."
+            ),
+            Some("propose") => format!(
+                "The user connected Docblock connector {id} with propose-only access. Do not publish. Explain that changes require Docblock review."
+            ),
+            Some(_) => format!(
+                "The user connected Docblock connector {id} with limited access. Do not request another sign-in in this turn. Explain the grant and that the user can sign in again in Connections."
+            ),
+            None => format!("The user connected MCP connector {id}. It is now ready."),
+        };
         for (pending, task, revision) in matches {
             sqlx::query("UPDATE pending SET state='done' WHERE id=?")
                 .bind(pending)
@@ -219,9 +241,7 @@ impl Mcp {
                 .await?;
             sqlx::query("INSERT INTO events(task,role,body) VALUES(?,'tool',?)")
                 .bind(&task)
-                .bind(format!(
-                    "The user connected MCP connector {id}. It is now ready."
-                ))
+                .bind(&message)
                 .execute(&mut *tx)
                 .await?;
             sqlx::query("UPDATE tasks SET state='queued',updated=? WHERE id=? AND revision=?")
@@ -268,6 +288,9 @@ impl Mcp {
                     oauth.access_token = next.access_token;
                     oauth.refresh_token = next.refresh_token.or(oauth.refresh_token);
                     oauth.expires = next.expires;
+                    if next.scopes.is_some() {
+                        oauth.scopes = next.scopes;
+                    }
                     self.store_oauth(&connector, &oauth, false).await?;
                 }
                 bearer(&oauth.access_token)?

@@ -5,8 +5,10 @@ use serde::Deserialize;
 use sqlx::SqlitePool;
 
 pub(super) const MCP_APPROVAL_PREFIX: &str = "mcp-approval/";
+pub(super) const MCP_APPROVAL_ONCE_PREFIX: &str = "mcp-approval-once/";
 pub(super) const MAIL_READ_PREFIX: &str = "mail-read/";
 pub(super) const MAIL_SEND_PREFIX: &str = "mail-send/";
+pub(super) const INVITE_ACCEPT_PREFIX: &str = "invite-accept/";
 
 #[derive(Deserialize)]
 pub struct Query {
@@ -23,6 +25,20 @@ struct Message {
 }
 
 impl Query {
+    pub(super) fn listen(&self) -> Option<(String, i64, i64)> {
+        if !self.is_private() {
+            return None;
+        }
+        let outbox = self
+            .data
+            .as_deref()?
+            .strip_prefix("listen/")?
+            .parse::<i64>()
+            .ok()?;
+        let message = self.message.as_ref()?.message_id?;
+        (outbox > 0 && message > 0).then(|| (self.from.id.to_string(), outbox, message))
+    }
+
     pub(super) fn is_private(&self) -> bool {
         self.message
             .as_ref()
@@ -31,6 +47,10 @@ impl Query {
 }
 
 enum Selection<'a> {
+    RetryTurn(&'a str),
+    AcceptInvite(&'a str),
+    ContinueTask(&'a str),
+    StopTask(&'a str, i64),
     Reply(&'a str),
     Choice(&'a str, usize),
     McpApproval(&'a str, store::McpApprovalDecision),
@@ -42,12 +62,16 @@ fn selection(data: &str) -> Option<Selection<'_>> {
     if data.len() > 64 {
         return None;
     }
-    if let Some(action) = data.strip_prefix(MCP_APPROVAL_PREFIX) {
+    let once_only = data.starts_with(MCP_APPROVAL_ONCE_PREFIX);
+    if let Some(action) = data
+        .strip_prefix(MCP_APPROVAL_PREFIX)
+        .or_else(|| data.strip_prefix(MCP_APPROVAL_ONCE_PREFIX))
+    {
         let (request, decision) = action.split_once('/')?;
         uuid::Uuid::parse_str(request).ok()?;
         let decision = match decision {
             "once" => store::McpApprovalDecision::Once,
-            "always" => store::McpApprovalDecision::Always,
+            "always" if !once_only => store::McpApprovalDecision::Always,
             "deny" => store::McpApprovalDecision::Deny,
             _ => return None,
         };
@@ -55,6 +79,23 @@ fn selection(data: &str) -> Option<Selection<'_>> {
     }
     let (action, remainder) = data.split_once('/')?;
     match action {
+        "retry-turn" => {
+            uuid::Uuid::parse_str(remainder).ok()?;
+            Some(Selection::RetryTurn(remainder))
+        }
+        "invite-accept" => {
+            uuid::Uuid::parse_str(remainder).ok()?;
+            Some(Selection::AcceptInvite(remainder))
+        }
+        "tc" => {
+            uuid::Uuid::parse_str(remainder).ok()?;
+            Some(Selection::ContinueTask(remainder))
+        }
+        "ts" => {
+            let (task, revision) = remainder.split_once('/')?;
+            uuid::Uuid::parse_str(task).ok()?;
+            Some(Selection::StopTask(task, revision.parse().ok()?))
+        }
         "reply" => {
             uuid::Uuid::parse_str(remainder).ok()?;
             Some(Selection::Reply(remainder))
@@ -101,7 +142,57 @@ pub(super) async fn answer(db: &SqlitePool, query: &Query) -> Result<Answer> {
         .as_ref()
         .and_then(|message| message.message_id)
         .filter(|id| *id > 0);
-    let accepted = match query.data.as_deref().and_then(selection) {
+    let selected = query.data.as_deref().and_then(selection);
+    if let Some(Selection::AcceptInvite(invitation)) = selected {
+        let Some(message_id) = message_id else {
+            return Ok(UNAVAILABLE);
+        };
+        return Ok(
+            if store::invitations::accept(db, &user, invitation).await? {
+                Answer {
+                    text: "Invitation accepted.",
+                    clear_keyboard: Some((query.from.id, message_id)),
+                }
+            } else {
+                UNAVAILABLE
+            },
+        );
+    }
+    if !store::invitations::available(db, &user).await? {
+        return Ok(UNAVAILABLE);
+    }
+    let accepted = match selected {
+        Some(Selection::RetryTurn(token)) => {
+            if !store::task_failures::retry(db, &user, token).await? {
+                return Ok(UNAVAILABLE);
+            }
+            return Ok(Answer {
+                text: "Retry queued.",
+                clear_keyboard: message_id.map(|id| (query.from.id, id)),
+            });
+        }
+        Some(Selection::AcceptInvite(_)) => unreachable!(),
+        Some(Selection::ContinueTask(task)) => {
+            if !store::select_task(db, &user, task).await? {
+                return Ok(UNAVAILABLE);
+            }
+            return Ok(Answer {
+                text: "Send your next message to continue this task.",
+                clear_keyboard: None,
+            });
+        }
+        Some(Selection::StopTask(task, revision)) => {
+            if !store::task_views::stop(db, &user, task, revision).await? {
+                return Ok(Answer {
+                    text: "Task could not be stopped. Use /status to check it.",
+                    clear_keyboard: None,
+                });
+            }
+            return Ok(Answer {
+                text: "Task stopped.",
+                clear_keyboard: message_id.map(|id| (query.from.id, id)),
+            });
+        }
         Some(Selection::Reply(token)) => store::redeem_reply(db, &user, token).await?,
         Some(Selection::Choice(request, option)) => {
             forms::answer_choice(db, &user, request, option)

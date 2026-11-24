@@ -1,10 +1,11 @@
 use super::{
-    AttachmentInput, AttachmentRead, ModelProvider, TextDelta, ToolDefinition,
+    AttachmentInput, AttachmentRead, ModelProvider, ProviderFailure, TextDelta, ToolDefinition,
+    failure::transient_status,
     media::{READ_ATTACHMENT, data_url, read_pdf_text, read_report},
     native_reply, native_tool_proposal,
 };
 use crate::audit::{self, ModelCall};
-use anyhow::{Context, Result, anyhow, ensure};
+use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::{process::Stdio, time::Duration};
@@ -124,7 +125,9 @@ impl Codex {
         ]);
         let home =
             std::env::var("TINYBOT_CODEX_HOME").unwrap_or_else(|_| "/tmp/tinybot-codex".into());
-        tokio::fs::create_dir_all(&home).await?;
+        tokio::fs::create_dir_all(&home)
+            .await
+            .context(ProviderFailure::CodexService)?;
         command
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
@@ -136,9 +139,9 @@ impl Codex {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        let mut child = command.spawn().context("Codex App Server is unavailable")?;
+        let mut child = command.spawn().context(ProviderFailure::CodexService)?;
         let mut lines =
-            BufReader::new(child.stdout.take().context("missing Codex output")?).lines();
+            BufReader::new(child.stdout.take().context(ProviderFailure::CodexService)?).lines();
         rpc(&mut child, json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"tinybot","title":"TinyBot","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}})).await?;
         wait_result(&mut lines, 1).await?;
         rpc(&mut child, json!({"method":"initialized"})).await?;
@@ -158,13 +161,17 @@ impl Codex {
         call.model(&thread["model"]);
         let thread = thread["thread"]["id"]
             .as_str()
-            .context("Codex did not create a thread")?;
+            .context(ProviderFailure::Incomplete)?;
         rpc(&mut child,json!({"id":3,"method":"turn/start","params":{"threadId":thread,"environments":[],"input":input}})).await?;
         let mut result = String::new();
         let mut preview = AnswerItem::default();
         let mut turn_id = None;
-        while let Some(line) = lines.next_line().await? {
-            let value: Value = serde_json::from_str(&line)?;
+        while let Some(line) = lines
+            .next_line()
+            .await
+            .context(ProviderFailure::CodexService)?
+        {
+            let value: Value = serde_json::from_str(&line).context(ProviderFailure::Incomplete)?;
             if value.get("id").is_some() {
                 if value.get("method").is_some() {
                     if value["method"] == "item/tool/call" && !tools.is_empty() {
@@ -190,7 +197,7 @@ impl Codex {
                     }
                     rpc(&mut child,json!({"id":value["id"],"error":{"code":-32601,"message":"This Codex tool is unavailable in TinyBot"}})).await?;
                 } else if value["id"] == 3 {
-                    ensure!(value.get("error").is_none(), "Codex rejected the turn");
+                    check_rpc_error(&value)?;
                     turn_id = value["result"]["turn"]["id"].as_str().map(str::to_owned);
                 }
             }
@@ -203,6 +210,12 @@ impl Codex {
             match value["method"].as_str() {
                 Some("item/completed") => {
                     let item = &value["params"]["item"];
+                    if value["params"]["threadId"] == thread
+                        && item["type"] == "agentMessage"
+                        && item["moderation"]["display"]["mode"] == "block"
+                    {
+                        return Err(ProviderFailure::Refused.into());
+                    }
                     if item["type"] == "agentMessage" && item["phase"] != "commentary" {
                         if let Some(text) = item["text"].as_str() {
                             result = text.to_owned();
@@ -210,9 +223,18 @@ impl Codex {
                     }
                 }
                 Some("turn/completed") => {
+                    let finished = &value["params"]["turn"];
+                    if value["params"]["threadId"] == thread
+                        && turn_id.as_ref().is_none_or(|id| finished["id"] == *id)
+                        && finished["status"] == "failed"
+                    {
+                        let error = codex_failure(&finished["error"]["codexErrorInfo"])
+                            .unwrap_or(ProviderFailure::Incomplete);
+                        return Err(error.into());
+                    }
                     ensure!(
                         value["params"]["turn"]["status"] == "completed" && !result.is_empty(),
-                        "Codex did not finish the turn"
+                        ProviderFailure::Incomplete
                     );
                     return if tools.is_empty() {
                         Ok(result)
@@ -223,10 +245,57 @@ impl Codex {
                 _ => {}
             }
         }
-        Err(anyhow!(
-            "Codex App Server stopped before completing the turn"
-        ))
+        Err(ProviderFailure::CodexService.into())
     }
+}
+
+fn check_rpc_error(value: &Value) -> Result<()> {
+    if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
+        return Err(codex_failure(&error["data"]["codexErrorInfo"])
+            .unwrap_or(ProviderFailure::Rejected)
+            .into());
+    }
+    Ok(())
+}
+
+fn codex_failure(info: &Value) -> Option<ProviderFailure> {
+    use ProviderFailure::*;
+
+    if let Some(kind) = info.as_str() {
+        return Some(match kind {
+            "usageLimitExceeded" | "rateLimitExceeded" => RateLimited,
+            "serverOverloaded" | "internalServerError" => Temporary,
+            "contextWindowExceeded" => InputLimit,
+            "modelNotFound" => ModelUnavailable,
+            "unauthorized" => CodexSignIn,
+            "cyberPolicy" | "bioPolicy" | "misalignmentPolicyViolation" | "inferenceHookDenied" => {
+                Refused
+            }
+            _ => Rejected,
+        });
+    }
+    for field in [
+        "httpConnectionFailed",
+        "responseStreamConnectionFailed",
+        "responseStreamDisconnected",
+        "responseTooManyFailedAttempts",
+    ] {
+        if let Some(details) = info.get(field).filter(|value| value.is_object()) {
+            if let Some(code) = details["httpStatusCode"].as_u64() {
+                return Some(match code {
+                    401 => CodexSignIn,
+                    403 => AccessDenied,
+                    404 => ModelUnavailable,
+                    413 => InputLimit,
+                    _ => transient_status(code).unwrap_or(Rejected),
+                });
+            }
+            return (details["httpStatusCode"].is_null()
+                && field != "responseTooManyFailedAttempts")
+                .then_some(Temporary);
+        }
+    }
+    None
 }
 
 fn turn_input(text: &str, image: Option<String>) -> Vec<Value> {
@@ -328,29 +397,77 @@ impl AnswerItem {
 }
 
 async fn rpc(child: &mut Child, message: Value) -> Result<()> {
-    let stdin = child.stdin.as_mut().context("missing Codex input")?;
-    stdin.write_all(message.to_string().as_bytes()).await?;
-    stdin.write_all(b"\n").await?;
-    stdin.flush().await?;
+    let stdin = child
+        .stdin
+        .as_mut()
+        .context(ProviderFailure::CodexService)?;
+    stdin
+        .write_all(message.to_string().as_bytes())
+        .await
+        .context(ProviderFailure::CodexService)?;
+    stdin
+        .write_all(b"\n")
+        .await
+        .context(ProviderFailure::CodexService)?;
+    stdin.flush().await.context(ProviderFailure::CodexService)?;
     Ok(())
 }
 
 async fn wait_result(lines: &mut Lines<BufReader<ChildStdout>>, id: u64) -> Result<Value> {
-    while let Some(line) = lines.next_line().await? {
-        let value: Value = serde_json::from_str(&line)?;
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .context(ProviderFailure::CodexService)?
+    {
+        let value: Value = serde_json::from_str(&line).context(ProviderFailure::Incomplete)?;
         if value["id"] == id {
+            check_rpc_error(&value)?;
             return value
                 .get("result")
                 .cloned()
-                .context("Codex App Server rejected initialization");
+                .context(ProviderFailure::Incomplete);
         }
     }
-    Err(anyhow!("Codex App Server disconnected"))
+    Err(ProviderFailure::CodexService.into())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_transient_codex_failures_qualify_for_backup() {
+        for (info, expected, transient) in [
+            (
+                json!("rateLimitExceeded"),
+                ProviderFailure::RateLimited,
+                true,
+            ),
+            (
+                json!({"responseStreamDisconnected":{"httpStatusCode":null}}),
+                ProviderFailure::Temporary,
+                true,
+            ),
+            (
+                json!({"responseTooManyFailedAttempts":{"httpStatusCode":503}}),
+                ProviderFailure::Temporary,
+                true,
+            ),
+            (
+                json!({"httpConnectionFailed":{"httpStatusCode":401}}),
+                ProviderFailure::CodexSignIn,
+                false,
+            ),
+            (json!("cyberPolicy"), ProviderFailure::Refused, false),
+            (json!("badRequest"), ProviderFailure::Rejected, false),
+        ] {
+            assert_eq!(codex_failure(&info), Some(expected));
+            assert_eq!(
+                crate::model::temporary_provider_failure(&expected.into()),
+                transient
+            );
+        }
+    }
 
     #[test]
     fn codex_turns_carry_images_as_inline_user_input() {

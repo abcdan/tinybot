@@ -1,4 +1,4 @@
-use super::{Connector, Mcp, Session, bearer, binding, get_json, protocol};
+use super::{Connector, Mcp, Session, bearer, binding, docblock, get_json, protocol};
 use crate::{
     net,
     security::{hash, now, pkce, token},
@@ -28,6 +28,8 @@ pub(super) struct OAuthToken {
     pub(super) access_token: String,
     pub(super) refresh_token: Option<String>,
     pub(super) expires: i64,
+    #[serde(default)]
+    pub(super) scopes: Option<Vec<String>>,
 }
 
 impl Mcp {
@@ -39,6 +41,13 @@ impl Mcp {
         client_secret: Option<&str>,
     ) -> Result<String> {
         let connector = self.owned(user, connector).await?;
+        let is_docblock = docblock::is_endpoint(&connector.endpoint);
+        if is_docblock {
+            ensure!(
+                client_id.is_none() && client_secret.is_none(),
+                "Use Docblock sign-in without an OAuth client secret"
+            );
+        }
         let endpoint = net::https(&connector.endpoint)?;
         let probe = protocol::probe(&endpoint, &connector.transport).await?;
         ensure!(
@@ -79,6 +88,12 @@ impl Mcp {
                 .as_str()
                 .context("missing authorization server")?,
         )?;
+        if is_docblock {
+            ensure!(
+                issuer == net::https(docblock::ORIGIN)?,
+                "Docblock returned an unexpected sign-in server"
+            );
+        }
         if connector.kind == "anythingmcp" {
             ensure!(
                 issuer.origin() == endpoint.origin(),
@@ -195,7 +210,10 @@ impl Mcp {
                 .append_pair("code_challenge", &pkce(&verifier))
                 .append_pair("code_challenge_method", "S256")
                 .append_pair("resource", resource_url.as_str());
-            if let Some(scope) = challenge_value(challenge, "scope") {
+            if is_docblock {
+                // Start with read access. Docblock's consent form lets the user opt in to writing.
+                q.append_pair("scope", "notes:read");
+            } else if let Some(scope) = challenge_value(challenge, "scope") {
                 q.append_pair("scope", scope);
             }
         }
@@ -206,7 +224,8 @@ impl Mcp {
             token_url: token_url.to_string(),
             verifier,
             resource: resource_url.to_string(),
-            callback_issuer: (auth["authorization_response_iss_parameter_supported"] == true)
+            callback_issuer: (is_docblock
+                || auth["authorization_response_iss_parameter_supported"] == true)
                 .then(|| advertised_issuer.to_owned()),
             client_auth: client_auth.into(),
         };
@@ -284,17 +303,31 @@ impl Mcp {
             access_token: next.access_token,
             refresh_token: next.refresh_token,
             expires: next.expires,
+            scopes: next.scopes,
         };
         self.store_oauth(&connector, &oauth, true).await?;
-        self.wake_connected(&user, &connector.id).await?;
+        let docblock_access = if docblock::is_endpoint(&connector.endpoint) {
+            self.docblock_access(&self.owned(&user, &connector.id).await?)
+        } else {
+            None
+        };
+        self.wake_connected_with_access(&user, &connector.id, docblock_access)
+            .await?;
+        let message = match docblock_access {
+            Some("write") => "Docblock is connected. You can read and write in the workspaces you selected.".into(),
+            Some("propose") => "Docblock is connected. Changes require review in Docblock. You can sign in again to grant direct write access.".into(),
+            Some(_) => "Docblock is connected with limited access. Sign in again and allow Write notes directly to save or publish notes.".into(),
+            None => format!("{} is connected. You can use it from your Chief.", connector.name),
+        };
         crate::store::notify(
             &self.db,
             &user,
-            &format!(
-                "{} is connected. You can use it from your Chief.",
-                connector.name
-            ),
-            Some("mini"),
+            &message,
+            Some(if docblock_access.is_some_and(|access| access != "write") {
+                "docblock"
+            } else {
+                "mini"
+            }),
         )
         .await?;
         Ok(())
@@ -342,6 +375,7 @@ pub(super) struct ReceivedToken {
     pub(super) access_token: String,
     pub(super) refresh_token: Option<String>,
     pub(super) expires: i64,
+    pub(super) scopes: Option<Vec<String>>,
 }
 
 pub(super) async fn exchange(flow: &OAuthFlow, grant: &[(&str, &str)]) -> Result<ReceivedToken> {
@@ -370,6 +404,14 @@ pub(super) async fn exchange(flow: &OAuthFlow, grant: &[(&str, &str)]) -> Result
         access_token: access.into(),
         refresh_token: value["refresh_token"].as_str().map(str::to_owned),
         expires: now() + value["expires_in"].as_i64().unwrap_or(3600).clamp(1, 86400),
+        scopes: value["scope"].as_str().map(|scopes| {
+            scopes
+                .split_ascii_whitespace()
+                .take(64)
+                .filter(|scope| scope.len() <= 128)
+                .map(str::to_owned)
+                .collect()
+        }),
     })
 }
 

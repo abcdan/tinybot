@@ -167,7 +167,6 @@ async fn enqueue(db: &SqlitePool, task: &Task, event: i64, worker: &str, text: &
     if added == 0 {
         return Ok(());
     }
-    // Both this and the generic Mercury acknowledgement use the same user-event flag.
     sqlx::query("UPDATE events SET acknowledged=1 WHERE id=?")
         .bind(event)
         .execute(&mut *tx)
