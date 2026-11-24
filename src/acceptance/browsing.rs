@@ -1,6 +1,6 @@
 use super::{app_with_model, fixture, message};
 use crate::{
-    model::{ModelProvider, TextDelta, ToolDefinition},
+    model::{ModelProvider, ProviderFailure, TextDelta, ToolDefinition},
     runtime::{self, Intent, Outcome, Risk, Tool, ToolContext},
     security, store,
 };
@@ -340,4 +340,106 @@ async fn chief_finishes_research_without_dumping_unrelated_results() {
             }
         );
     }
+}
+
+const SHARED_PAGE: &str = "https://example.org/shared-cart";
+const CART_ITEM: &str = "Artikel aan het eind van de pagina: groene thee.";
+const CART_REPLY: &str = "Ik zie groene thee in de gedeelde winkelwagen.\n\nBronnen:\n[Winkelwagen](https://example.org/shared-cart)";
+
+struct SharedPageRecovery(AtomicUsize);
+
+#[async_trait]
+impl ModelProvider for SharedPageRecovery {
+    async fn complete(&self, _: &str, _: &str) -> Result<String> {
+        panic!("finishing an opened page should not trigger a context summary");
+    }
+
+    async fn complete_turn(
+        &self,
+        instructions: &str,
+        input: &str,
+        tools: &[ToolDefinition],
+        _: Option<&mut TextDelta<'_>>,
+    ) -> Result<String> {
+        match self.0.fetch_add(1, Ordering::Relaxed) {
+            0 => Ok(json!({"kind":"tool","name":"search_web","args":{"query":format!("search for {SHARED_PAGE}")}}).to_string()),
+            1 => {
+                assert!(!tools.is_empty());
+                let context: Value = serde_json::from_str(input)?;
+                let history = context["history"].as_array().unwrap();
+                assert_eq!(history.last().unwrap()["role"], "tool");
+                assert_eq!(history.last().unwrap()["text"].as_str().unwrap().len(), 12_000);
+                assert!(!input.contains(CART_ITEM));
+                Err(ProviderFailure::OutputLimit.into())
+            }
+            2 => {
+                assert!(tools.is_empty());
+                assert!(instructions.contains("user-facing reply in plain text"));
+                let context: Value = serde_json::from_str(input)?;
+                assert_eq!(context["opened_page"]["url"], SHARED_PAGE);
+                assert_eq!(context["opened_page"]["title"], "Winkelwagen");
+                assert!(
+                    context["opened_page"]["text"]
+                        .as_str()
+                        .unwrap()
+                        .ends_with(CART_ITEM)
+                );
+                assert!(!input.contains("Solitaire"));
+                Ok(CART_REPLY.into())
+            }
+            _ => panic!("unexpected extra model call"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_shared_url_is_opened_and_kept_for_plain_text_limit_recovery() {
+    let db = fixture().await;
+    let socket = std::env::temp_dir().join(format!("tinybot-{}.sock", &security::id()[..12]));
+    let listener = UnixListener::bind(&socket).unwrap();
+    let router = Router::new().route(
+        "/browse",
+        post(|Json(body): Json<Value>| async move {
+            assert_eq!(body, json!({"url":SHARED_PAGE}));
+            let body = "Inhoud van de gedeelde winkelwagen. ".repeat(115);
+            let links: Vec<_> = (0..16)
+                .map(|index| json!({"text":"Bijlage ".repeat(10),"url":format!("https://example.org/{index}/{}","a".repeat(470))}))
+                .collect();
+            Json(json!({"url":SHARED_PAGE,"title":"Winkelwagen","text":format!("{body}{CART_ITEM}"),"links":links}))
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let model = Arc::new(SharedPageRecovery(AtomicUsize::new(0)));
+    let mut app = app_with_model(&db, model.clone());
+    app.workers.browser = socket.to_string_lossy().into_owned();
+    app.tools.retain(|tool| tool.name() != "search_web");
+    app.tools.push(Box::new(UnrelatedSearch));
+    message(&db, 1, "1", "Bekijk de bestelling.").await;
+    let task = store::claim(&db).await.unwrap().unwrap();
+    for _ in 0..7 {
+        store::append(&db, &task.id, "assistant", &"eerdere inhoud ".repeat(280))
+            .await
+            .unwrap();
+    }
+    store::settle(&db, &task, "idle", None).await.unwrap();
+    message(
+        &db,
+        2,
+        "1",
+        &format!("Dit is de winkelwagen. {SHARED_PAGE}"),
+    )
+    .await;
+    let continued = store::claim(&db).await.unwrap().unwrap();
+    assert_eq!(continued.id, task.id);
+
+    let outcome = runtime::work(&app, &continued).await;
+    server.abort();
+    std::fs::remove_file(socket).unwrap();
+    outcome.unwrap();
+
+    assert_eq!(model.0.load(Ordering::Relaxed), 3);
+    assert_eq!(
+        store::claim_outbox(&db).await.unwrap().unwrap().body,
+        CART_REPLY
+    );
 }

@@ -53,12 +53,37 @@ impl OpenRouter {
             .unwrap_or(&Value::Null);
         Err(upstream_failure(error, Some(u64::from(status.as_u16()))).into())
     }
+
+    async fn request_turn(
+        &self,
+        request: Value,
+        tools: &[ToolDefinition],
+        delta: Option<&mut TextDelta<'_>>,
+    ) -> Result<String> {
+        audit::provider_call("openrouter", &self.model, async |call| {
+            let deadline = Instant::now() + Duration::from_secs(90);
+            let response = timeout_at(deadline, self.send(request)).await??;
+            match delta {
+                Some(delta) => stream_response(response, tools, delta, call, deadline).await,
+                None => {
+                    let body = read_buffered(response, deadline).await?;
+                    buffered_response(&body, tools, BufferedReply::Completion, call)
+                }
+            }
+        })
+        .await
+    }
 }
 
 #[async_trait]
 impl ModelProvider for OpenRouter {
     async fn complete(&self, system: &str, input: &str) -> Result<String> {
         self.complete_turn(system, input, &[], None).await
+    }
+
+    async fn complete_brief_reply(&self, system: &str, input: &str) -> Result<String> {
+        self.request_turn(brief_reply_request(&self.model, system, input), &[], None)
+            .await
     }
 
     async fn read_attachment(
@@ -93,19 +118,8 @@ impl ModelProvider for OpenRouter {
         tools: &[ToolDefinition],
         delta: Option<&mut TextDelta<'_>>,
     ) -> Result<String> {
-        audit::provider_call("openrouter", &self.model, async |call| {
-            let deadline = Instant::now() + Duration::from_secs(90);
-            let req = chat_request(&self.model, system, input, tools, delta.is_some());
-            let response = timeout_at(deadline, self.send(req)).await??;
-            match delta {
-                Some(delta) => stream_response(response, tools, delta, call, deadline).await,
-                None => {
-                    let body = read_buffered(response, deadline).await?;
-                    buffered_response(&body, tools, BufferedReply::Completion, call)
-                }
-            }
-        })
-        .await
+        let request = chat_request(&self.model, system, input, tools, delta.is_some());
+        self.request_turn(request, tools, delta).await
     }
 }
 
@@ -324,6 +338,12 @@ fn chat_request(
         body["parallel_tool_calls"] = json!(false);
     }
     body
+}
+
+fn brief_reply_request(model: &str, system: &str, input: &str) -> Value {
+    let mut request = chat_request(model, system, input, &[], false);
+    request["reasoning"] = json!({"effort":"low"});
+    request
 }
 
 fn native_tool_input<'a>(input: &'a str, tools: &[ToolDefinition]) -> Cow<'a, str> {
@@ -552,6 +572,23 @@ mod tests {
         let serialized = input.to_string();
         assert_eq!(native_tool_input(&serialized, &definitions), serialized);
         assert_eq!(native_tool_input(&serialized, &[]), serialized);
+    }
+
+    #[test]
+    fn brief_replies_request_lower_reasoning_without_restricting_routes() {
+        let brief = brief_reply_request("fixture/model", "Answer briefly", "Saved evidence");
+        assert_eq!(brief["reasoning"], json!({"effort":"low"}));
+        assert!(brief.get("provider").is_none());
+        assert!(brief.get("tools").is_none());
+        let regular = chat_request(
+            "fixture/model",
+            "Instructions",
+            "Input",
+            &definitions(),
+            false,
+        );
+        assert!(regular.get("reasoning").is_none());
+        assert_eq!(regular["max_tokens"], MAX_TOKENS);
     }
 
     #[test]
