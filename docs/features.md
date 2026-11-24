@@ -98,6 +98,21 @@ receive a Telegram document up to 32 KiB. Tap **Listen** on a supported reply to
 it as a voice message. TinyBot sends the reply text to OpenRouter using your saved
 key for speech synthesis.
 
+## Ask TinyBot about its settings
+
+> What model are you using? Change your name to Atlas and set my timezone to Europe/Amsterdam.
+
+In a private chat, your Chief can read your personal settings and see which
+services are connected. When you ask for a change, TinyBot opens a form with the
+requested fields. Submit the form to compare the current and proposed values,
+then tap **Approve changes** to save them. If a setting changed since you opened
+the form, ask for a fresh one.
+
+You can change your display name, your Chief’s name, your timezone, your models
+from already-connected providers, and your OpenRouter tool toggles. Use the
+existing **Settings & forms** screens to connect accounts or manage credentials
+and access.
+
 ## Collect details and review actions
 
 > Ask me for the dates and preferred format, then draft the agenda.

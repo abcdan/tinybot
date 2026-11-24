@@ -12,6 +12,7 @@ mod queue;
 mod reactions;
 mod replies;
 mod requests;
+pub(crate) mod settings_requests;
 pub(crate) mod shared_memory;
 pub(crate) mod task_failures;
 pub(crate) mod task_views;

@@ -124,11 +124,13 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
     } else {
         super::openrouter_tools::available(&ctx).await?
     };
+    let personal_settings = super::settings::available(&ctx).await?;
     let mut tools: Vec<_> = app
         .tools
         .iter()
         .filter(|tool| {
             ctx.allows(tool.name())
+                && (!super::settings::is_settings_tool(tool.name()) || personal_settings)
                 && (!paired
                     || matches!(tool.name(), "send_reply" | "send_card" | "react_to_message"))
                 && (!tool.name().starts_with("openrouter_") || hosted.contains(&tool.name()))
@@ -632,6 +634,7 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                     name.as_str(),
                     "request_form"
                         | "request_input"
+                        | "configure_settings"
                         | "propose_agent"
                         | "delegate"
                         | "connect_mcp"

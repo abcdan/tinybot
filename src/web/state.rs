@@ -42,6 +42,9 @@ pub(super) async fn status(app: &App, user: &str) -> Result<Value> {
         .await?
         .into_iter()
         .filter_map(|entry| {
+            if store::settings_requests::is_settings_kind(&entry.kind) {
+                return store::settings_requests::view(&entry).ok();
+            }
             let payload = if entry.kind == "email-send" {
                 let raw: Value = serde_json::from_str(&entry.payload).ok()?;
                 let preview =

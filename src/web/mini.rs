@@ -21,6 +21,7 @@ mod mail;
 mod memory;
 mod models;
 mod onboarding;
+mod settings;
 mod sharing;
 mod task_views;
 mod tasks;
@@ -70,6 +71,10 @@ pub(super) async fn mini(
                 )
             } else if matches!(action, "audit-session" | "audit-export") {
                 ApiError(StatusCode::NOT_FOUND, "This audit session is no longer available.")
+            } else if error.downcast_ref::<crate::settings::Stale>().is_some() {
+                ApiError(StatusCode::CONFLICT, "Your settings changed. Ask your Chief for a fresh form.")
+            } else if error.downcast_ref::<crate::store::settings_requests::NoChanges>().is_some() {
+                ApiError(StatusCode::BAD_REQUEST, crate::store::settings_requests::NoChanges::MESSAGE)
             } else if let Some(error) = error.downcast_ref::<browser::SettingsError>() {
                 error.response()
             } else if let Some(error) = error.downcast_ref::<OnboardingError>() {
@@ -179,7 +184,9 @@ async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<
         "search-tasks" => return task_views::search(app, user, data).await,
         "stop-task" => task_views::stop(app, user, data).await?,
         "edit-email-draft" => return mail::edit_draft(app, user, data).await,
-        "get-form" => return tasks::get_form(app, user, data).await,
+        "get-form" => return settings::get_form(app, user, data).await,
+        "answer-settings-form" => return settings::answer_form(app, user, data).await,
+        "approve-settings" => settings::approve(app, user, data).await?,
         "submit-form" => tasks::submit_form(app, user, data).await?,
         "answer-form" => tasks::answer_form(app, user, data).await?,
         "time-zone" => tasks::set_time_zone(app, user, data).await?,

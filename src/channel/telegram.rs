@@ -233,8 +233,11 @@ impl ChannelAdapter for Telegram {
                     {"text":"Deny","callback_data":format!("{prefix}{id}/deny")}
                 ]]});
             }
-            Some(button) if button.starts_with("form/") => {
-                let id = uuid::Uuid::parse_str(&button["form/".len()..])?;
+            Some(button) if button.starts_with("form/") || button.starts_with(store::settings_requests::BUTTON_PREFIX) => {
+                let request = button.strip_prefix("form/")
+                    .or_else(|| button.strip_prefix(store::settings_requests::BUTTON_PREFIX))
+                    .context("invalid form destination")?;
+                let id = uuid::Uuid::parse_str(request)?;
                 data["reply_markup"] = json!({"inline_keyboard":[[{
                     "text":"Open form","web_app":{"url":format!("{}/mini?form={id}",self.origin)}
                 }]]});

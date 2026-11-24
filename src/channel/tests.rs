@@ -17,6 +17,85 @@ type Mock = Arc<Mutex<(Vec<(String, Value)>, VecDeque<Value>)>>;
 mod reply_parts;
 
 #[tokio::test]
+async fn settings_form_links_open_the_signed_mini_app_and_expire_on_steering() {
+    let db = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&db).await.unwrap();
+    store::seed(&db, "42").await.unwrap();
+    sqlx::query("UPDATE users SET provider='codex' WHERE id='42'")
+        .execute(&db)
+        .await
+        .unwrap();
+    store::ingest_telegram(&db, "42", 1, "42", "Change my time zone.", 20)
+        .await
+        .unwrap();
+    assert!(store::claim_outbox(&db).await.unwrap().is_none());
+    let task = store::claim(&db).await.unwrap().unwrap();
+    let request = crate::security::id();
+    let button = format!("{}{request}", store::settings_requests::BUTTON_PREFIX);
+    store::pause(
+        &db,
+        &task,
+        "settings-form",
+        &json!({}),
+        "Review your settings.",
+        Some(&button),
+        600,
+        &request,
+    )
+    .await
+    .unwrap();
+    let item = store::claim_outbox(&db).await.unwrap().unwrap();
+    assert!(store::can_deliver(&db, &item).await.unwrap());
+
+    let mock: Mock = Arc::new(Mutex::new((
+        Vec::new(),
+        VecDeque::from([
+            json!({"ok":false,"error_code":429,"parameters":{"retry_after":3}}),
+            json!({"ok":true,"result":{"message_id":70}}),
+        ]),
+    )));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let telegram = Telegram {
+        client: reqwest::Client::new(),
+        api: format!("http://{}/botTEST", listener.local_addr().unwrap()),
+        origin: "https://example.test".into(),
+        identity: Default::default(),
+    };
+    let router = Router::new()
+        .route("/botTEST/{method}", post(record))
+        .with_state(mock.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    assert_eq!(
+        send_outbound(&db, &telegram, &item).await.unwrap(),
+        MessageDelivery::Retry(3)
+    );
+    assert_eq!(
+        send_outbound(&db, &telegram, &item).await.unwrap(),
+        MessageDelivery::Sent(Some(70))
+    );
+    let expected_url = format!("https://example.test/mini?form={request}");
+    let captured = mock.lock().await;
+    assert_eq!(captured.0.len(), 2);
+    for (method, request) in &captured.0 {
+        assert_eq!(method, "sendMessage");
+        assert_eq!(request["chat_id"], 42);
+        assert_eq!(
+            request["reply_markup"]["inline_keyboard"][0][0]["web_app"]["url"],
+            expected_url
+        );
+    }
+    store::ingest_telegram(&db, "42", 2, "42", "Keep my current settings.", 21)
+        .await
+        .unwrap();
+    assert!(!store::can_deliver(&db, &item).await.unwrap());
+    server.abort();
+}
+
+#[tokio::test]
 async fn accepted_telegram_input_only_schedules_delayed_progress() {
     let db = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
