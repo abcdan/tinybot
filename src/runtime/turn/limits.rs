@@ -101,6 +101,9 @@ impl Limit {
         }
         match response {
             Ok(Some(Step::Reply { text, .. })) if text.trim().is_empty() => {
+                if !store::has_queued_reaction(&app.db, task).await? {
+                    return Err(original);
+                }
                 store::settle(&app.db, task, "idle", None).await
             }
             Ok(Some(Step::Reply { text, .. })) => {
