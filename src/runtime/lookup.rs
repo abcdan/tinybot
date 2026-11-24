@@ -20,7 +20,7 @@ const FINAL_REPLY: &str = concat!(
     "For a sourced answer, add a blank line, a Sources: (Dutch: Bronnen:) heading, and one HTTPS Markdown link per relevant source. ",
     r#"Return only JSON {"text":string}."#,
 );
-const UNVERIFIED_REPLY: &str = "I couldn’t verify the requested information.";
+pub(super) const UNVERIFIED_REPLY: &str = "I couldn’t verify the requested information.";
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct Lookup {
@@ -76,7 +76,7 @@ pub(super) async fn reply(
     model: &dyn ModelProvider,
     context: &Value,
     stop_reason: Option<&str>,
-) -> String {
+) -> Result<String> {
     let input = json!({
         "goal":context["goal"],
         "summary":context["summary"],
@@ -99,5 +99,4 @@ pub(super) async fn reply(
         Ok(reply.text)
     })
     .await
-    .unwrap_or_else(|_| UNVERIFIED_REPLY.into())
 }

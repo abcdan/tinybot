@@ -115,7 +115,9 @@ pub(super) fn result(name: &str, value: &Value) -> Value {
         "call_mcp" => json!({"response_bytes":len(&value["result"])}),
         "list_mcp_tools" => json!({"tool_count":value["total"].as_u64()
             .unwrap_or_else(||count(&value["shared_tools"]) as u64)}),
-        "react_to_message" => json!({"queued":value["queued"].as_bool()}),
+        "react_to_message" | "send_task_file" => json!({"queued":value["queued"].as_bool()}),
+        "set_goal" => json!({"saved":value["saved"].as_bool()}),
+        "delegate" => json!({"helper_replied":len(&value["helper_reply"])>0}),
         "form_submission" => json!({"submitted":value["submitted"].as_bool(),
             "http_status":value["http_status"].as_u64().filter(|status|(100..600).contains(status))}),
         _ => json!({"response_bytes":value.to_string().len()}),

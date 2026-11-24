@@ -114,16 +114,17 @@ async fn record_failure(
         ),
     )
     .await;
-    let recorded = if group {
-        store::settle(
-            &app.db,
-            task,
-            "blocked",
-            Some("I couldn’t finish this group task. Reply here to continue."),
-        )
-        .await
+    let explanation = if group {
+        String::from("I couldn’t finish this group task. Reply here to continue.")
     } else {
-        store::task_failures::record(&app.db, task, failure.message, failure.retryable).await
+        super::failure::explain(&app.db, task, &failure)
+            .await
+            .unwrap_or_else(|_| failure.message.into())
+    };
+    let recorded = if group {
+        store::settle(&app.db, task, "blocked", Some(&explanation)).await
+    } else {
+        store::task_failures::record(&app.db, task, &explanation, failure.retryable).await
     };
     if recorded.is_err() {
         tracing::warn!(task=%task.id,"could not save task failure");

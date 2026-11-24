@@ -29,7 +29,10 @@ The chat shows when the task switches providers.
   language. An answer, draft, or helper handoff can take the place of that update.
   Use **Tasks** on the Mini App home screen to search titles, summaries, and retained
   chat messages.
-- When a model fails, TinyBot explains what needs attention. If the request can
+- When a model reaches its response limit on a private task, TinyBot tries a
+  smaller next step or finishes with the results it already has. Long replies
+  can arrive in multiple Telegram messages. If recovery fails, TinyBot uses the
+  audit log to explain the last confirmed step and what it tried. If the request can
   safely run again before any tools or actions started, tap **Retry** or send
   `/retry` to retry the saved message. If TinyBot asks you to reconnect or choose
   a model, you can send `/retry` after updating **Settings & forms → Model**.

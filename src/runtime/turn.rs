@@ -25,6 +25,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
+mod limits;
+
 pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> Result<()> {
     if store::groups::is_group_task(&app.db, &task.id).await? {
         return super::group::work(app, task).await;
@@ -196,6 +198,7 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
     let mut repeated_lookup = false;
     let mut finish_lookup = false;
     let mut asked_for_step = false;
+    let mut recovery: Option<(limits::Limit, String)> = None;
     loop {
         let progress = loop_guard::check(app, task, request).await?;
         if matches!(progress, Progress::Superseded) {
@@ -296,12 +299,19 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
         if finish_lookup || stop_reason.is_some() {
             return finish_from_context(app, task, feedback, &*model, &input, stop_reason).await;
         }
+        let instructions = recovery.as_ref().map_or(ENGINE, |(_, text)| text.as_str());
+        let compact_input = recovery
+            .as_ref()
+            .map(|(limit, _)| limit.replan_input(&input));
+        let model_input = compact_input.as_deref().unwrap_or(&input);
         let step = if let Some(feedback) = feedback {
-            feedback.complete(&*model, &input, &definitions).await
+            feedback
+                .complete(&*model, instructions, model_input, &definitions)
+                .await
         } else {
             audit::model("agent_turn", async {
                 let response = model
-                    .complete_turn(ENGINE, &input.to_string(), &definitions, None)
+                    .complete_turn(instructions, &model_input.to_string(), &definitions, None)
                     .await?;
                 parse_json_reply(&response).map(Some)
             })
@@ -310,36 +320,62 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
         let step = match step {
             Ok(Some(step)) => step,
             Ok(None) => return store::settle(&app.db, task, "idle", None).await,
-            Err(error) => {
-                if backup.is_none()
-                    && temporary_provider_failure(&error)
-                    && let Some(selected) = store::model_backup::begin(&app.db, task).await?
-                {
-                    audit::record(
-                        "model",
-                        "model_backup",
-                        "switched",
-                        json!({"provider":selected.provider,"model":selected.model}),
-                    )
-                    .await;
-                    model = app.models.backup_provider(&task.user, &selected).await?;
-                    backup = Some(selected);
-                    if !store::current(&app.db, task).await? {
-                        return store::settle(&app.db, task, "idle", None).await;
+            Err(error) => match limits::Limit::from_error(&error) {
+                Some(limit) => {
+                    let next = if recovery.is_none()
+                        && !has_work
+                        && limits::can_replan(app, task).await?
+                    {
+                        let instructions = limits::replan_instructions();
+                        let next = limit
+                            .replan(&*model, &instructions, &input, &definitions)
+                            .await?;
+                        recovery = Some((limit, instructions));
+                        next
+                    } else {
+                        None
+                    };
+                    if let Some(next) = next {
+                        next
+                    } else {
+                        return limit
+                            .finish(app, task, feedback, &*model, &input, error)
+                            .await;
                     }
-                    tools.retain(|tool| !tool.name().starts_with("openrouter_"));
-                    definitions = tool_definitions(&tools);
-                    attachment = super::media::context(app, task, &*model, Some(request)).await?;
-                    continue;
                 }
-                if has_work
-                    && provider_failure(&error)
-                        .is_none_or(|failure| failure == ProviderFailure::Incomplete)
-                {
-                    return finish_from_context(app, task, feedback, &*model, &input, None).await;
+                None => {
+                    if backup.is_none()
+                        && temporary_provider_failure(&error)
+                        && let Some(selected) = store::model_backup::begin(&app.db, task).await?
+                    {
+                        audit::record(
+                            "model",
+                            "model_backup",
+                            "switched",
+                            json!({"provider":selected.provider,"model":selected.model}),
+                        )
+                        .await;
+                        model = app.models.backup_provider(&task.user, &selected).await?;
+                        backup = Some(selected);
+                        if !store::current(&app.db, task).await? {
+                            return store::settle(&app.db, task, "idle", None).await;
+                        }
+                        tools.retain(|tool| !tool.name().starts_with("openrouter_"));
+                        definitions = tool_definitions(&tools);
+                        attachment =
+                            super::media::context(app, task, &*model, Some(request)).await?;
+                        continue;
+                    }
+                    if has_work
+                        && provider_failure(&error)
+                            .is_none_or(|failure| failure == ProviderFailure::Incomplete)
+                    {
+                        return finish_from_context(app, task, feedback, &*model, &input, None)
+                            .await;
+                    }
+                    return Err(error);
                 }
-                return Err(error);
-            }
+            },
         };
         if !store::current(&app.db, task).await? {
             return store::settle(&app.db, task, "idle", None).await;
@@ -671,7 +707,19 @@ async fn finish_from_context(
     if !store::current(&app.db, task).await? {
         return store::settle(&app.db, task, "idle", None).await;
     }
-    let text = lookup::reply(model, input, stop_reason).await;
+    let text = match lookup::reply(model, input, stop_reason).await {
+        Ok(text) => text,
+        Err(error) => {
+            if let Some(limit) = limits::Limit::from_error(&error) {
+                let mut context = input.clone();
+                context["tool_stop_reason"] = json!(stop_reason);
+                return limit
+                    .finish(app, task, feedback, model, &context, error)
+                    .await;
+            }
+            lookup::UNVERIFIED_REPLY.into()
+        }
+    };
     let _delivery = match feedback {
         Some(feedback) => Some(feedback.delivery.lock().await),
         None => None,
