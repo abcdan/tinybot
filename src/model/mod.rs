@@ -63,6 +63,10 @@ fn native_reply(response: String) -> Result<String> {
 pub trait ModelProvider: Send + Sync {
     async fn complete(&self, system: &str, input: &str) -> Result<String>;
 
+    async fn complete_brief_reply(&self, system: &str, input: &str) -> Result<String> {
+        self.complete_turn(system, input, &[], None).await
+    }
+
     async fn read_attachment(
         &self,
         _input: &str,

@@ -195,7 +195,9 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
     };
     let mut summary = task.summary.clone();
     let mut goal = task.goal.clone();
-    let mut lookups = BTreeSet::new();
+    let mut lookups: BTreeSet<Lookup> = BTreeSet::new();
+    let mut opened_page: Option<Value> = None;
+    let mut compacted_history = false;
     let mut consulted_helper = false;
     let mut repeated_lookup = false;
     let mut finish_lookup = false;
@@ -218,8 +220,24 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                 .take_while(|(id, _, _)| id > event)
                 .any(|(_, role, _)| role == "handoff");
         }
+        let has_work = consulted_helper
+            || !lookups.is_empty()
+            || records
+                .iter()
+                .rev()
+                .take_while(|(id, _, _)| {
+                    latest_request
+                        .as_ref()
+                        .is_none_or(|(latest, _, _)| id > latest)
+                })
+                .any(|(_, role, _)| role == "tool");
         let size: usize = records.iter().map(|(_, _, text)| text.len()).sum();
-        if (size > 32000 || records.len() == 180) && records.len() > 6 {
+        if !compacted_history
+            && !has_work
+            && (size > 32000 || records.len() == 180)
+            && records.len() > 6
+        {
+            compacted_history = true;
             let old =
                 store::compaction_batch(&app.db, &task.id, records[records.len() - 6].0).await?;
             if let Some((boundary, _, _)) = old.last() {
@@ -287,18 +305,10 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
         if let Some(briefing) = &inbox_briefing {
             input["inbox_briefing"] = serde_json::to_value(briefing)?;
         }
-        let has_work = consulted_helper
-            || !lookups.is_empty()
-            || records
-                .iter()
-                .rev()
-                .take_while(|(id, _, _)| {
-                    latest_request
-                        .as_ref()
-                        .is_none_or(|(latest, _, _)| id > latest)
-                })
-                .any(|(_, role, _)| role == "tool");
         if finish_lookup || stop_reason.is_some() {
+            if let Some(page) = &opened_page {
+                input["opened_page"] = page.clone();
+            }
             return finish_from_context(app, task, feedback, &*model, &input, stop_reason).await;
         }
         let instructions = recovery.as_deref().unwrap_or(ENGINE);
@@ -317,6 +327,9 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
             })
             .await
         };
+        if let Some(page) = &opened_page {
+            input["opened_page"] = page.clone();
+        }
         let step = match step {
             Err(error) => match limits::Limit::from_error(&error) {
                 Some(limit) => {
@@ -436,7 +449,17 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                 };
                 return store::settle_reply(&app.db, task, &text, &suggestions).await;
             }
-            Step::Tool { name, mut args } => {
+            Step::Tool { mut name, mut args } => {
+                if let Some(url) = lookup::supplied_url_query(&name, &args, request)
+                    && tools.iter().any(|tool| tool.name() == "browse")
+                    && tools.iter().any(|tool| tool.name() == name)
+                    && !lookups.iter().any(|lookup| lookup.reads_page(&url))
+                {
+                    audit::record("tool", "browse", "selected", json!({"source":"user_link"}))
+                        .await;
+                    name = "browse".into();
+                    args = json!({"url":url});
+                }
                 mcp_approval::prepare_docblock_call(&ctx, &name, &mut args);
                 if !loop_guard::reserve(app, task, "chief", &name, &args).await? {
                     continue;
@@ -684,6 +707,9 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                 }
                 if let Some(lookup) = lookup {
                     let observation = lookup.observe(result);
+                    if let Some(page) = lookup::opened_page(&observation) {
+                        opened_page = Some(page);
+                    }
                     store::finish_action(&app.db, task, &action, &observation.to_string(), false)
                         .await?;
                     lookups.insert(lookup);
