@@ -54,3 +54,18 @@ pub async fn reaction_target(db: &SqlitePool, item: &Outbound) -> Result<Option<
     .fetch_optional(db)
     .await?)
 }
+
+pub(crate) async fn has_queued_reaction(db: &SqlitePool, task: &Task) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM tasks t JOIN events e ON e.id=(
+            SELECT max(id) FROM events WHERE task=t.id AND role='user')
+         JOIN outbox o ON o.reaction_event=e.id AND o.task=t.id AND o.user=t.user
+         WHERE t.id=? AND t.user=? AND t.revision=? AND t.state='running'
+           AND e.telegram_reaction_queued=1 AND o.state IN ('queued','sending','sent'))",
+    )
+    .bind(&task.id)
+    .bind(&task.user)
+    .bind(task.revision)
+    .fetch_one(db)
+    .await?)
+}

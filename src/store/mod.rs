@@ -33,6 +33,7 @@ pub use queue::{
     append, claim, compact, compaction_batch, current, expire, has_access, history, list_tasks,
     recover, select_task, settle, settle_reply, settle_widget,
 };
+pub(crate) use reactions::has_queued_reaction;
 pub use reactions::{REACTION_EMOJIS, queue_reaction, reaction_target};
 pub use replies::{SuggestedReply, redeem_reply, suggested_replies};
 pub use requests::{

@@ -23,6 +23,10 @@ enum Stage {
     CompactFinishTimeout,
     Incomplete,
     LookupLimit,
+    ReactToMessage,
+    EmptyFinish {
+        reaction_queued: bool,
+    },
     ShortAnswer {
         text: &'static str,
         without_tools: bool,
@@ -81,6 +85,19 @@ impl ModelProvider for LimitModel {
             }
             Stage::Incomplete => return Err(ProviderFailure::Incomplete.into()),
             Stage::LookupLimit => panic!("expected the saved-work finalizer"),
+            Stage::ReactToMessage => {
+                assert!(tools.iter().any(|tool| tool.name == "react_to_message"));
+                json!({"kind":"tool","name":"react_to_message","args":{"emoji":"🎉"}})
+            }
+            Stage::EmptyFinish { reaction_queued } => {
+                assert!(tools.is_empty());
+                let context: Value = serde_json::from_str(input)?;
+                assert_eq!(
+                    context["telegram_reaction_queued"] == true,
+                    *reaction_queued
+                );
+                json!({"kind":"reply","text":""})
+            }
             Stage::ShortAnswer {
                 text,
                 without_tools,
@@ -185,6 +202,38 @@ async fn a_timed_out_smaller_plan_gets_a_tool_free_reply() {
 }
 
 #[tokio::test]
+async fn a_queued_telegram_reaction_allows_a_silent_recovery_finish() {
+    let db = fixture().await;
+    let model = Arc::new(LimitModel {
+        steps: vec![
+            Stage::ReactToMessage,
+            Stage::Limit,
+            Stage::EmptyFinish {
+                reaction_queued: true,
+            },
+        ],
+        calls: AtomicUsize::new(0),
+    });
+    let app = app_with_model(&db, model.clone());
+    store::ingest_telegram(&db, "1", 1, "1", "Goed nieuws, het is gelukt!", 42)
+        .await
+        .unwrap();
+    let task = store::claim(&db).await.unwrap().unwrap();
+
+    runtime::work(&app, &task).await.unwrap();
+
+    assert_eq!(super::task_for(&db, &task.id).await.state, "idle");
+    let reaction = store::claim_outbox(&db).await.unwrap().unwrap();
+    assert_eq!(reaction.body, "🎉");
+    assert_eq!(
+        store::reaction_target(&db, &reaction).await.unwrap(),
+        Some(42)
+    );
+    assert!(store::claim_outbox(&db).await.unwrap().is_none());
+    assert_eq!(model.calls.load(Ordering::Relaxed), 3);
+}
+
+#[tokio::test]
 async fn a_configured_backup_can_finish_a_timed_out_recovery() {
     let db = fixture().await;
     let reply = "Yeat is een Amerikaanse rapper.";
@@ -271,6 +320,12 @@ async fn saved_work_is_reported_without_enabling_more_tools() {
             true,
         ),
         (Stage::RepeatGoalWithoutTools, false),
+        (
+            Stage::EmptyFinish {
+                reaction_queued: false,
+            },
+            false,
+        ),
     ] {
         let db = fixture().await;
         let model = Arc::new(LimitModel {

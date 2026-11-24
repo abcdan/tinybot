@@ -94,7 +94,7 @@ pub(super) async fn explain(db: &SqlitePool, task: &Task, failure: &Failure) -> 
          JOIN audit_sessions s ON s.id=t.audit_session_id JOIN audit_entries e ON e.session=s.id
          WHERE t.id=? AND t.user=? AND t.revision=?
            AND ((e.kind='tool' AND e.status='completed' AND e.name IN
-                    ('send_email','form_submission','send_task_file','browse','search_web','call_mcp','delegate','set_goal')) OR
+                    ('send_email','form_submission','send_task_file','browse','search_web','call_mcp','delegate','set_goal','react_to_message')) OR
                 (e.kind='tool' AND e.status='failed' AND e.attempt=s.attempts) OR
                 (e.kind='model' AND e.name IN ('output_limit_recovery','input_limit_recovery')
                     AND e.status='failed' AND e.attempt=s.attempts))
@@ -185,6 +185,9 @@ fn confirmed_step(name: &str, detail: &Value) -> Option<&'static str> {
         }
         "send_task_file" if detail["queued"] == true => {
             Some("I had already queued a file for delivery.")
+        }
+        "react_to_message" if detail["queued"] == true => {
+            Some("I had already queued a Telegram reaction.")
         }
         "set_goal" if detail["saved"] == true => Some("I had already saved the task goal."),
         "browse" if detail["page_bytes"].as_u64().is_some_and(|bytes| bytes > 0) => {
