@@ -195,7 +195,7 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
     };
     let mut summary = task.summary.clone();
     let mut goal = task.goal.clone();
-    let mut lookups = BTreeSet::new();
+    let mut lookups: BTreeSet<Lookup> = BTreeSet::new();
     let mut consulted_helper = false;
     let mut repeated_lookup = false;
     let mut finish_lookup = false;
@@ -436,7 +436,17 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                 };
                 return store::settle_reply(&app.db, task, &text, &suggestions).await;
             }
-            Step::Tool { name, mut args } => {
+            Step::Tool { mut name, mut args } => {
+                if let Some(url) = lookup::supplied_url_query(&name, &args, request)
+                    && tools.iter().any(|tool| tool.name() == "browse")
+                    && tools.iter().any(|tool| tool.name() == name)
+                    && !lookups.iter().any(|lookup| lookup.reads_page(&url))
+                {
+                    audit::record("tool", "browse", "selected", json!({"source":"user_link"}))
+                        .await;
+                    name = "browse".into();
+                    args = json!({"url":url});
+                }
                 mcp_approval::prepare_docblock_call(&ctx, &name, &mut args);
                 if !loop_guard::reserve(app, task, "chief", &name, &args).await? {
                     continue;

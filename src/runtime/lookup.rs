@@ -64,6 +64,36 @@ impl Lookup {
             Ok(Outcome::Pause) => json!({"tool":self.tool,"target":self.target,"status":"paused"}),
         }
     }
+
+    pub(super) fn reads_page(&self, url: &str) -> bool {
+        matches!(self.tool, "browse" | "openrouter_web_fetch") && self.target == url
+    }
+}
+
+pub(super) fn supplied_url_query(name: &str, args: &Value, request: &str) -> Option<String> {
+    if !matches!(name, "search_web" | "openrouter_web_search") {
+        return None;
+    }
+    let query = args["query"].as_str()?.trim();
+    let query = ["search for ", "search ", "look up ", "zoek naar ", "zoek "]
+        .iter()
+        .find_map(|prefix| query.strip_prefix(prefix))
+        .unwrap_or(query);
+    let query = explicit_url(query.trim())?;
+    request
+        .split_whitespace()
+        .filter_map(|word| explicit_url(word.trim_matches(['<', '>', '(', ')', '"'])))
+        .any(|url| url == query)
+        .then(|| query.into())
+}
+
+fn explicit_url(value: &str) -> Option<url::Url> {
+    if value.contains(char::is_whitespace)
+        || !(value.starts_with("https://") || value.starts_with("http://"))
+    {
+        return None;
+    }
+    net::website(value).ok()
 }
 
 #[derive(Deserialize)]
