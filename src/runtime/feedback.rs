@@ -106,7 +106,14 @@ impl Feedback {
                 && text != last_draft
             {
                 match channel.draft(&task.user, draft_id, &text).await {
-                    Ok(None) => last_draft = text,
+                    Ok(None) => {
+                        if last_draft.is_empty()
+                            && store::acknowledgements::suppress(db, task).await.is_err()
+                        {
+                            tracing::debug!("could not suppress progress after streaming a draft");
+                        }
+                        last_draft = text;
+                    }
                     Ok(Some(delay)) => retry_at = Instant::now() + delay,
                     Err(_) => draft_supported = false,
                 }

@@ -8,6 +8,10 @@ use serde_json::Value;
 use std::{sync::Arc, time::Duration};
 
 pub async fn run(app: Arc<App>, channel: Arc<dyn ChannelAdapter>) {
+    tokio::join!(run_tasks(app.clone(), channel), run_acknowledgements(app));
+}
+
+async fn run_tasks(app: Arc<App>, channel: Arc<dyn ChannelAdapter>) {
     let mut jobs = tokio::task::JoinSet::new();
     let mut cleanup = tokio::time::interval(Duration::from_secs(12));
     loop {
@@ -50,6 +54,41 @@ pub async fn run(app: Arc<App>, channel: Arc<dyn ChannelAdapter>) {
                     }
                     Ok(None)=>{},
                     Err(_)=>tracing::warn!("unable to claim task")
+                }
+            }
+        }
+    }
+}
+
+async fn run_acknowledgements(app: Arc<App>) {
+    let mut jobs = tokio::task::JoinSet::new();
+    let mut poll = tokio::time::interval(Duration::from_secs(1));
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            Some(done) = jobs.join_next(), if !jobs.is_empty() => {
+                if done.is_err() {
+                    tracing::debug!("progress generation worker stopped");
+                }
+            }
+            _ = poll.tick(), if jobs.len() < 2 => {
+                match store::acknowledgements::claim(&app.db).await {
+                    Ok(Some(ready)) => {
+                        let app = app.clone();
+                        jobs.spawn(async move {
+                            let trace = audit::Trace::for_progress(
+                                &app.db, &ready.task, &ready.user, ready.revision
+                            ).await.ok().flatten();
+                            let reply = audit::scope(trace, super::acknowledgement::generate(
+                                &app, &ready.user, &ready.request, ready.queued,
+                            )).await.ok().flatten();
+                            if store::acknowledgements::finish(&app.db, &ready, reply.as_deref()).await.is_err() {
+                                tracing::debug!("progress update could not enter delivery");
+                            }
+                        });
+                    }
+                    Ok(None) => {}
+                    Err(_) => tracing::debug!("progress work could not be claimed"),
                 }
             }
         }

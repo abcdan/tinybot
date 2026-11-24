@@ -15,13 +15,89 @@ use tokio::{net::TcpListener, sync::Mutex};
 type Mock = Arc<Mutex<(Vec<(String, Value)>, VecDeque<Value>)>>;
 
 #[tokio::test]
-async fn accepted_telegram_input_sends_one_reply_and_notices_when_work_waits() {
+async fn accepted_telegram_input_only_schedules_delayed_progress() {
+    let db = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&db).await.unwrap();
+    store::seed(&db, "42").await.unwrap();
+    sqlx::query("UPDATE users SET provider='codex' WHERE id='42'")
+        .execute(&db)
+        .await
+        .unwrap();
+    let arrived_at = crate::security::now();
+    for _ in 0..2 {
+        store::ingest_telegram(&db, "42", 1, "42", "Draft the plan.", 20)
+            .await
+            .unwrap();
+    }
+    assert!(store::claim_outbox(&db).await.unwrap().is_none());
+    store::claim(&db).await.unwrap().unwrap();
+    store::ingest_telegram(&db, "42", 2, "42", "Add milestones.", 21)
+        .await
+        .unwrap();
+    store::ingest_telegram(&db, "42", 3, "42", "/new Queue a second task.", 22)
+        .await
+        .unwrap();
+    let pending: Vec<(i64, i64, String)> = sqlx::query_as(
+        "SELECT reply_to_message_id,retry_at,body FROM outbox
+         WHERE state='queued' AND button LIKE 'ack-generate/%' ORDER BY reply_to_message_id",
+    )
+    .fetch_all(&db)
+    .await
+    .unwrap();
+    assert_eq!(
+        pending
+            .iter()
+            .map(|(message, _, _)| *message)
+            .collect::<Vec<_>>(),
+        [21, 22]
+    );
+    assert!(
+        pending
+            .iter()
+            .all(|(_, retry_at, body)| *retry_at >= arrived_at + 5 && body.is_empty())
+    );
+    sqlx::query("UPDATE outbox SET retry_at=0 WHERE button LIKE 'ack-generate/%'")
+        .execute(&db)
+        .await
+        .unwrap();
+    assert!(store::claim_outbox(&db).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn generated_progress_replies_to_the_request_without_controls() {
+    let db = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&db).await.unwrap();
+    store::seed(&db, "42").await.unwrap();
+    sqlx::query("UPDATE users SET provider='codex' WHERE id='42'")
+        .execute(&db)
+        .await
+        .unwrap();
+    store::ingest_telegram(&db, "42", 1, "42", "Zoek de openingstijden op.", 20)
+        .await
+        .unwrap();
+    let task = store::claim(&db).await.unwrap().unwrap();
+    sqlx::query("UPDATE outbox SET retry_at=0 WHERE button LIKE 'ack-generate/%'")
+        .execute(&db)
+        .await
+        .unwrap();
+    let progress = store::acknowledgements::claim(&db).await.unwrap().unwrap();
+    let text = "Ik zoek de openingstijden op.";
+    store::acknowledgements::finish(&db, &progress, Some(text))
+        .await
+        .unwrap();
+    let item = store::claim_outbox(&db).await.unwrap().unwrap();
+
     let mock: Mock = Arc::new(Mutex::new((
         Vec::new(),
-        VecDeque::from([
-            json!({"ok":true,"result":{"message_id":70}}),
-            json!({"ok":true,"result":{"message_id":71}}),
-        ]),
+        VecDeque::from([json!({"ok":true,"result":{"message_id":70}})]),
     )));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let telegram = Telegram {
@@ -34,72 +110,25 @@ async fn accepted_telegram_input_sends_one_reply_and_notices_when_work_waits() {
         .route("/botTEST/{method}", post(record))
         .with_state(mock.clone());
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    let db = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    sqlx::migrate!().run(&db).await.unwrap();
-    store::seed(&db, "42").await.unwrap();
-    sqlx::query("UPDATE users SET provider='codex' WHERE id='42'")
-        .execute(&db)
-        .await
-        .unwrap();
-    for _ in 0..2 {
-        store::ingest_telegram(&db, "42", 1, "42", "Draft the plan.", 20)
-            .await
-            .unwrap();
-    }
-    let first_ack = store::claim_outbox(&db).await.unwrap().unwrap();
-    let first = store::claim(&db).await.unwrap().unwrap();
-    store::ingest_telegram(&db, "42", 2, "42", "Add milestones.", 21)
-        .await
-        .unwrap();
-    assert!(store::claim_outbox(&db).await.unwrap().is_none());
     assert_eq!(
-        send_outbound(&db, &telegram, &first_ack).await.unwrap(),
+        send_outbound(&db, &telegram, &item).await.unwrap(),
         MessageDelivery::Sent(Some(70))
     );
-
-    store::ingest_telegram(&db, "42", 3, "42", "/new Queue a second task.", 22)
+    store::settle_reply(&db, &task, "De winkel opent om 9.00 uur.", &[])
         .await
         .unwrap();
-    let queued_ack = store::claim_outbox(&db).await.unwrap().unwrap();
     assert_eq!(
-        send_outbound(&db, &telegram, &queued_ack).await.unwrap(),
-        MessageDelivery::Sent(Some(71))
-    );
-
-    store::ingest_telegram(&db, "42", 4, "42", "/new Cancel this task.", 23)
-        .await
-        .unwrap();
-    let stale = store::claim_outbox(&db).await.unwrap().unwrap();
-    assert!(
-        store::task_views::stop(&db, "42", stale.task.as_deref().unwrap(), 1)
-            .await
-            .unwrap()
-    );
-    assert_eq!(
-        send_outbound(&db, &telegram, &stale).await.unwrap(),
+        send_outbound(&db, &telegram, &item).await.unwrap(),
         MessageDelivery::Sent(None)
     );
 
-    let calls = mock.lock().await;
-    assert_eq!(calls.0.len(), 2);
-    assert_eq!(calls.0[0].0, "sendMessage");
-    let accepted = &calls.0[0].1;
-    assert_eq!(accepted["text"], "Got it. I’ll get to work.");
-    assert_eq!(accepted["reply_parameters"]["message_id"], 20);
-    assert_eq!(
-        accepted["reply_markup"]["inline_keyboard"][0][1]["callback_data"],
-        format!("ts/{}/{}", first.id, first.revision + 1)
-    );
-    let queued = &calls.0[1].1;
-    assert_eq!(
-        queued["text"],
-        "Got it. I’ve queued your task behind your other work."
-    );
-    assert_eq!(queued["reply_parameters"]["message_id"], 22);
+    let captured = mock.lock().await;
+    assert_eq!(captured.0.len(), 1);
+    let (method, request) = &captured.0[0];
+    assert_eq!(method, "sendMessage");
+    assert_eq!(request["text"], text);
+    assert_eq!(request["reply_parameters"]["message_id"], 20);
+    assert!(request.get("reply_markup").is_none());
     server.abort();
 }
 
@@ -365,8 +394,7 @@ async fn mcp_approval_buttons_resume_only_the_owners_waiting_request() {
     store::ingest_telegram(&db, "42", 1, "42", "Find the roadmap", 70)
         .await
         .unwrap();
-    let acknowledgement = store::claim_outbox(&db).await.unwrap().unwrap();
-    assert_eq!(acknowledgement.reply_to_message_id, Some(70));
+    assert!(store::claim_outbox(&db).await.unwrap().is_none());
     let task = store::claim(&db).await.unwrap().unwrap();
     let request = crate::security::id();
     let body = "Search Docs for the roadmap. This sends your search query to Docs.";
@@ -609,8 +637,7 @@ async fn reactions_use_the_latest_private_telegram_message_id() {
     store::ingest_telegram(&db, user, *external_id, user, text, *message_id)
         .await
         .unwrap();
-    let acknowledgement = store::claim_outbox(&db).await.unwrap().unwrap();
-    assert_eq!(acknowledgement.reply_to_message_id, Some(*message_id));
+    assert!(store::claim_outbox(&db).await.unwrap().is_none());
     let task = store::claim(&db).await.unwrap().unwrap();
 
     assert!(store::REACTION_EMOJIS.contains(&"👍"));

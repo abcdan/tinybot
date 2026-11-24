@@ -157,8 +157,7 @@ async fn replies_resume_the_referenced_task_and_thread_the_response() {
     ingest_telegram(&db, "1", 1, "2", "First discussion", 21)
         .await
         .unwrap();
-    let acknowledgement = store::claim_outbox(&db).await.unwrap().unwrap();
-    assert_eq!(acknowledgement.reply_to_message_id, Some(21));
+    assert!(store::claim_outbox(&db).await.unwrap().is_none());
     let first = store::claim(&db).await.unwrap().unwrap();
     store::settle_reply(&db, &first, "An earlier answer.", &[])
         .await
@@ -182,8 +181,7 @@ async fn replies_resume_the_referenced_task_and_thread_the_response() {
     ingest_telegram_reply(&db, "1", 3, "2", "👍", 24, Some(quote))
         .await
         .unwrap();
-    let acknowledgement = store::claim_outbox(&db).await.unwrap().unwrap();
-    assert_eq!(acknowledgement.reply_to_message_id, Some(24));
+    assert!(store::claim_outbox(&db).await.unwrap().is_none());
     let resumed = store::claim(&db).await.unwrap().unwrap();
     assert_eq!(resumed.id, first.id);
     let latest = store::history(&db, &first.id).await.unwrap();

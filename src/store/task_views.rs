@@ -97,7 +97,7 @@ pub(super) async fn status(
         .bind(user)
         .fetch_one(&mut **tx)
         .await?;
-        return queue_status(tx, &task, executing, false).await;
+        return queue_status(tx, &task, executing).await;
     }
     sqlx::query(
         "INSERT INTO outbox(user,body) VALUES(?,'No task is selected. Use /tasks to find a task.')",
@@ -108,127 +108,9 @@ pub(super) async fn status(
     Ok(())
 }
 
-pub(super) async fn notify_if_queued(
-    tx: &mut Transaction<'_, Sqlite>,
-    user: &str,
-    id: &str,
-    was_queued: bool,
-) -> Result<()> {
-    let Some(task) = visible(&mut **tx, user, id).await? else {
-        return Ok(());
-    };
-    if task.state != "queued" {
-        return Ok(());
-    }
-    if was_queued {
-        sqlx::query(
-            "UPDATE outbox SET button=? WHERE task=? AND state='queued' AND button LIKE 'tq/%'",
-        )
-        .bind(format!("tq/{}/{}/queued", task.id, task.revision))
-        .bind(&task.id)
-        .execute(&mut **tx)
-        .await?;
-        return Ok(());
-    }
-    let other_running = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM tasks WHERE user=? AND id<>? AND state='running')",
-    )
-    .bind(user)
-    .bind(id)
-    .fetch_one(&mut **tx)
-    .await?;
-    if other_running {
-        queue_status(tx, &task, false, true).await?;
-    }
-    Ok(())
-}
-
-pub(super) async fn acknowledge_input(
-    tx: &mut Transaction<'_, Sqlite>,
-    user: &str,
-    id: &str,
-    message: i64,
-    already_working: bool,
-) -> Result<()> {
-    let Some(task) = visible(&mut **tx, user, id).await? else {
-        return Ok(());
-    };
-    if !matches!(task.state.as_str(), "queued" | "running") {
-        return Ok(());
-    }
-    let button = format!("ta/{id}/{}", task.revision);
-    if already_working {
-        sqlx::query(
-            "UPDATE outbox SET button=? WHERE user=? AND task=?
-             AND state IN ('queued','sending') AND (button LIKE 'ta/%' OR button LIKE 'tq/%')",
-        )
-        .bind(&button)
-        .bind(user)
-        .bind(id)
-        .execute(&mut **tx)
-        .await?;
-        return Ok(());
-    }
-    let waiting: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM tasks q JOIN tasks t ON t.id=?
-         WHERE q.user=t.user AND q.id<>t.id AND (q.state='running' OR
-            (q.state='queued' AND (q.updated,q.id)<(t.updated,t.id)
-             AND NOT EXISTS(SELECT 1 FROM pending p WHERE p.task=q.id AND p.state='executing'))))",
-    )
-    .bind(id)
-    .fetch_one(&mut **tx)
-    .await?;
-    let body = if waiting {
-        "Got it. I’ve queued your task behind your other work."
-    } else {
-        "Got it. I’ll get to work."
-    };
-    sqlx::query(
-        "UPDATE events SET acknowledged=1 WHERE task=? AND role='user' AND telegram_message_id=?",
-    )
-    .bind(id)
-    .bind(message)
-    .execute(&mut **tx)
-    .await?;
-    sqlx::query(
-        "INSERT INTO outbox(user,task,agent,body,button,reply_to_message_id) VALUES(?,?,?,?,?,?)",
-    )
-    .bind(user)
-    .bind(id)
-    .bind(&task.agent)
-    .bind(body)
-    .bind(button)
-    .bind(message)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
-}
-
-pub(crate) async fn acknowledgement_controls(
-    db: &SqlitePool,
-    user: &str,
-    id: &str,
-    outbox: i64,
-) -> Result<Option<String>> {
-    let current: Option<(i64, String)> = sqlx::query_as(&format!(
-        "SELECT t.revision,t.state FROM tasks t JOIN outbox o ON o.task=t.id AND o.user=t.user
-         WHERE {VISIBLE} AND t.id=? AND o.id=? AND o.state='sending'
-         AND o.button='ta/' || t.id || '/' || t.revision
-         AND t.state IN ('queued','running','waiting','idle')
-         AND NOT EXISTS(SELECT 1 FROM outbox r WHERE r.task=t.id AND r.id>o.id
-                        AND r.state='sent' AND r.assistant_event_id IS NOT NULL)"
-    ))
-    .bind(user)
-    .bind(id)
-    .bind(outbox)
-    .fetch_optional(db)
-    .await?;
-    Ok(current.map(|(revision, state)| format!("task/{id}/{revision}/{state}")))
-}
-
 fn label(state: &str) -> &str {
     match state {
-        "queued" => "Queued behind another task",
+        "queued" => "Queued",
         "running" => "Working",
         "waiting" => "Waiting for your response",
         "setup" => "Waiting for model setup",
@@ -244,18 +126,14 @@ async fn queue_status(
     tx: &mut Transaction<'_, Sqlite>,
     task: &Task,
     executing: bool,
-    notice: bool,
 ) -> Result<()> {
-    let prefix = if notice { "tq" } else { "task" };
     let state = if executing {
         "An approved action is in progress"
-    } else if !notice && task.state == "queued" {
-        "Queued"
     } else {
         label(&task.state)
     };
     let controls = if executing { "executing" } else { &task.state };
-    let button = format!("{prefix}/{}/{}/{controls}", task.id, task.revision);
+    let button = format!("task/{}/{}/{controls}", task.id, task.revision);
     sqlx::query("INSERT INTO outbox(user,task,agent,body,button) VALUES(?,?,?,?,?)")
         .bind(&task.user)
         .bind(&task.id)
@@ -265,17 +143,6 @@ async fn queue_status(
         .execute(&mut **tx)
         .await?;
     Ok(())
-}
-
-pub(crate) async fn queued_notice_is_current(
-    db: &SqlitePool,
-    user: &str,
-    id: &str,
-    revision: i64,
-) -> Result<bool> {
-    Ok(visible(db, user, id)
-        .await?
-        .is_some_and(|task| task.revision == revision && task.state == "queued"))
 }
 
 pub(crate) async fn stop(db: &SqlitePool, user: &str, task: &str, revision: i64) -> Result<bool> {

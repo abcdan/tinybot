@@ -352,8 +352,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let acknowledgement = store::claim_outbox(&db).await.unwrap().unwrap();
-        assert_eq!(acknowledgement.reply_to_message_id, Some(55));
+        assert!(store::claim_outbox(&db).await.unwrap().is_none());
         let task = store::claim(&db).await.unwrap().unwrap();
         super::super::work(&app, &task).await.unwrap();
         let final_reply = store::claim_outbox(&db).await.unwrap().unwrap();

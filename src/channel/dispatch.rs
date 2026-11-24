@@ -353,33 +353,16 @@ pub(super) async fn send_outbound(
         };
     }
     let button = item.button.as_deref();
-    if button.is_some_and(|button| button.starts_with("ta/")) {
-        let Some(task) = item.task.as_deref() else {
-            return Ok(MessageDelivery::Sent(None));
-        };
-        let Some(controls) =
-            store::task_views::acknowledgement_controls(db, &item.user, task, item.id).await?
-        else {
-            return Ok(MessageDelivery::Sent(None));
-        };
-        return adapter
-            .send(
-                &item.user,
-                &item.body,
-                Some(&controls),
-                item.reply_to_message_id,
-            )
-            .await;
-    }
-    if let Some(raw) = button.and_then(|button| button.strip_prefix("tq/")) {
-        let mut fields = raw.split('/');
-        let task = fields.next().unwrap_or_default();
-        let revision = fields.next().and_then(|value| value.parse().ok());
-        if let Some(revision) = revision
-            && !store::task_views::queued_notice_is_current(db, &item.user, task, revision).await?
-        {
+    if button.is_some_and(|button| button.starts_with(store::acknowledgements::READY_PREFIX)) {
+        if !store::acknowledgements::ready(db, item).await? {
             return Ok(MessageDelivery::Sent(None));
         }
+        return adapter
+            .send_plain(&item.user, &item.body, item.reply_to_message_id)
+            .await;
+    }
+    if button.is_some_and(|button| button.starts_with("ta/") || button.starts_with("tq/")) {
+        return Ok(MessageDelivery::Sent(None));
     }
     if let Some(request) = button.and_then(|button| button.strip_prefix("choice/")) {
         let choice = forms::widget_choice(db, &item.user, request).await?;

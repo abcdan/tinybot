@@ -314,7 +314,7 @@ async fn chief_finishes_research_without_dumping_unrelated_results() {
         )
         .await
         .unwrap();
-        super::expect_telegram_ack(&db, 55).await;
+        super::expect_no_immediate_telegram_ack(&db).await;
         let task = store::claim(&db).await.unwrap().unwrap();
         if after_handoff {
             store::append(&db, &task.id, "handoff", "Ik vraag het aan Research.")

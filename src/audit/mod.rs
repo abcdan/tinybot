@@ -31,6 +31,30 @@ pub(crate) struct Trace {
 }
 
 impl Trace {
+    pub(crate) async fn for_progress(
+        db: &SqlitePool,
+        task: &str,
+        user: &str,
+        revision: i64,
+    ) -> Result<Option<Self>> {
+        let scope: Option<(i64, i64)> = sqlx::query_as(
+            "SELECT s.id,s.attempts FROM audit_sessions s JOIN tasks t ON t.audit_session_id=s.id
+             WHERE t.id=? AND t.user=? AND t.revision=? AND t.state IN ('queued','running')
+               AND s.started_at>?",
+        )
+        .bind(task)
+        .bind(user)
+        .bind(revision)
+        .bind(now() - RETENTION)
+        .fetch_optional(db)
+        .await?;
+        Ok(scope.map(|(session, attempt)| Self {
+            db: db.clone(),
+            session,
+            attempt,
+        }))
+    }
+
     pub(crate) async fn start(db: &SqlitePool, task: &Task) -> Result<Option<Self>> {
         let scope: Option<(i64, i64)> = sqlx::query_as(
             "UPDATE audit_sessions SET status='running',finished_at=NULL,attempts=attempts+1

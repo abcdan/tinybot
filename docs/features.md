@@ -24,8 +24,9 @@ The chat shows when the task switches providers.
   task, or reply with `/status` to check an earlier reply. Use **Continue**, **Stop**,
   or **Review** when TinyBot shows that action. TinyBot keeps tracking an approved
   action until it can confirm the outcome or asks you to check the destination.
-- TinyBot sends a short message to confirm it received your private task. If an
-  earlier task has to finish first, the message tells you it queued your request.
+- Quick questions go straight to the answer. If a private task is still queued
+  or running after a short wait, TinyBot can generate a brief update in your
+  language. An answer, draft, or helper handoff can take the place of that update.
   Use **Tasks** on the Mini App home screen to search titles, summaries, and retained
   chat messages.
 - When a model fails, TinyBot explains what needs attention. If the request can
