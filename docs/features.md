@@ -24,6 +24,9 @@ The chat shows when the task switches providers.
   task, or reply with `/status` to check an earlier reply. Use **Continue**, **Stop**,
   or **Review** when TinyBot shows that action. TinyBot keeps tracking an approved
   action until it can confirm the outcome or asks you to check the destination.
+- Tell TinyBot when a task is done, use `/done`, or tap **Mark complete** in
+  **Tasks**. Completed tasks move out of the open list. Find them in **Completed
+  tasks** or through search, and reopen them to pick up the conversation again.
 - Quick questions go straight to the answer. If a private task is still queued
   or running after a short wait, TinyBot can generate a brief update in your
   language. An answer, draft, or helper handoff can take the place of that update.
