@@ -241,12 +241,16 @@ function providerUsage(provider, models) {
 }
 
 function usageMetrics(usage) {
-    return metrics([
+    const fields = [
         ['Cost (USD)', formatCost(usage.cost_usd)],
         ['Input tokens', formatTokens(usage.input_tokens)],
         ['Output tokens', formatTokens(usage.output_tokens)],
         ['Total tokens', formatTokens(usage.total_tokens)],
-    ]);
+    ];
+    if (usage.reasoning_tokens != null) {
+        fields.push(['Reasoning tokens (included in output)', formatTokens(usage.reasoning_tokens)]);
+    }
+    return metrics(fields);
 }
 
 function metrics(items, className = 'audit-metrics') {

@@ -10,6 +10,8 @@ use std::{collections::BTreeMap, time::Instant};
 struct Usage {
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_tokens: Option<i64>,
     total_tokens: Option<i64>,
     cost_usd: Option<f64>,
 }
@@ -44,6 +46,7 @@ impl ModelCall {
     pub(crate) fn has_tokens(&self) -> bool {
         self.usage.input_tokens.is_some()
             || self.usage.output_tokens.is_some()
+            || self.usage.reasoning_tokens.is_some()
             || self.usage.total_tokens.is_some()
     }
 
@@ -64,6 +67,8 @@ impl ModelCall {
                 .or_else(|| tokens(&usage["input_tokens"])),
             output_tokens: tokens(&usage["completion_tokens"])
                 .or_else(|| tokens(&usage["output_tokens"])),
+            reasoning_tokens: tokens(&usage["completion_tokens_details"]["reasoning_tokens"])
+                .or_else(|| tokens(&usage["output_tokens_details"]["reasoning_tokens"])),
             total_tokens: tokens(&usage["total_tokens"]),
             cost_usd: usage["cost"]
                 .as_f64()
@@ -75,6 +80,7 @@ impl ModelCall {
         self.usage.merge_report(Usage {
             input_tokens: tokens(&total["inputTokens"]),
             output_tokens: tokens(&total["outputTokens"]),
+            reasoning_tokens: None,
             total_tokens: tokens(&total["totalTokens"]),
             cost_usd: None,
         });
@@ -85,6 +91,7 @@ impl Usage {
     fn merge_report(&mut self, report: Self) {
         self.input_tokens = report.input_tokens.or(self.input_tokens);
         self.output_tokens = report.output_tokens.or(self.output_tokens);
+        self.reasoning_tokens = report.reasoning_tokens.or(self.reasoning_tokens);
         self.total_tokens = report.total_tokens.or(self.total_tokens);
         self.cost_usd = report.cost_usd.or(self.cost_usd);
     }
@@ -337,7 +344,9 @@ mod tests {
                 provider_call("openrouter", "inception/mercury-3", async |call| {
                     call.openrouter(&json!({
                         "provider":"Fixture Compute","model":"fixture/actual",
-                        "usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5,"cost":0}
+                        "choices":[{"delta":{"reasoning":"fixture reasoning must stay private"}}],
+                        "usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5,"cost":0,
+                            "completion_tokens_details":{"reasoning_tokens":2}}
                     }));
                     Ok(())
                 })
@@ -379,14 +388,23 @@ mod tests {
         assert_eq!(run["usage"], *usage);
         assert!(!run.to_string().contains("sk-or-provider-body"));
         assert!(
-            run["entries"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|entry| entry["kind"] == "model_call"
-                    && entry["name"] == "mercury_acknowledgement"
-                    && entry["status"] == "failed")
+            !run.to_string()
+                .contains("fixture reasoning must stay private")
         );
+        let entries = run["entries"].as_array().unwrap();
+        let call = entries
+            .iter()
+            .find(|entry| {
+                entry["kind"] == "model_call"
+                    && entry["status"] == "completed"
+                    && entry["name"] == "mercury_acknowledgement"
+            })
+            .unwrap();
+        assert_eq!(call["detail"]["usage"]["reasoning_tokens"], 2);
+        assert_eq!(call["detail"]["usage"]["output_tokens"], 3);
+        assert!(entries.iter().any(|entry| entry["kind"] == "model_call"
+            && entry["name"] == "mercury_acknowledgement"
+            && entry["status"] == "failed"));
         sqlx::query("UPDATE audit_sessions SET started_at=? WHERE id=?")
             .bind(now() - super::super::RETENTION - 1)
             .bind(id)

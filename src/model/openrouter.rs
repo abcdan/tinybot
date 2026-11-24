@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use eventsource_stream::{EventStreamError, Eventsource};
 use futures::StreamExt;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, time::Duration};
+use std::{borrow::Cow, collections::BTreeMap, time::Duration};
 use tokio::time::{Instant, timeout_at};
 
 const MAX_TOKENS: u64 = 3600;
@@ -307,7 +307,7 @@ fn chat_request(
 ) -> Value {
     let mut body = json!({
         "model":model,
-        "messages":[{"role":"system","content":system},{"role":"user","content":input}],
+        "messages":[{"role":"system","content":system},{"role":"user","content":native_tool_input(input, tools)}],
         "stream":stream,
         "usage":{"include":true},
     });
@@ -324,6 +324,31 @@ fn chat_request(
         body["parallel_tool_calls"] = json!(false);
     }
     body
+}
+
+fn native_tool_input<'a>(input: &'a str, tools: &[ToolDefinition]) -> Cow<'a, str> {
+    if tools.is_empty() {
+        return Cow::Borrowed(input);
+    }
+    let Ok(Value::Object(mut context)) = serde_json::from_str(input) else {
+        return Cow::Borrowed(input);
+    };
+    let Some(descriptions) = context.get("tools").and_then(Value::as_array) else {
+        return Cow::Borrowed(input);
+    };
+    let duplicated = descriptions.len() == tools.len()
+        && descriptions.iter().zip(tools).all(|(description, tool)| {
+            description.as_object().is_some_and(|fields| {
+                fields.len() == 2
+                    && description["name"] == tool.name
+                    && description["use"] == tool.description
+            })
+        });
+    if !duplicated {
+        return Cow::Borrowed(input);
+    }
+    context.remove("tools");
+    Cow::Owned(Value::Object(context).to_string())
 }
 
 fn attachment_request(model: &str, input: &str, attachment: AttachmentInput<'_>) -> Value {
@@ -493,6 +518,40 @@ mod tests {
         assert_eq!(auxiliary["usage"]["include"], true);
         assert!(auxiliary.get("tools").is_none());
         assert!(auxiliary.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn native_tools_replace_only_their_matching_duplicate_descriptions() {
+        let definitions = definitions();
+        let context = json!({
+            "latest_request":"Read the guide.",
+            "history":[{"role":"tool","text":"{}"}],
+            "connectors":[{"id":"fixture","name":"Notes"}],
+            "saved_agents":[{"id":"helper","name":"Researcher"}],
+        });
+        let tool_descriptions =
+            json!([{"name":definitions[0].name,"use":definitions[0].description}]);
+        let mut input = context.clone();
+        input["tools"] = tool_descriptions;
+        let body = chat_request(
+            "provider/model",
+            "system",
+            &input.to_string(),
+            &definitions,
+            false,
+        );
+        let supplied: Value =
+            serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(supplied, context);
+        assert_eq!(
+            body["tools"][0]["function"]["description"],
+            definitions[0].description
+        );
+
+        input["tools"][0]["source"] = json!("fixture context");
+        let serialized = input.to_string();
+        assert_eq!(native_tool_input(&serialized, &definitions), serialized);
+        assert_eq!(native_tool_input(&serialized, &[]), serialized);
     }
 
     #[test]
