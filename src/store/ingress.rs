@@ -239,7 +239,7 @@ async fn ingest_message(
     }
     let profile: Option<(Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT t.id,u.provider FROM users u LEFT JOIN tasks t ON t.id=u.active_task
-         AND t.user=u.id AND t.chief_chat=1 AND t.state NOT IN ('cancelled','completed','revoked')
+         AND t.user=u.id AND t.chief_chat=1 AND t.state<>'completed'
          AND (t.shared_memory_pair IS NULL OR (t.state<>'revoked' AND EXISTS(
               SELECT 1 FROM available_shared_memory_pairs p WHERE p.id=t.shared_memory_pair AND (p.owner=t.user OR p.guest=t.user))))
          WHERE u.id=? AND u.suspended_at IS NULL",
