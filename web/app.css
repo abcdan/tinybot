@@ -148,6 +148,14 @@ legend { font-size: .83rem; font-weight: 650; }
 pre { background: var(--background); border-radius: 8px; padding: 10px; font-size: .83rem; white-space: pre-wrap; overflow-wrap: anywhere; }
 details { margin-block: 12px; }
 summary { cursor: pointer; font-size: .87rem; font-weight: 650; }
+.task-card h3 { overflow-wrap: anywhere; }
+.task-history > summary {
+  min-height: 44px;
+  padding: 11px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
 .connection-tools { font-size: .88rem; overflow-wrap: anywhere; }
 .connection-tools dt { font-weight: 650; margin-top: 10px; }
 .connection-tools dd { color: var(--secondary); margin: 2px 0 0; }

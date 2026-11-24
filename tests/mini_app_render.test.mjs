@@ -113,6 +113,71 @@ test('task search stops the specific returned revision', async () => {
     }
 });
 
+test('completing a task moves it to paginated history and reopening selects it again', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 640}});
+        const page = await context.newPage();
+        const current = {id: 'current', title: 'Send the receipt', state: 'running', revision: 7};
+        const followUp = {id: 'follow-up', title: 'Discuss next month', state: 'idle', revision: 3};
+        const archived = {id: 'archived', title: 'Finish the older plan', state: 'completed', revision: 2};
+        const state = {user: '1', provider: 'openrouter', requests: [], tasks: [current, followUp], active_task: current.id};
+        let historyCalls = 0;
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return state;
+            if (action === 'complete-task') {
+                assert.deepEqual(data, {task: current.id, revision: 7});
+                current.state = 'completed';
+                current.revision++;
+                state.active_task = null;
+                return {ok: true};
+            }
+            if (action === 'search-tasks' && data.completed_only) {
+                historyCalls++;
+                assert.equal(data.query, '');
+                if (current.state !== 'completed' || data.offset === 1) {
+                    return {items: [archived], next_offset: null};
+                }
+                assert.equal(data.offset, 0);
+                return {items: [current], next_offset: 1};
+            }
+            if (action === 'search-tasks') {
+                assert.deepEqual(data, {query: 'older plan', offset: 0});
+                return {items: [archived], next_offset: null};
+            }
+            if (action === 'select-task') {
+                assert.deepEqual(data, {task: current.id});
+                current.state = 'idle';
+                state.active_task = current.id;
+                return {ok: true};
+            }
+            assert.fail(`Unexpected Mini App action ${action}`);
+        });
+        await page.goto('https://tinybot.test/mini');
+        const task = page.getByRole('heading', {name: current.title}).locator('..');
+        await task.getByRole('button', {name: 'Mark complete', exact: true}).click();
+        await page.getByText('Task marked complete.', {exact: true}).waitFor();
+        await task.waitFor({state: 'hidden'});
+        assert.equal(historyCalls, 0);
+        await page.getByRole('heading', {name: followUp.title}).locator('..')
+            .getByText('Ready for a follow-up', {exact: true}).waitFor();
+
+        await page.getByText('Completed tasks', {exact: true}).click();
+        await task.getByText('Completed', {exact: true}).waitFor();
+        await page.getByRole('button', {name: 'Load more tasks', exact: true}).click();
+        await page.getByRole('heading', {name: archived.title}).waitFor();
+        await task.getByRole('button', {name: 'Reopen', exact: true}).click();
+        await task.getByText('Current Chief task', {exact: true}).waitFor();
+        await page.getByLabel('Search retained messages and tasks').fill('older plan');
+        await page.getByRole('button', {name: 'Search tasks', exact: true}).click();
+        await page.getByRole('heading', {name: archived.title}).locator('..')
+            .getByRole('button', {name: 'Reopen', exact: true}).waitFor();
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
+    } finally {
+        await browser.close();
+    }
+});
+
 test('first-run setup checks one key, searches tool models and opens the named Chief', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
     try {
