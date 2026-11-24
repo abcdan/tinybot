@@ -14,6 +14,11 @@ pub(super) async fn audit_session(app: &App, user: &str, data: &Value) -> Result
     audit::session(&app.db, user, session, after).await
 }
 
+pub(super) async fn audit_export(app: &App, user: &str, data: &Value) -> Result<Value> {
+    let session = audit_cursor(data, "id")?.context("audit session ID required")?;
+    audit::export(&app.db, user, session).await
+}
+
 fn audit_cursor(data: &Value, field: &str) -> Result<Option<i64>> {
     data.get(field)
         .filter(|value| !value.is_null())

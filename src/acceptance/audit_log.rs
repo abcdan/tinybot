@@ -184,13 +184,117 @@ async fn signed_audit_usage_is_limited_to_the_message_owner_and_retention_window
         .unwrap();
     assert_eq!(run["usage"], rows["usage"]);
     for (user, status) in [(other.as_str(), 404), ("invalid", 403)] {
+        for action in ["audit-session", "audit-export"] {
+            assert_eq!(
+                post(user, action, json!({"id":id})).await.unwrap().status(),
+                status
+            );
+        }
+    }
+    let expired: i64 =
+        sqlx::query_scalar("SELECT id FROM audit_sessions WHERE message='Expired lookup'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    for unavailable in [expired, expired + 1000] {
         assert_eq!(
-            post(user, "audit-session", json!({"id":id}))
+            post(&owner, "audit-export", json!({"id":unavailable}))
                 .await
                 .unwrap()
                 .status(),
-            status
+            404
         );
     }
+    server.abort();
+}
+
+#[tokio::test]
+async fn signed_audit_export_includes_the_entire_redacted_timeline_and_usage() {
+    let db = fixture().await;
+    let app = Arc::new(app_with_model(&db, Arc::new(WidgetChief)));
+    let secret = "sk-or-audit-export-fixture";
+    message(&db, 1, "1", &format!("My API key is {secret}")).await;
+    let task = store::claim(&db).await.unwrap().unwrap();
+    let trace = audit::Trace::start(&db, &task).await.unwrap();
+    audit::scope(trace, async {
+        for _ in 0..101 {
+            audit::record("model", "agent_turn", "started", Value::Null).await;
+        }
+        audit::tool_started(
+            "call_mcp",
+            &json!({"tool":"read","arguments":{"value":secret}}),
+        )
+        .await;
+        audit::provider_call("test", "test/model", async |call| {
+            call.openrouter(
+                &json!({"provider":"Provider Fixture","model":"test/model","usage":{
+                    "prompt_tokens":8,"completion_tokens":2,"total_tokens":10,"cost":0.125
+                }}),
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    })
+    .await;
+    sqlx::query("INSERT INTO agents(id,owner,name,instructions,tools) VALUES('shared','2','Research','','[]')")
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO grants(agent,member) VALUES('shared','1')")
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tasks SET agent='shared' WHERE id=?")
+        .bind(&task.id)
+        .execute(&db)
+        .await
+        .unwrap();
+
+    let id = audit::sessions(&db, "1", None).await.unwrap()["sessions"][0]["id"]
+        .as_i64()
+        .unwrap();
+    let owner = signed_mini_init(&app, 1);
+    let origin = app.origin.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/api/mini", listener.local_addr().unwrap());
+    let server =
+        tokio::spawn(async move { axum::serve(listener, web::router(app)).await.unwrap() });
+    let client = reqwest::Client::new();
+    let export = || {
+        client
+            .post(&endpoint)
+            .header("origin", &origin)
+            .json(&json!({"init":owner,"action":"audit-export","data":{"id":id}}))
+            .send()
+    };
+
+    let response = export().await.unwrap().error_for_status().unwrap();
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let exported: Value = response.json().await.unwrap();
+    let first = audit::session(&db, "1", id, 0).await.unwrap();
+    let cursor = first["next_after"].as_i64().unwrap();
+    let second = audit::session(&db, "1", id, cursor).await.unwrap();
+    let mut entries = first["entries"].as_array().unwrap().clone();
+    entries.extend(second["entries"].as_array().unwrap().iter().cloned());
+    assert_eq!(entries.len(), 103);
+    assert_eq!(exported["version"], 1);
+    assert_eq!(exported["session"], first["session"]);
+    assert_eq!(exported["session"]["message"], "[Sensitive text hidden]");
+    assert_eq!(exported["entries"], json!(entries));
+    assert_eq!(exported["usage"], first["usage"]);
+    assert_eq!(
+        exported["usage"]["providers"][0]["provider"],
+        "Provider Fixture"
+    );
+    assert_eq!(exported["usage"]["models"][0]["total_tokens"], 10);
+    assert_eq!(exported["usage"]["models"][0]["cost_usd"], 0.125);
+    assert!(!exported.to_string().contains(secret));
+
+    sqlx::query("DELETE FROM grants WHERE agent='shared' AND member='1'")
+        .execute(&db)
+        .await
+        .unwrap();
+    assert_eq!(export().await.unwrap().status(), 404);
     server.abort();
 }

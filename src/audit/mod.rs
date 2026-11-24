@@ -356,6 +356,26 @@ struct Entry {
 }
 
 pub(crate) async fn session(db: &SqlitePool, user: &str, id: i64, after: i64) -> Result<Value> {
+    let (session, mut rows, usage) =
+        session_snapshot(db, user, id, after, ENTRY_PAGE as i64 + 1).await?;
+    let next = (rows.len() > ENTRY_PAGE).then(|| rows[ENTRY_PAGE - 1].id);
+    rows.truncate(ENTRY_PAGE);
+    Ok(json!({"session":session,"entries":entry_details(rows),"next_after":next,"usage":usage}))
+}
+
+pub(crate) async fn export(db: &SqlitePool, user: &str, id: i64) -> Result<Value> {
+    // SQLite treats a negative LIMIT as unbounded.
+    let (session, rows, usage) = session_snapshot(db, user, id, 0, -1).await?;
+    Ok(json!({"version":1,"session":session,"entries":entry_details(rows),"usage":usage}))
+}
+
+async fn session_snapshot(
+    db: &SqlitePool,
+    user: &str,
+    id: i64,
+    after: i64,
+    limit: i64,
+) -> Result<(Session, Vec<Entry>, Value)> {
     let cutoff = now() - RETENTION;
     let mut tx = db.begin().await?;
     let sql = format!("{SESSION_FIELDS} {VISIBLE_SESSIONS} AND s.id=?");
@@ -366,22 +386,23 @@ pub(crate) async fn session(db: &SqlitePool, user: &str, id: i64, after: i64) ->
         .fetch_optional(&mut *tx)
         .await?
         .context("audit session unavailable")?;
-    let mut rows: Vec<Entry> = sqlx::query_as(
+    let rows = sqlx::query_as(
         "SELECT id,attempt,at,kind,name,status,detail FROM audit_entries
          WHERE session=? AND id>? ORDER BY id LIMIT ?",
     )
     .bind(id)
     .bind(after)
-    .bind(ENTRY_PAGE as i64 + 1)
+    .bind(limit)
     .fetch_all(&mut *tx)
     .await?;
     let usage = usage::summary(&mut tx, user, Some(id), cutoff).await?;
     tx.commit().await?;
-    let next = (rows.len() > ENTRY_PAGE).then(|| rows[ENTRY_PAGE - 1].id);
-    rows.truncate(ENTRY_PAGE);
-    let entries: Vec<_> = rows.into_iter().map(|row| json!({
+    Ok((session, rows, usage))
+}
+
+fn entry_details(rows: Vec<Entry>) -> Vec<Value> {
+    rows.into_iter().map(|row| json!({
         "id":row.id,"attempt":row.attempt,"at":row.at,"kind":row.kind,"name":row.name,"status":row.status,
         "detail":serde_json::from_str::<Value>(&row.detail).unwrap_or(Value::Null)
-    })).collect();
-    Ok(json!({"session":session,"entries":entries,"next_after":next,"usage":usage}))
+    })).collect()
 }
