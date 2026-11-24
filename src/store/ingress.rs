@@ -1,7 +1,7 @@
 use super::attachments::{self, SealedAttachment};
 use crate::{
     audit::{self, ModelCall},
-    security::{clip, hash, id, now, token},
+    security::{clip, hash, id, now},
 };
 use anyhow::Result;
 use serde::Serialize;
@@ -211,40 +211,38 @@ async fn ingest_message(
     let argument = argument.trim();
     let mut response = None;
     if command == "/start" && !argument.is_empty() {
-        let invite: Option<(Option<String>,)> =
-            sqlx::query_as("DELETE FROM invitations WHERE token=? AND expires>=? RETURNING agent")
+        let invite: Option<String> =
+            sqlx::query_scalar("DELETE FROM invitations WHERE token=? AND expires>=? AND agent IS NOT NULL
+                AND EXISTS(SELECT 1 FROM users WHERE id=? AND suspended_at IS NULL)
+                AND EXISTS(SELECT 1 FROM users WHERE id=issuer AND suspended_at IS NULL) RETURNING agent")
                 .bind(hash(argument))
                 .bind(now())
+                .bind(user)
                 .fetch_optional(&mut *tx)
                 .await?;
-        if let Some((agent,)) = invite {
-            sqlx::query("INSERT OR IGNORE INTO users(id,host_id,onboarded_at) VALUES(?,?,?)")
+        if let Some(agent) = invite {
+            sqlx::query("INSERT OR IGNORE INTO grants VALUES(?,?)")
+                .bind(&agent)
                 .bind(user)
-                .bind(format!("urn:uuid:{}", id()))
-                .bind(now())
                 .execute(&mut *tx)
                 .await?;
-            if let Some(agent) = agent {
-                sqlx::query("INSERT OR IGNORE INTO grants VALUES(?,?)")
-                    .bind(&agent)
-                    .bind(user)
-                    .execute(&mut *tx)
-                    .await?;
-                let name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id=?")
-                    .bind(&agent)
-                    .fetch_one(&mut *tx)
-                    .await?;
-                response = Some(format!(
-                    "Invitation accepted. Ask your Chief to consult {name}. Open Settings & forms if you still need to set up a model."
-                ));
-            }
+            let name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id=?")
+                .bind(&agent)
+                .fetch_one(&mut *tx)
+                .await?;
+            response = Some(format!(
+                "Invitation accepted. Ask your Chief to consult {name}."
+            ));
         } else {
             response = Some("This invitation is invalid or expired.".into());
         }
     }
     let profile: Option<(Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT t.id,u.provider FROM users u LEFT JOIN tasks t ON t.id=u.active_task
-         AND t.user=u.id AND t.chief_chat=1 WHERE u.id=?",
+         AND t.user=u.id AND t.chief_chat=1
+         AND (t.shared_memory_pair IS NULL OR (t.state<>'revoked' AND EXISTS(
+              SELECT 1 FROM available_shared_memory_pairs p WHERE p.id=t.shared_memory_pair AND (p.owner=t.user OR p.guest=t.user))))
+         WHERE u.id=? AND u.suspended_at IS NULL",
     )
     .bind(user)
     .fetch_optional(&mut *tx)
@@ -256,14 +254,12 @@ async fn ingest_message(
     let mut active = active_task;
     if response.is_none() {
         match command {
-            "/start" | "/help" => response = Some("Message your Chief to start a task. It can delegate to saved agents. Use /panel for tasks, requests, and schedules, and /settings for account setup and forms. Use /new to start a task, /cancel to stop, or /reconcile after checking an uncertain action.".into()),
+            "/start" | "/help" => response = Some("Message your Chief to start a task. Use /status to see its progress, /retry to retry a saved message when available, /new to start fresh, or /cancel to stop. Open /panel for tasks and schedules or /settings for account setup and forms. After checking an uncertain action, send /reconcile.".into()),
             "/panel" => response = Some("Manage TinyBot from this chat.".into()),
             "/settings" => response = Some("Open Settings & forms to manage your account and complete forms.".into()),
             "/invite" if user == operator => {
-                let raw = token();
-                sqlx::query("INSERT INTO invitations VALUES (?,?,NULL,?)").bind(hash(&raw)).bind(user)
-                    .bind(now()+86400).execute(&mut *tx).await?;
-                response = Some(format!("Have your guest send /start {raw} to this bot. This invitation expires in 24 hours."));
+                let invite = super::invitations::create(&mut tx, operator).await?;
+                response = Some(invite.command);
             }
             "/tasks" => {
                 let rows = super::list_tasks(&mut *tx, user).await?;
@@ -281,7 +277,40 @@ async fn ingest_message(
                 let found = super::select_task(&mut *tx, user, argument).await?;
                 response = Some(if found {"Switched tasks."} else {"Task unavailable."}.into());
             }
+            "/status" => {
+                super::task_views::status(&mut tx, user, active.as_deref(), telegram.reply.as_ref()).await?;
+                tx.commit().await?;
+                return Ok(());
+            }
+            "/retry" => {
+                if super::task_failures::retry_active(&mut tx,user,active.as_deref(),telegram.reply.as_ref()).await? {
+                    tx.commit().await?;
+                    return Ok(());
+                }
+                response = Some("This task can’t be retried directly. Use /status to see what needs attention.".into());
+            }
+            "/approve_group" | "/disable_group" if user == operator => {
+                let enabled = command == "/approve_group";
+                let changed = super::groups::set_enabled(&mut tx, argument, enabled).await?;
+                response = Some(match (enabled,changed) {
+                    (true,true) => "Group enabled. Members can send an addressed /ask command there.",
+                    (false,true) => "Group disabled.",
+                    _ => "No matching group request or registration.",
+                }.into());
+            }
             "/cancel" => {
+                let action_may_have_run: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks t WHERE t.id=? AND t.user=?
+                    AND (t.state='uncertain' OR EXISTS(SELECT 1 FROM pending p WHERE p.task=t.id AND p.state='executing'
+                        AND p.kind IN ('approve','form-submit','email-send'))))")
+                    .bind(&active).bind(user).fetch_one(&mut *tx).await?;
+                if action_may_have_run {
+                    sqlx::query("INSERT INTO outbox(user,body) VALUES(?,?)")
+                        .bind(user)
+                        .bind("An action is in progress or its result is uncertain. Wait for the result, or check the destination and use /reconcile.")
+                        .execute(&mut *tx).await?;
+                    tx.commit().await?;
+                    return Ok(());
+                }
                 if let Some(task) = active.as_deref() {
                     sqlx::query("UPDATE tasks SET state='cancelled',revision=revision+1 WHERE id=? AND user=? AND state<>'revoked'")
                         .bind(task).bind(user).execute(&mut *tx).await?;
@@ -320,6 +349,7 @@ async fn ingest_message(
         let button = match command {
             "/start" | "/help" | "/panel" => Some("panel"),
             "/settings" => Some("mini"),
+            "/invite" if user == operator => Some(super::invitations::BUTTON),
             _ => None,
         };
         sqlx::query("INSERT INTO outbox(user,body,button) VALUES(?,?,?)")
@@ -377,8 +407,14 @@ async fn ingest_message(
             tx.commit().await?;
             return Ok(());
         }
-        let task = if let Some(active) = active {
-            active
+        let (task, previous_state) = if let Some(active) = active {
+            let state: Option<String> =
+                sqlx::query_scalar("SELECT state FROM tasks WHERE id=? AND user=?")
+                    .bind(&active)
+                    .bind(user)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            (active, state)
         } else {
             let task = id();
             sqlx::query("INSERT INTO tasks(id,user,title,goal,updated) VALUES(?,?,?,?,?)")
@@ -394,7 +430,7 @@ async fn ingest_message(
                 .bind(user)
                 .execute(&mut *tx)
                 .await?;
-            task
+            (task, None)
         };
         if !enqueue_input(
             &mut tx,
@@ -427,6 +463,24 @@ async fn ingest_message(
             {
                 attachments::save(&mut tx, &task, message_id, attachment).await?;
             }
+            if let Some(message_id) = telegram.message_id.filter(|message_id| *message_id > 0) {
+                super::task_views::acknowledge_input(
+                    &mut tx,
+                    user,
+                    &task,
+                    message_id,
+                    matches!(previous_state.as_deref(), Some("queued" | "running")),
+                )
+                .await?;
+            } else {
+                super::task_views::notify_if_queued(
+                    &mut tx,
+                    user,
+                    &task,
+                    previous_state.as_deref() == Some("queued"),
+                )
+                .await?;
+            }
         }
     }
     tx.commit().await?;
@@ -446,6 +500,8 @@ pub(super) async fn enqueue_input(
     let state: Option<String> = sqlx::query_scalar(
         "UPDATE tasks SET state=CASE WHEN state IN ('running','uncertain') THEN state ELSE ? END,
         revision=revision+1,updated=? WHERE id=? AND user=? AND chief_chat=1 AND state NOT IN ('cancelled','revoked') AND
+        EXISTS(SELECT 1 FROM users u WHERE u.id=tasks.user AND u.suspended_at IS NULL) AND
+        (shared_memory_pair IS NULL OR EXISTS(SELECT 1 FROM available_shared_memory_pairs p WHERE p.id=tasks.shared_memory_pair AND (p.owner=tasks.user OR p.guest=tasks.user))) AND
         (agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=tasks.agent AND
         (a.owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=?)))) RETURNING state",
     )

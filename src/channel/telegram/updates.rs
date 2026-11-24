@@ -1,6 +1,6 @@
 use super::Telegram;
 use crate::{
-    channel::{Inbound, attachment, callback, voice, widget},
+    channel::{Inbound, attachment, callback, groups, voice, widget},
     security::clip,
     store,
 };
@@ -70,6 +70,8 @@ struct Message {
     voice: Option<voice::Note>,
     reply_to_message: Option<RepliedMessage>,
     quote: Option<TextQuote>,
+    message_thread_id: Option<i64>,
+    sender_chat: Option<Chat>,
 }
 
 #[derive(Deserialize)]
@@ -79,6 +81,7 @@ struct RepliedMessage {
     from: Option<User>,
     text: Option<String>,
     caption: Option<String>,
+    message_thread_id: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -87,6 +90,49 @@ struct TextQuote {
 }
 
 impl Message {
+    fn group(self, external: i64) -> Option<Inbound> {
+        let user = self.from?;
+        if user.is_bot
+            || self.sender_chat.is_some()
+            || self.message_id <= 0
+            || !matches!(self.chat.kind.as_str(), "group" | "supergroup")
+            || self.chat.id >= 0
+        {
+            return None;
+        }
+        let topic = self.message_thread_id.unwrap_or(0);
+        if topic < 0 {
+            return None;
+        }
+        let text = clip(self.text.as_deref()?.trim(), 8000);
+        if text.is_empty() {
+            return None;
+        }
+        let reply = self.reply_to_message.and_then(|reply| {
+            let author = reply.from?;
+            (author.is_bot
+                && reply.chat.id == self.chat.id
+                && reply.message_thread_id.unwrap_or(0) == topic
+                && reply.message_id > 0
+                && reply.message_id != self.message_id)
+                .then_some((author.id, reply.message_id))
+        });
+        if reply.is_none() && !text.starts_with("/ask@") && !text.starts_with("/tinybot_enable@") {
+            return None;
+        }
+        Some(Inbound::Group(groups::Message {
+            external,
+            user: user.id.to_string(),
+            route: store::groups::GroupRoute {
+                chat: self.chat.id,
+                topic,
+            },
+            message: self.message_id,
+            text: text.to_owned(),
+            reply,
+        }))
+    }
+
     fn reply_context(&self) -> Option<store::ReplyContext> {
         let reply = self.reply_to_message.as_ref()?;
         if self.chat.kind != "private"
@@ -159,7 +205,7 @@ impl Telegram {
                 let message = update.message?;
                 let user = message.from.as_ref()?;
                 if !message.chat.is_private_with(user) {
-                    return None;
+                    return message.group(update.update_id);
                 }
                 let reply = message.reply_context();
                 if let Some(note) = message.voice {

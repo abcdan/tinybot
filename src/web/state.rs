@@ -3,6 +3,13 @@ use anyhow::Result;
 use serde_json::{Value, json};
 
 pub(super) async fn status(app: &App, user: &str) -> Result<Value> {
+    let shared_memory_available: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM shared_memory_pairs WHERE owner=? OR guest=?)",
+    )
+    .bind(user)
+    .bind(user)
+    .fetch_one(&app.db)
+    .await?;
     let profile: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
         "SELECT u.provider,u.model,t.id FROM users u LEFT JOIN tasks t ON t.id=u.active_task
          AND t.user=u.id AND t.chief_chat=1 AND t.state NOT IN ('cancelled','revoked')
@@ -39,7 +46,9 @@ pub(super) async fn status(app: &App, user: &str) -> Result<Value> {
                 let raw: Value = serde_json::from_str(&entry.payload).ok()?;
                 let preview =
                     crate::runtime::smtp_preview(&app.vault, user, &entry.id, &raw).ok()?;
-                json!({"operation":"Send email","explanation":preview})
+                let draft =
+                    crate::runtime::smtp_editable_fields(&app.vault, user, &entry.id, &raw).ok()?;
+                json!({"operation":"Send email","explanation":preview,"draft":draft})
             } else {
                 request_content(&entry.kind, &entry.payload)
             };
@@ -52,6 +61,14 @@ pub(super) async fn status(app: &App, user: &str) -> Result<Value> {
             .bind(user)
             .fetch_all(&app.db)
             .await?;
+    let docblock_access: std::collections::BTreeMap<_, _> = connectors
+        .iter()
+        .filter_map(|connector| {
+            app.mcp
+                .docblock_access(connector)
+                .map(|access| (&connector.id, access))
+        })
+        .collect();
     let mcp_approvals: Vec<_> = store::list_mcp_approvals(&app.db, user)
         .await?
         .into_iter()
@@ -79,6 +96,7 @@ pub(super) async fn status(app: &App, user: &str) -> Result<Value> {
     let schedules = crate::schedules::list(&app.db, user).await?;
     let zone = crate::schedules::timezone(&app.db, user).await?;
     let connections = app.models.connections(user).await?;
+    let backup_model = app.models.backup_setting(user).await?;
     let openrouter_server_tools = app.models.server_tool_settings(user).await?;
     let onboarding = app.models.onboarding_profile(user).await?;
     let browser_proxy = if user == app.operator {
@@ -103,12 +121,13 @@ pub(super) async fn status(app: &App, user: &str) -> Result<Value> {
         .map(|connector| (&connector.id, app.mcp.read_tools(&connector.endpoint)))
         .collect();
     Ok(
-        json!({"user":user,"provider":profile.0,"model":profile.1,"active_task":profile.2,
-        "agents":agents,"tasks":tasks,"requests":requests,"connectors":connectors,"members":members,"memory":memory,"grants":grants,
+        json!({"user":user,"operator":user==app.operator,"shared_memory_available":shared_memory_available,
+        "provider":profile.0,"model":profile.1,"active_task":profile.2,
+        "agents":agents,"tasks":tasks,"requests":requests,"connectors":connectors,"docblock_access":docblock_access,"members":members,"memory":memory,"grants":grants,
         "anything_mcp_origin":app.anything_mcp_origin,
         "schedules":schedules,"time_zone":zone.name(),"openrouter_connected":connections.openrouter_key,
         "openrouter_server_tools":openrouter_server_tools,
-        "codex_model":connections.codex_model,"read_tools":read_tools,"browser_proxy":browser_proxy,
+        "codex_model":connections.codex_model,"backup_model":backup_model,"read_tools":read_tools,"browser_proxy":browser_proxy,
         "onboarding_required":onboarding.required,"display_name":onboarding.display_name,"chief_name":onboarding.chief_name,
         "mcp_approvals":mcp_approvals,"mail_accounts":mail_accounts}),
     )
@@ -122,6 +141,13 @@ fn request_content(kind: &str, raw: &str) -> Value {
     if payload["call"]["name"] == "call_mcp" {
         let operation = payload["operation"].as_str().unwrap_or("MCP call");
         let destination = payload["destination"].as_str();
+        if payload["docblock"] == true
+            && let Some(tool) = payload["call"]["args"]["tool"].as_str()
+            && let Ok(preview) =
+                crate::mcp::docblock::review(tool, &payload["call"]["args"]["arguments"])
+        {
+            return json!({"operation":operation,"destination":destination,"mcp":true,"rememberable":false,"docblock":preview});
+        }
         let explanation = payload["explanation"]
             .as_str()
             .map(str::trim)

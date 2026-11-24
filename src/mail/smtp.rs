@@ -54,7 +54,7 @@ impl SmtpSend {
         Ok(())
     }
 
-    fn message(&self, sender: &str, pending_id: &str) -> Result<Message> {
+    pub(crate) fn message(&self, sender: &str, pending_id: &str) -> Result<Message> {
         self.validate()?;
         let id = Uuid::parse_str(pending_id).map_err(|_| anyhow!("Invalid mail approval ID."))?;
         let mut builder = Message::builder()

@@ -1,3 +1,4 @@
+mod backup;
 mod catalog;
 mod onboarding;
 mod server_tools;
@@ -7,6 +8,7 @@ mod tests;
 use super::Models;
 use crate::siwc::Profile;
 use anyhow::{Context, Result, ensure};
+pub(crate) use backup::BackupModel;
 pub use catalog::OpenRouterModel;
 use catalog::{openrouter_catalog, valid_model_id, verify_key};
 pub(crate) use onboarding::OnboardingError;
@@ -193,8 +195,9 @@ impl Models {
             .vault
             .seal(&format!("model:{user}"), &serde_json::to_vec(profile)?)?;
         let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query(
-            "UPDATE users SET provider='codex', model=?, codex_model=?, codex_credential=?, credential=NULL WHERE id=?",
+        let changed = sqlx::query(
+            "UPDATE users SET provider='codex', model=?, codex_model=?, codex_credential=?, credential=NULL
+             WHERE id=? AND suspended_at IS NULL",
         )
         .bind(model)
         .bind(model)
@@ -202,6 +205,7 @@ impl Models {
         .bind(user)
         .execute(&mut *tx)
         .await?;
+        ensure!(changed.rows_affected() == 1, "account unavailable");
         queue_setup_tasks(&mut tx, user).await?;
         tx.commit().await?;
         Ok(())

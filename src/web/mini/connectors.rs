@@ -27,6 +27,51 @@ pub(super) async fn add_anything_mcp(app: &App, user: &str, data: &Value) -> Res
     Ok(json!({"id":id}))
 }
 
+pub(super) async fn docblock_oauth(app: &App, user: &str, data: &Value) -> Result<Value> {
+    let connector = if data.get("id").is_some() {
+        app.mcp.owned(user, text(data, "id", 64)?).await?
+    } else {
+        app.mcp.prepare_docblock(user).await?
+    };
+    ensure!(
+        crate::mcp::docblock::is_endpoint(&connector.endpoint),
+        "Docblock connection unavailable"
+    );
+    let url = app.mcp.oauth_start(user, &connector.id, None, None).await?;
+    Ok(json!({"consent_url":url}))
+}
+
+pub(super) async fn docblock_workspaces(app: &App, user: &str, data: &Value) -> Result<Value> {
+    let connector = app.mcp.owned(user, text(data, "id", 64)?).await?;
+    app.mcp.docblock_workspaces(&connector).await
+}
+
+pub(super) async fn docblock_shares(app: &App, user: &str, data: &Value) -> Result<Value> {
+    let connector = app.mcp.owned(user, text(data, "id", 64)?).await?;
+    let workspace = text(data, "workspace", 36)?;
+    uuid::Uuid::parse_str(workspace)?;
+    app.mcp.docblock_shares(&connector, workspace).await
+}
+
+pub(super) async fn revoke_docblock_share(app: &App, user: &str, data: &Value) -> Result<()> {
+    let connector = app.mcp.owned(user, text(data, "id", 64)?).await?;
+    let workspace = text(data, "workspace", 36)?;
+    let share = text(data, "share", 36)?;
+    uuid::Uuid::parse_str(workspace)?;
+    uuid::Uuid::parse_str(share)?;
+    app.mcp
+        .revoke_docblock_share(&connector, workspace, share)
+        .await
+}
+
+pub(super) async fn approve_docblock_share(app: &App, user: &str, data: &Value) -> Result<()> {
+    let request = text(data, "id", 64)?;
+    let days = data["expires_in_days"]
+        .as_u64()
+        .context("invalid link expiry")?;
+    store::approve_docblock_share(&app.db, user, request, days).await
+}
+
 pub(super) async fn list_tools(app: &App, user: &str, data: &Value) -> Result<Value> {
     let connector = app.mcp.owned(user, text(data, "id", 64)?).await?;
     ensure!(

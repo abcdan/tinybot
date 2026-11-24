@@ -29,3 +29,10 @@ pub(super) async fn remove(app: &App, user: &str, data: &Value) -> Result<()> {
     );
     Ok(())
 }
+
+pub(super) async fn edit_draft(app: &App, user: &str, data: &Value) -> Result<Value> {
+    let id = super::text(data, "id", 36)?;
+    Uuid::parse_str(id).context("invalid email draft ID")?;
+    let edit = serde_json::from_value(data["draft"].clone()).context("invalid email draft")?;
+    Ok(json!({"id":crate::runtime::edit_draft(app,user,id,edit).await?}))
+}

@@ -12,7 +12,10 @@ use super::{
 };
 use crate::{
     App, audit,
-    model::{ModelProvider, json_reply, parse_json_reply},
+    model::{
+        ModelProvider, ProviderFailure, json_reply, parse_json_reply, provider_failure,
+        temporary_provider_failure,
+    },
     schedules,
     security::{clip, id, now},
     store::{self, Agent, Task},
@@ -23,9 +26,13 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
 pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> Result<()> {
-    if !store::has_access(&app.db, &task.user, task.agent.as_deref()).await? {
+    if store::groups::is_group_task(&app.db, &task.id).await? {
+        return super::group::work(app, task).await;
+    }
+    if !store::current(&app.db, task).await? {
         return store::settle(&app.db, task, "cancelled", None).await;
     }
+    let paired = task.shared_memory_pair.is_some();
     let agent = if let Some(agent) = &task.agent {
         sqlx::query_as::<_, Agent>("SELECT * FROM agents WHERE id=?")
             .bind(agent)
@@ -35,7 +42,11 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
         None
     };
     let owner = agent.as_ref().is_none_or(|agent| agent.owner == task.user);
-    let connectors = app.mcp.available(&task.user, task.agent.as_deref()).await?;
+    let connectors = if paired {
+        Vec::new()
+    } else {
+        app.mcp.available(&task.user, task.agent.as_deref()).await?
+    };
     let allowed_tools = agent
         .as_ref()
         .map(|agent| serde_json::from_str::<Vec<String>>(&agent.tools))
@@ -72,34 +83,70 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
             })
         })
         .collect();
-    let model = app.models.provider(&task.user, false).await?;
+    let mut backup = store::model_backup::selected(&app.db, task).await?;
+    let mut model = if let Some(selected) = &backup {
+        app.models.backup_provider(&task.user, selected).await?
+    } else {
+        app.models.provider(&task.user, false).await?
+    };
     let profile = app.models.onboarding_profile(&task.user).await?;
     let profile = json!({"display_name":profile.display_name,"chief_name":profile.chief_name});
-    let incoming_mail = store::mail::task_context(&app.db, &app.vault, task).await?;
+    let incoming_mail = if paired {
+        None
+    } else {
+        store::mail::task_context(&app.db, &app.vault, task).await?
+    };
     let automatic_mail = incoming_mail
         .as_ref()
         .is_some_and(|mail| mail.automated_turn);
+    let routine = schedules::progress(&app.db, task).await?;
+    let inbox_routine = routine
+        .as_ref()
+        .and_then(|progress| progress.source.as_deref())
+        == Some("inbox");
+    let inbox_briefing = if inbox_routine {
+        Some(store::mail::briefing(&app.db, &app.vault, task).await?)
+    } else {
+        None
+    };
     let mail_accounts: Vec<_> =
-        if owner && task.agent.is_none() {
+        if owner && task.agent.is_none() && !paired && !inbox_routine {
             store::mail::smtp_accounts(&app.db, &task.user).await?.into_iter().map(|account| {
             json!({"id":account.id,"label":account.label,"address":account.address})
         }).collect()
         } else {
             Vec::new()
         };
-    let hosted = if automatic_mail {
+    let hosted = if automatic_mail || paired || inbox_routine || backup.is_some() {
         Vec::new()
     } else {
         super::openrouter_tools::available(&ctx).await?
     };
-    let tools: Vec<_> = app
+    let mut tools: Vec<_> = app
         .tools
         .iter()
         .filter(|tool| {
             ctx.allows(tool.name())
+                && (!paired
+                    || matches!(tool.name(), "send_reply" | "send_card" | "react_to_message"))
                 && (!tool.name().starts_with("openrouter_") || hosted.contains(&tool.name()))
                 && (owner || matches!(tool.name(), "delegate" | "send_reply" | "react_to_message"))
                 && (tool.name() != "send_email" || !mail_accounts.is_empty())
+                && (tool.name() != "record_routine_step" || routine.is_some())
+                && (routine.is_none()
+                    || !matches!(
+                        tool.name(),
+                        "schedule"
+                            | "save_routine"
+                            | "run_routine"
+                            | "cancel_schedule"
+                            | "delegate"
+                    ))
+                && (!inbox_routine
+                    || matches!(
+                        tool.name(),
+                        "record_routine_step" | "send_reply" | "send_card" | "request_input"
+                    ))
                 && (!automatic_mail
                     || matches!(
                         tool.name(),
@@ -107,7 +154,7 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                     ))
         })
         .collect();
-    let definitions = tool_definitions(&tools);
+    let mut definitions = tool_definitions(&tools);
     let latest_request: Option<(i64, String, Option<i64>)> = sqlx::query_as(
         "SELECT id,body,telegram_message_id FROM events WHERE task=? AND role='user' ORDER BY id DESC LIMIT 1",
     )
@@ -117,29 +164,38 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
     let request = latest_request
         .as_ref()
         .map_or("", |(_, text, _)| text.as_str());
-    let memory = super::memory::for_chief(
-        app,
-        task,
-        request,
-        owner
-            && latest_request
-                .as_ref()
-                .is_some_and(|(_, _, id)| id.is_some_and(|id| id > 0)),
-    )
-    .await?;
-    let attachment = super::media::context(
-        app,
-        task,
-        &*model,
-        latest_request.as_ref().map(|(_, text, _)| text.as_str()),
-    )
-    .await?;
+    let memory = if paired {
+        store::shared_memory::context(&app.db, task).await?
+    } else {
+        super::memory::for_chief(
+            app,
+            task,
+            request,
+            owner
+                && latest_request
+                    .as_ref()
+                    .is_some_and(|(_, _, id)| id.is_some_and(|id| id > 0)),
+        )
+        .await?
+    };
+    let mut attachment = if paired {
+        Value::Null
+    } else {
+        super::media::context(
+            app,
+            task,
+            &*model,
+            latest_request.as_ref().map(|(_, text, _)| text.as_str()),
+        )
+        .await?
+    };
     let mut summary = task.summary.clone();
     let mut goal = task.goal.clone();
     let mut lookups = BTreeSet::new();
     let mut consulted_helper = false;
     let mut repeated_lookup = false;
     let mut finish_lookup = false;
+    let mut asked_for_step = false;
     loop {
         let progress = loop_guard::check(app, task, request).await?;
         if matches!(progress, Progress::Superseded) {
@@ -204,15 +260,28 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
             .rev()
             .collect::<Vec<_>>();
         let zone = schedules::timezone(&app.db, &task.user).await?;
-        let input = json!({
+        let mut input = json!({
             "goal":goal,"summary":summary,"latest_request":latest_request.as_ref().map(|(_,text,_)|clip(text,8000)),"history":history,"memory":memory,"attachment":attachment,
             "profile":profile,
             "local_time":schedules::local_iso(now(),zone),"time_zone":zone.name(),
             "shared_helper_scope":agent.as_ref().filter(|_|!owner).map(|agent|&agent.id),
+            "shared_memory_chat":paired,
             "telegram_reply":store::latest_reply_context(&app.db, &task.id).await?,
-            "saved_agents":saved,"tools":descriptions(&tools),"connectors":if automatic_mail { Vec::new() } else { connector_context(&ctx) },
+            "saved_agents":if paired || inbox_routine { &[][..] } else { &saved[..] },"tools":descriptions(&tools),
+            "connectors":if automatic_mail || paired || inbox_routine { Vec::new() } else { connector_context(&ctx) },
             "email":incoming_mail,"mail_accounts":mail_accounts
         });
+        let routine_progress = if routine.is_some() {
+            schedules::progress(&app.db, task).await?
+        } else {
+            None
+        };
+        if let Some(progress) = &routine_progress {
+            input["routine"] = serde_json::to_value(progress)?;
+        }
+        if let Some(briefing) = &inbox_briefing {
+            input["inbox_briefing"] = serde_json::to_value(briefing)?;
+        }
         let has_work = consulted_helper
             || !lookups.is_empty()
             || records
@@ -241,10 +310,36 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
         let step = match step {
             Ok(Some(step)) => step,
             Ok(None) => return store::settle(&app.db, task, "idle", None).await,
-            Err(_) if has_work => {
-                return finish_from_context(app, task, feedback, &*model, &input, None).await;
+            Err(error) => {
+                if backup.is_none()
+                    && temporary_provider_failure(&error)
+                    && let Some(selected) = store::model_backup::begin(&app.db, task).await?
+                {
+                    audit::record(
+                        "model",
+                        "model_backup",
+                        "switched",
+                        json!({"provider":selected.provider,"model":selected.model}),
+                    )
+                    .await;
+                    model = app.models.backup_provider(&task.user, &selected).await?;
+                    backup = Some(selected);
+                    if !store::current(&app.db, task).await? {
+                        return store::settle(&app.db, task, "idle", None).await;
+                    }
+                    tools.retain(|tool| !tool.name().starts_with("openrouter_"));
+                    definitions = tool_definitions(&tools);
+                    attachment = super::media::context(app, task, &*model, Some(request)).await?;
+                    continue;
+                }
+                if has_work
+                    && provider_failure(&error)
+                        .is_none_or(|failure| failure == ProviderFailure::Incomplete)
+                {
+                    return finish_from_context(app, task, feedback, &*model, &input, None).await;
+                }
+                return Err(error);
             }
-            Err(error) => return Err(error),
         };
         if !store::current(&app.db, task).await? {
             return store::settle(&app.db, task, "idle", None).await;
@@ -254,6 +349,32 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                 text,
                 suggested_replies,
             } => {
+                if let Some(progress) =
+                    routine_progress.filter(|progress| progress.current.is_some())
+                {
+                    if asked_for_step {
+                        return store::settle(
+                            &app.db,
+                            task,
+                            "blocked",
+                            Some(&format!(
+                                "I finished {} of {} routine steps. Reply here to continue.",
+                                progress.results.len(),
+                                progress.total,
+                            )),
+                        )
+                        .await;
+                    }
+                    asked_for_step = true;
+                    store::append(
+                        &app.db,
+                        &task.id,
+                        "tool",
+                        "Complete the current routine step before replying. If you need a decision, use request_input.",
+                    )
+                    .await?;
+                    continue;
+                }
                 let suggestions = valid_suggestions(&suggested_replies);
                 audit::record(
                     "model",
@@ -282,7 +403,8 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                 )
                 .await;
             }
-            Step::Tool { name, args } => {
+            Step::Tool { name, mut args } => {
+                mcp_approval::prepare_docblock_call(&ctx, &name, &mut args);
                 if !loop_guard::reserve(app, task, "chief", &name, &args).await? {
                     continue;
                 }
@@ -522,6 +644,9 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                 audit::tool_started(tool.name(), &args).await;
                 let result = tool.execute(&ctx, args).await;
                 audit::tool_finished(tool.name(), &result).await;
+                if name == "record_routine_step" && result.is_ok() {
+                    asked_for_step = false;
+                }
                 if let Some(lookup) = lookup {
                     let observation = lookup.observe(result);
                     store::finish_action(&app.db, task, &action, &observation.to_string(), false)

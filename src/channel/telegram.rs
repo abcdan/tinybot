@@ -21,12 +21,75 @@ pub struct Telegram {
     pub(super) client: reqwest::Client,
     pub(super) api: String,
     pub(super) origin: String,
+    pub(super) identity: tokio::sync::OnceCell<(i64, String)>,
 }
 
 #[async_trait]
 impl ChannelAdapter for Telegram {
     fn name(&self) -> &'static str {
         "telegram"
+    }
+
+    async fn bot_identity(&self) -> Result<(i64, String)> {
+        Ok(self
+            .identity
+            .get_or_try_init(|| async {
+                let response = self.call("getMe", json!({})).await?;
+                ensure!(
+                    response["ok"] == true,
+                    "Telegram bot identity is unavailable"
+                );
+                let id = response["result"]["id"]
+                    .as_i64()
+                    .filter(|id| *id > 0)
+                    .context("missing bot ID")?;
+                let name = response["result"]["username"]
+                    .as_str()
+                    .filter(|name| {
+                        !name.is_empty()
+                            && name.len() <= 64
+                            && name
+                                .bytes()
+                                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                    })
+                    .context("missing bot name")?;
+                Ok::<_, anyhow::Error>((id, name.to_owned()))
+            })
+            .await?
+            .clone())
+    }
+
+    async fn group_admin(&self, chat: i64, user: &str) -> Result<bool> {
+        let user = user.parse::<i64>()?;
+        let response = self
+            .call("getChatAdministrators", json!({"chat_id":chat}))
+            .await?;
+        Ok(response["ok"] == true
+            && response["result"].as_array().is_some_and(|members| {
+                members.iter().any(|member| {
+                    member["user"]["id"].as_i64() == Some(user)
+                        && matches!(member["status"].as_str(), Some("creator" | "administrator"))
+                })
+            }))
+    }
+
+    async fn send_group(
+        &self,
+        route: store::groups::GroupRoute,
+        body: &str,
+        reply_to: Option<i64>,
+    ) -> Result<MessageDelivery> {
+        let rendered = formatting::render(body);
+        let mut data = json!({"chat_id":route.chat,"text":rendered.text,
+            "link_preview_options":{"is_disabled":true}});
+        if route.topic > 0 {
+            data["message_thread_id"] = json!(route.topic);
+        }
+        add_reply_anchor(&mut data, reply_to);
+        if !rendered.entities.is_empty() {
+            data["entities"] = json!(rendered.entities);
+        }
+        self.send_message(data).await
     }
 
     async fn typing(&self, user: &str) -> Result<Option<Duration>> {
@@ -60,6 +123,17 @@ impl ChannelAdapter for Telegram {
         media::download(self, file_id, limit).await
     }
 
+    async fn upload_file(
+        &self,
+        user: &str,
+        kind: &str,
+        name: &str,
+        bytes: &[u8],
+        reply_to: Option<i64>,
+    ) -> Result<MessageDelivery> {
+        self.upload(user, kind, name, bytes, reply_to).await
+    }
+
     async fn receive(&self, offset: i64) -> Result<(Vec<Inbound>, i64)> {
         self.receive_updates(offset).await
     }
@@ -91,6 +165,49 @@ impl ChannelAdapter for Telegram {
                 }
             }
             Some("mini") => data["reply_markup"] = self.settings_keyboard(),
+            Some(button) if button.starts_with(store::task_failures::RETRY) => {
+                uuid::Uuid::parse_str(&button[store::task_failures::RETRY.len()..])?;
+                data["reply_markup"] = json!({"inline_keyboard":[[
+                    {"text":"Retry","callback_data":button},
+                    {"text":"Settings & forms","web_app":{"url":format!("{}/mini",self.origin)}}
+                ]]});
+            }
+            Some("docblock") => data["reply_markup"] = json!({"inline_keyboard":[[{
+                "text":"Connect Docblock","web_app":{"url":format!("{}/mini?connect=docblock",self.origin)}
+            }]]}),
+            Some(button) if button.starts_with(callback::MCP_APPROVAL_ONCE_PREFIX) => {
+                let prefix = callback::MCP_APPROVAL_ONCE_PREFIX;
+                let id = uuid::Uuid::parse_str(&button[prefix.len()..])?;
+                data["reply_markup"] = json!({"inline_keyboard":[[
+                    {"text":"Approve once","callback_data":format!("{prefix}{id}/once")},
+                    {"text":"Deny","callback_data":format!("{prefix}{id}/deny")}
+                ], [{"text":"Review in Settings","web_app":{"url":format!("{}/mini",self.origin)}}]]});
+            }
+            Some(button) if button.starts_with(callback::INVITE_ACCEPT_PREFIX) => {
+                uuid::Uuid::parse_str(&button[callback::INVITE_ACCEPT_PREFIX.len()..])?;
+                data["reply_markup"] = json!({"inline_keyboard":[[{
+                    "text":"Accept invitation","callback_data":button
+                }]]});
+            }
+            Some(button) if button.starts_with("task/") || button.starts_with("tq/") => {
+                let mut fields = button.split('/').skip(1);
+                let task = fields.next().context("missing task")?;
+                let revision = fields.next().context("missing task revision")?;
+                let state = fields.next().context("missing task state")?;
+                let mut buttons = Vec::new();
+                if !matches!(state, "cancelled" | "revoked") {
+                    buttons.push(json!({"text":"Continue","callback_data":format!("tc/{task}")}));
+                }
+                if matches!(state, "queued" | "running" | "waiting" | "setup") {
+                    buttons.push(json!({"text":"Stop","callback_data":format!("ts/{task}/{revision}")}));
+                }
+                if matches!(state, "waiting" | "setup") {
+                    buttons.push(json!({"text":"Review","web_app":{"url":format!("{}/mini",self.origin)}}));
+                }
+                if !buttons.is_empty() {
+                    data["reply_markup"] = json!({"inline_keyboard":[buttons]});
+                }
+            }
             Some(button) if button.starts_with(callback::MCP_APPROVAL_PREFIX) => {
                 let id = uuid::Uuid::parse_str(&button[callback::MCP_APPROVAL_PREFIX.len()..])?;
                 let prefix = callback::MCP_APPROVAL_PREFIX;
@@ -191,25 +308,34 @@ impl ChannelAdapter for Telegram {
         replies: &[store::SuggestedReply],
         reply_to: Option<i64>,
     ) -> Result<MessageDelivery> {
-        let user = user.parse::<i64>().context("invalid Telegram recipient")?;
-        let mut data = json!({"chat_id":user,"html":card.html()});
-        let mut fallback = json!({"chat_id":user,"text":card.plain_text(),
-            "link_preview_options":{"is_disabled":true}});
-        add_reply_anchor(&mut data, reply_to);
-        add_reply_anchor(&mut fallback, reply_to);
-        let title_length = card.title_utf16_len();
-        if title_length > 0 {
-            fallback["entities"] = json!([{"type":"bold","offset":0,"length":title_length}]);
+        self.send_task_card(
+            user.parse()?,
+            card,
+            (!replies.is_empty()).then(|| suggested_keyboard(replies)),
+            reply_to,
+        )
+        .await
+    }
+
+    async fn send_listenable(
+        &self,
+        user: &str,
+        body: &str,
+        card: Option<&Card>,
+        replies: &[store::SuggestedReply],
+        reply_to: Option<i64>,
+        receipt: i64,
+    ) -> Result<MessageDelivery> {
+        let chat = user.parse()?;
+        let mut keyboard = suggested_keyboard(replies);
+        if let Some(rows) = keyboard["inline_keyboard"].as_array_mut() {
+            rows.push(json!([{"text":"Listen","callback_data":format!("listen/{receipt}")}]));
         }
-        if !replies.is_empty() {
-            let keyboard = suggested_keyboard(replies);
-            data["reply_markup"] = keyboard.clone();
-            fallback["reply_markup"] = keyboard;
-        }
-        match self.send_widget("card", data).await? {
-            WidgetDelivery::Sent(id) => Ok(MessageDelivery::Sent(id)),
-            WidgetDelivery::Retry(delay) => Ok(MessageDelivery::Retry(delay)),
-            WidgetDelivery::Rejected => self.send_message(fallback).await,
+        if let Some(card) = card {
+            self.send_task_card(chat, card, Some(keyboard), reply_to)
+                .await
+        } else {
+            self.send_reply(chat, body, Some(keyboard), reply_to).await
         }
     }
 

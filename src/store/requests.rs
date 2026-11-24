@@ -178,10 +178,31 @@ pub async fn respond_email(
     .await
 }
 
+pub async fn approve_docblock_share(
+    db: &SqlitePool,
+    user: &str,
+    pending: &str,
+    days: u64,
+) -> Result<()> {
+    ensure!(
+        crate::mcp::docblock::valid_expiry(days),
+        "choose a link expiry from 1 to 365 days"
+    );
+    respond_to_request(
+        db,
+        user,
+        pending,
+        McpApprovalDecision::Once,
+        ResponseScope::DocblockShare(days),
+    )
+    .await
+}
+
 enum ResponseScope {
     Any,
     Mcp,
     Email,
+    DocblockShare(u64),
 }
 
 fn approval_vote(approve: bool) -> McpApprovalDecision {
@@ -221,6 +242,27 @@ async fn respond_to_request(
             entry.kind == "email-send",
             "Email approval request unavailable"
         ),
+        ResponseScope::DocblockShare(days) => {
+            let scope = scope.as_ref().context("Docblock share unavailable")?;
+            ensure!(
+                scope.tool == "create_share"
+                    && mcp_approvals::docblock_once(&mut tx, user, scope).await?,
+                "Docblock share unavailable"
+            );
+            let mut payload: Value = serde_json::from_str(&entry.payload)?;
+            let arguments = &mut payload["call"]["args"]["arguments"];
+            ensure!(
+                arguments["kind"] == "note",
+                "Docblock note share unavailable"
+            );
+            arguments["expires_in_days"] = serde_json::json!(days);
+            crate::mcp::docblock::review("create_share", arguments)?;
+            sqlx::query("UPDATE pending SET payload=? WHERE id=?")
+                .bind(payload.to_string())
+                .bind(&entry.id)
+                .execute(&mut *tx)
+                .await?;
+        }
     }
     if entry.kind == "email-send" && approve {
         let payload: Value = serde_json::from_str(&entry.payload)?;
@@ -302,23 +344,29 @@ pub async fn claim_outbox(db: &SqlitePool) -> Result<Option<Outbound>> {
 }
 
 pub async fn can_deliver(db: &SqlitePool, item: &Outbound) -> Result<bool> {
-    if let Some(request) = item
-        .button
-        .as_deref()
-        .and_then(|button| button.strip_prefix("mcp-approval/"))
-    {
+    if !has_access(db, &item.user, item.agent.as_deref()).await? {
+        return Ok(false);
+    }
+    if let Some(request) = item.button.as_deref().and_then(|button| {
+        button
+            .strip_prefix("mcp-approval/")
+            .or_else(|| button.strip_prefix("mcp-approval-once/"))
+    }) {
         return mcp_approvals::waiting(db, item, request).await;
     }
     if let Some(task) = &item.task {
         let usable: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=? AND state<>'revoked')",
+            "SELECT EXISTS(SELECT 1 FROM tasks t WHERE id=? AND user=? AND state<>'revoked'
+            AND (t.shared_memory_pair IS NULL OR EXISTS(SELECT 1 FROM available_shared_memory_pairs p
+            WHERE p.id=t.shared_memory_pair AND (p.owner=t.user OR p.guest=t.user))))",
         )
         .bind(task)
+        .bind(&item.user)
         .fetch_one(db)
         .await?;
         if !usable {
             return Ok(false);
         }
     }
-    has_access(db, &item.user, item.agent.as_deref()).await
+    Ok(true)
 }

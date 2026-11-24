@@ -157,6 +157,8 @@ async fn replies_resume_the_referenced_task_and_thread_the_response() {
     ingest_telegram(&db, "1", 1, "2", "First discussion", 21)
         .await
         .unwrap();
+    let acknowledgement = store::claim_outbox(&db).await.unwrap().unwrap();
+    assert_eq!(acknowledgement.reply_to_message_id, Some(21));
     let first = store::claim(&db).await.unwrap().unwrap();
     store::settle_reply(&db, &first, "An earlier answer.", &[])
         .await
@@ -180,6 +182,8 @@ async fn replies_resume_the_referenced_task_and_thread_the_response() {
     ingest_telegram_reply(&db, "1", 3, "2", "👍", 24, Some(quote))
         .await
         .unwrap();
+    let acknowledgement = store::claim_outbox(&db).await.unwrap().unwrap();
+    assert_eq!(acknowledgement.reply_to_message_id, Some(24));
     let resumed = store::claim(&db).await.unwrap().unwrap();
     assert_eq!(resumed.id, first.id);
     let latest = store::history(&db, &first.id).await.unwrap();
@@ -353,6 +357,14 @@ async fn chief_chats_keep_shared_permissions_and_invites_grant_without_selecting
         .await
         .unwrap();
     send(&db, 4, "3", "/start invitation").await;
+    assert!(
+        !super::super::invitations::available(&db, "3")
+            .await
+            .unwrap()
+    );
+    assert!(!store::has_access(&db, "3", Some("helper")).await.unwrap());
+    store::seed(&db, "3").await.unwrap();
+    send(&db, 5, "3", "/start invitation").await;
     let active: Option<String> = sqlx::query_scalar("SELECT active_task FROM users WHERE id='3'")
         .fetch_one(&db)
         .await
@@ -364,4 +376,43 @@ async fn chief_chats_keep_shared_permissions_and_invites_grant_without_selecting
         .await
         .unwrap();
     assert!(body.contains("Ask your Chief to consult Research"));
+}
+
+#[tokio::test]
+async fn cancel_preserves_an_in_flight_action_and_uncertain_reconciliation() {
+    let db = fixture().await;
+    send(&db, 1, "1", "Prepare the action").await;
+    let task = store::claim(&db).await.unwrap().unwrap();
+    store::pause(
+        &db,
+        &task,
+        "approve",
+        &serde_json::json!({}),
+        "Review the action",
+        None,
+        900,
+        "started",
+    )
+    .await
+    .unwrap();
+    store::respond(&db, "1", "started", true).await.unwrap();
+    let task = store::claim(&db).await.unwrap().unwrap();
+    assert_eq!(
+        store::claim_approval(&db, &task).await.unwrap().unwrap().id,
+        "started"
+    );
+    send(&db, 2, "1", "/cancel").await;
+    let state = || {
+        sqlx::query_scalar::<_, String>("SELECT state FROM tasks WHERE id=?")
+            .bind(&task.id)
+            .fetch_one(&db)
+    };
+    assert_eq!(state().await.unwrap(), "running");
+    store::uncertain_action(&db, &task, "started", "Unconfirmed")
+        .await
+        .unwrap();
+    send(&db, 3, "1", "/cancel").await;
+    assert_eq!(state().await.unwrap(), "uncertain");
+    send(&db, 4, "1", "/reconcile").await;
+    assert_eq!(state().await.unwrap(), "queued");
 }

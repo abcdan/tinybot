@@ -1,5 +1,8 @@
 use super::{Telegram, formatting, rich};
-use crate::{channel::MessageDelivery, net, store};
+use crate::{
+    channel::{Card, MessageDelivery},
+    net, store,
+};
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -11,6 +14,113 @@ pub(super) enum WidgetDelivery {
 }
 
 impl Telegram {
+    pub(super) async fn send_task_card(
+        &self,
+        user: i64,
+        card: &Card,
+        keyboard: Option<Value>,
+        reply_to: Option<i64>,
+    ) -> Result<MessageDelivery> {
+        let mut data = json!({"chat_id":user,"html":card.html()});
+        let mut fallback = json!({"chat_id":user,"text":card.plain_text(),
+            "link_preview_options":{"is_disabled":true}});
+        add_reply_anchor(&mut data, reply_to);
+        add_reply_anchor(&mut fallback, reply_to);
+        let title_length = card.title_utf16_len();
+        if title_length > 0 {
+            fallback["entities"] = json!([{"type":"bold","offset":0,"length":title_length}]);
+        }
+        if let Some(keyboard) = keyboard {
+            data["reply_markup"] = keyboard.clone();
+            fallback["reply_markup"] = keyboard;
+        }
+        match self.send_widget("card", data).await? {
+            WidgetDelivery::Sent(id) => Ok(MessageDelivery::Sent(id)),
+            WidgetDelivery::Retry(delay) => Ok(MessageDelivery::Retry(delay)),
+            WidgetDelivery::Rejected => self.send_message(fallback).await,
+        }
+    }
+
+    pub(super) async fn upload(
+        &self,
+        user: &str,
+        kind: &str,
+        name: &str,
+        bytes: &[u8],
+        reply_to: Option<i64>,
+    ) -> Result<MessageDelivery> {
+        use crate::channel::UploadUncertain;
+        let chat = user.parse::<i64>()?;
+        anyhow::ensure!(
+            !name.is_empty()
+                && name.len() <= 96
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte)),
+            "invalid upload filename"
+        );
+        let (method, mime) = match kind {
+            "document" => ("sendDocument", "application/octet-stream"),
+            "voice" => ("sendVoice", "audio/mpeg"),
+            _ => anyhow::bail!("unknown file type"),
+        };
+        let boundary = uuid::Uuid::new_v4().simple().to_string();
+        let mut body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n{chat}\r\n"
+        )
+        .into_bytes();
+        if let Some(reply_to) = reply_to.filter(|id| *id > 0) {
+            let reply = json!({"message_id":reply_to,"allow_sending_without_reply":true});
+            body.extend_from_slice(format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"reply_parameters\"\r\n\r\n{reply}\r\n"
+            ).as_bytes());
+        }
+        body.extend_from_slice(format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"{kind}\"; filename=\"{name}\"\r\nContent-Type: {mime}\r\n\r\n"
+        ).as_bytes());
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let response = self
+            .client
+            .post(format!("{}/{method}", self.api))
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(body)
+            .send()
+            .await
+            .map_err(|_| UploadUncertain)?;
+        if response.status().is_server_error() {
+            return Err(UploadUncertain.into());
+        }
+        let body = net::body(response, 256_000)
+            .await
+            .map_err(|_| UploadUncertain)?;
+        let output: Value = serde_json::from_slice(&body).map_err(|_| UploadUncertain)?;
+        if output["ok"] == true && accepted_message_id(&output).is_none() {
+            return Err(UploadUncertain.into());
+        }
+        if output["ok"] != true && output["ok"] != false {
+            return Err(UploadUncertain.into());
+        }
+        if output["ok"] == true {
+            return Ok(MessageDelivery::Sent(accepted_message_id(&output)));
+        }
+        if output["error_code"]
+            .as_i64()
+            .is_some_and(|code| (500..600).contains(&code))
+        {
+            return Err(UploadUncertain.into());
+        }
+        if output["error_code"] == 429
+            && let Some(delay) = retry_after(&output)
+        {
+            return Ok(MessageDelivery::Retry(delay));
+        }
+        anyhow::bail!("Telegram rejected the file")
+    }
+
     pub fn new(token: String, origin: String) -> Result<Self> {
         Ok(Self {
             client: reqwest::Client::builder()
@@ -20,6 +130,7 @@ impl Telegram {
                 .build()?,
             api: format!("https://api.telegram.org/bot{token}"),
             origin,
+            identity: Default::default(),
         })
     }
 

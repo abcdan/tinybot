@@ -2,6 +2,7 @@ import { action, button, card, field, form, node, row } from './mini-ui.js';
 import { agentForm, agents } from './mini-agents.js';
 import { audit } from './mini-audit.js';
 import { connectors } from './mini-connectors.js';
+import { invites } from './mini-invites.js';
 import { mail } from './mini-mail.js';
 import { memories } from './mini-memory.js';
 import { onboarding } from './mini-onboarding.js';
@@ -15,12 +16,14 @@ const chiefLabel = document.querySelector('#chief-label');
 const shell = content.closest('main');
 const tabs = document.querySelector('#tabs');
 const browserTab = tabs.querySelector('[data-tab="browser"]');
+const invitesTab = tabs.querySelector('[data-tab="invites"]');
 const sourceLink = document.querySelector('#source-link');
 const footer = sourceLink.closest('footer');
-const formId = new URLSearchParams(window.location.search).get('form');
+const params = new URLSearchParams(window.location.search);
+const formId = params.get('form');
 const openInTelegram = 'Open TinyBot from its Telegram profile or tap Settings & forms in the bot chat.';
 let state;
-let tab = 'home';
+let tab = params.get('connect') === 'docblock' ? 'connectors' : 'home';
 let generation = 0;
 let opened = false;
 let disposeOnboarding;
@@ -73,7 +76,8 @@ export async function refresh(animate = false) {
             state = result;
             chiefLabel.textContent = state.chief_name || 'Your Chief';
             browserTab.hidden = state.browser_proxy == null;
-            if (tab === 'browser' && browserTab.hidden) setTab('home');
+            invitesTab.hidden = state.operator !== true;
+            if ((tab === 'browser' && browserTab.hidden) || (tab === 'invites' && invitesTab.hidden)) setTab('home');
             else render(animate);
         }
     } catch (error) {
@@ -152,7 +156,7 @@ function setTab(next) {
 function render(animate = false) {
     if (!state) return;
     content.replaceChildren();
-    ({home, agents, memories, connectors, mail, browser, schedules, audit, model})[tab](state);
+    ({home, agents, memories, connectors, mail, browser, schedules, audit, invites, model})[tab](state);
     if (animate && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
         content.getAnimations?.().forEach(animation => animation.cancel());
         content.animate?.([{opacity: 0, transform: 'translateY(6px)'}, {opacity: 1, transform: 'translateY(0)'}],
@@ -166,7 +170,9 @@ function home() {
         setup.append(button('Set up model', () => setTab('model')));
         content.append(setup);
     }
-    content.append(node('h2', 'Requests'));
+    const requestsHeading = node('h2', 'Requests');
+    requestsHeading.id = 'task-requests';
+    content.append(requestsHeading);
     if (!state.requests.length) content.append(card(null, 'You’re all caught up.'));
     for (const request of state.requests) {
         const details = request.content;
@@ -184,6 +190,41 @@ function home() {
                 action('Approve once', 'approve', data, 'Send approved.'),
                 action('Deny', 'deny', data, 'Send denied.', true)
             ));
+            if (details.draft) {
+                const draft = details.draft;
+                const edit = node('details');
+                edit.append(node('summary', 'Edit email draft'), form('Save for review', [
+                    field('to', 'Recipients, separated by commas', {value: draft.to.join(', '), max: 1024}),
+                    field('subject', 'Subject', {value: draft.subject, max: 180}),
+                    field('body', 'Message', {value: draft.body, type: 'textarea', max: 2400})
+                ], async values => {
+                    await api('edit-email-draft', {id: request.id, draft: {
+                        to: values.to.split(',').map(address => address.trim()).filter(Boolean),
+                        subject: values.subject, body: values.body
+                    }});
+                    await refresh();
+                    show('Draft updated. Review it before sending.');
+                }));
+                item.append(edit);
+            }
+        } else if (details.docblock) {
+            const preview = details.docblock;
+            const data = {id: request.id};
+            const deny = action('Deny', 'deny', data, 'Request denied.', true);
+            item.append(node('p', `Workspace: ${preview.workspace}`), node('p', `Note: ${preview.target}`), node('pre', preview.change));
+            if (preview.expires_in_days != null) {
+                const expires = field('expires_in_days', 'Expires after (days)', {type: 'number', value: preview.expires_in_days});
+                const days = expires.querySelector('input');
+                days.min = '1';
+                days.max = '365';
+                item.append(form('Approve once', [expires], async values => {
+                    await api('approve-docblock-share', {...data, expires_in_days: Number(values.expires_in_days)});
+                    await refresh();
+                    show('Publication approved.');
+                }), deny);
+            } else {
+                item.append(row(action('Approve once', 'approve', data, 'Change approved.'), deny));
+            }
         } else if (details.mcp) {
             const data = {id: request.id};
             const choices = [action('Approve once', 'approve', data, 'Approved for this call.')];
@@ -200,14 +241,48 @@ function home() {
         content.append(item);
     }
     content.append(node('h2', 'Tasks'));
-    if (!state.tasks.length) content.append(card(null, 'Send a message to your Chief in Telegram to start a task.'));
-    for (const task of state.tasks) {
-        const item = card(task.title, task.state.replaceAll('-', ' '));
-        if (task.id !== state.active_task && task.state !== 'cancelled') {
-            item.append(action('Switch to task', 'select-task', {task: task.id}, 'Send your next message in Telegram.', true));
-        } else if (task.id === state.active_task) item.append(node('span', 'Current Chief task', 'meta'));
-        content.append(item);
+    const results = node('div');
+    let searchGeneration = 0;
+    async function search(query, offset = 0) {
+        const sequence = ++searchGeneration;
+        const page = await api('search-tasks', {query, offset});
+        if (sequence !== searchGeneration || !results.isConnected) return;
+        if (!offset) results.replaceChildren();
+        if (!page.items.length) results.append(card(null, 'No matching tasks.'));
+        page.items.forEach(task => results.append(taskCard(task)));
+        if (page.next_offset != null) {
+            const more = button('Load more tasks', async () => {
+                await search(query, page.next_offset);
+                more.remove();
+            }, true);
+            results.append(more);
+        }
     }
+    const finder = form('Search tasks', [field('query', 'Search retained messages and tasks', {
+        max: 200, required: false, type: 'search'
+    })], ({query}) => search(query.trim()));
+    if (!state.tasks.length) results.append(card(null, 'Send a message to your Chief in Telegram to start a task.'));
+    state.tasks.forEach(task => results.append(taskCard(task)));
+    content.append(finder, results);
+}
+
+function taskCard(task) {
+    const labels = {
+        idle: 'Ready for a follow-up', running: 'Working', waiting: 'Waiting for your response',
+        setup: 'Waiting for model setup', cancelled: 'Stopped', blocked: 'Stopped with an error',
+        uncertain: 'Check the destination before continuing', queued: 'Queued'
+    };
+    const item = card(task.title, labels[task.state] || task.state);
+    const controls = [];
+    if (task.id !== state.active_task && task.state !== 'cancelled') {
+        controls.push(action('Continue', 'select-task', {task: task.id}, 'Send your next message in Telegram.', true));
+    } else if (task.id === state.active_task) item.append(node('span', 'Current Chief task', 'meta'));
+    if (['queued', 'running', 'waiting', 'setup'].includes(task.state)) {
+        controls.push(action('Stop', 'stop-task', {task: task.id, revision: task.revision}, 'Task stopped.', true));
+    }
+    if (task.state === 'waiting') controls.push(button('Review requests', () => document.querySelector('#task-requests')?.scrollIntoView(), true));
+    if (controls.length) item.append(row(...controls));
+    return item;
 }
 
 function generatedForm(request) {
@@ -266,6 +341,8 @@ sourceLink.addEventListener('click', event => {
     event.preventDefault();
 });
 for (const item of document.querySelectorAll('#tabs button')) {
+    if (item.dataset.tab === tab) item.setAttribute('aria-current', 'page');
+    else item.removeAttribute('aria-current');
     item.addEventListener('click', () => setTab(item.dataset.tab));
 }
 syncColorScheme();

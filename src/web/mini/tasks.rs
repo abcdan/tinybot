@@ -1,7 +1,7 @@
 use super::text;
-use crate::{App, audit, forms, schedules, store};
+use crate::{App, audit, forms, schedules, security::now, store};
 use anyhow::{Context, Result, ensure};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 pub(super) async fn audit_sessions(app: &App, user: &str, data: &Value) -> Result<Value> {
@@ -62,6 +62,80 @@ pub(super) async fn set_time_zone(app: &App, user: &str, data: &Value) -> Result
 
 pub(super) async fn cancel_schedule(app: &App, user: &str, data: &Value) -> Result<()> {
     schedules::cancel(&app.db, user, text(data, "id", 64)?).await
+}
+
+pub(super) async fn schedule_details(app: &App, user: &str, data: &Value) -> Result<Value> {
+    let details = schedules::details(&app.db, user, text(data, "id", 64)?).await?;
+    Ok(serde_json::to_value(details)?)
+}
+
+pub(super) async fn create_routine(app: &App, user: &str, data: &Value) -> Result<()> {
+    let source = data["source"].as_str();
+    ensure!(
+        source.is_none() || source == Some("inbox"),
+        "unknown routine source"
+    );
+    schedules::save_routine(&app.db, user, routine_request(data)?, source, now(), None).await?;
+    Ok(())
+}
+
+pub(super) async fn edit_schedule(app: &App, user: &str, data: &Value) -> Result<()> {
+    schedules::edit(
+        &app.db,
+        user,
+        text(data, "id", 64)?,
+        revision(data)?,
+        routine_request(data)?,
+        now(),
+    )
+    .await
+}
+
+pub(super) async fn pause_schedule(app: &App, user: &str, data: &Value, pause: bool) -> Result<()> {
+    schedules::set_paused(
+        &app.db,
+        user,
+        text(data, "id", 64)?,
+        revision(data)?,
+        pause,
+        now(),
+    )
+    .await
+}
+
+pub(super) async fn run_schedule(app: &App, user: &str, data: &Value) -> Result<Value> {
+    let request = text(data, "request_id", 36)?;
+    ensure!(
+        uuid::Uuid::parse_str(request).is_ok(),
+        "invalid run request"
+    );
+    let task = schedules::run_now(
+        &app.db,
+        user,
+        text(data, "id", 64)?,
+        revision(data)?,
+        request,
+        now(),
+        None,
+    )
+    .await?;
+    Ok(json!({"task":task}))
+}
+
+pub(super) async fn schedule_history(app: &App, user: &str, data: &Value) -> Result<Value> {
+    let runs = schedules::history(&app.db, user, text(data, "id", 64)?).await?;
+    Ok(json!({"runs":runs}))
+}
+
+fn revision(data: &Value) -> Result<i64> {
+    data["revision"]
+        .as_i64()
+        .filter(|revision| *revision >= 0)
+        .context("invalid schedule revision")
+}
+
+fn routine_request(data: &Value) -> Result<schedules::RoutineRequest> {
+    serde_json::from_value(data["routine"].clone()).context("invalid routine")
 }
 
 pub(super) async fn respond(app: &App, user: &str, data: &Value, approve: bool) -> Result<()> {

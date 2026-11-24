@@ -24,7 +24,8 @@ pub(super) async fn import_codex(
         .filter(|code| code.len() == 43)
         .ok_or_else(forbidden)?;
     let pair: Option<(String, String)> = sqlx::query_as(
-        "DELETE FROM pending WHERE id=? AND kind='codex-pair' AND expires>=?
+        "DELETE FROM pending WHERE id=? AND kind='codex-pair' AND state='waiting' AND expires>=?
+        AND EXISTS(SELECT 1 FROM users WHERE id=pending.user AND suspended_at IS NULL)
         RETURNING user,payload",
     )
     .bind(hash(pairing))

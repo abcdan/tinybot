@@ -107,6 +107,15 @@ pub fn router(app: Arc<App>) -> Router {
                 )
             }),
         )
+        .route(
+            "/mini-invites.js",
+            get(|| async {
+                asset(
+                    "application/javascript; charset=utf-8",
+                    include_str!("../../web/mini-invites.js"),
+                )
+            }),
+        )
         .route("/api/mini", post(mini))
         .route("/api/codex/import", post(import_codex))
         .route("/oauth/mcp", get(oauth))

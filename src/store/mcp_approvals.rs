@@ -1,5 +1,5 @@
 use super::{Outbound, Task};
-use crate::security::now;
+use crate::{mcp::docblock, security::now};
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -58,7 +58,8 @@ pub async fn start_remembered_mcp(
          AND (t.agent IS NULL OR agent.owner=t.user)
          AND EXISTS(SELECT 1 FROM mcp_approvals a JOIN connectors c ON c.id=a.connector
             WHERE a.owner=t.user AND a.connector=? AND a.tool=? AND a.epoch=?
-            AND c.owner=a.owner AND c.auth<>'pending' AND c.approval_epoch=a.epoch)",
+            AND c.owner=a.owner AND c.auth<>'pending' AND c.approval_epoch=a.epoch
+            AND NOT (? AND c.endpoint IN (?,?)))",
     )
     .bind(action)
     .bind(now() + 900)
@@ -69,6 +70,9 @@ pub async fn start_remembered_mcp(
     .bind(&scope.connector)
     .bind(&scope.tool)
     .bind(scope.epoch)
+    .bind(docblock::reviewed_write(&scope.tool))
+    .bind(docblock::ENDPOINT)
+    .bind(docblock::ALIAS)
     .execute(db)
     .await?
     .rows_affected()
@@ -193,6 +197,10 @@ pub(super) async fn remember(
     user: &str,
     scope: &McpApprovalScope,
 ) -> Result<()> {
+    ensure!(
+        !docblock_once(connection, user, scope).await?,
+        "Docblock changes require one-time approval"
+    );
     sqlx::query(
         "INSERT INTO mcp_approvals(owner,connector,tool,epoch) VALUES(?,?,?,?)
          ON CONFLICT(owner,connector,tool) DO UPDATE SET epoch=excluded.epoch",
@@ -204,6 +212,23 @@ pub(super) async fn remember(
     .execute(connection)
     .await?;
     Ok(())
+}
+
+pub(super) async fn docblock_once(
+    connection: &mut SqliteConnection,
+    user: &str,
+    scope: &McpApprovalScope,
+) -> Result<bool> {
+    Ok(docblock::reviewed_write(&scope.tool)
+        && sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM connectors WHERE id=? AND owner=? AND endpoint IN (?,?))",
+        )
+        .bind(&scope.connector)
+        .bind(user)
+        .bind(docblock::ENDPOINT)
+        .bind(docblock::ALIAS)
+        .fetch_one(connection)
+        .await?)
 }
 
 pub(super) async fn waiting(db: &SqlitePool, item: &Outbound, request: &str) -> Result<bool> {

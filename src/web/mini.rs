@@ -16,11 +16,13 @@ use std::sync::Arc;
 
 mod browser;
 mod connectors;
+mod invitations;
 mod mail;
 mod memory;
 mod models;
 mod onboarding;
 mod sharing;
+mod task_views;
 mod tasks;
 
 #[derive(Deserialize)]
@@ -38,15 +40,25 @@ pub(super) async fn mini(
 ) -> Api {
     origin(&app, &headers)?;
     let user = telegram_user(&request.init, &app.token).map_err(|_| forbidden())?;
-    let onboarded = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE id=?)")
-        .bind(&user)
-        .fetch_one(&app.db)
+    let onboarded = crate::store::invitations::available(&app.db, &user)
         .await
         .map_err(|e| invalid(e.into()))?;
     if !onboarded {
         return Err(forbidden());
     }
     let action = request.action.as_str();
+    if matches!(
+        action,
+        "list-invites"
+            | "create-invite"
+            | "revoke-invite"
+            | "suspend-guest"
+            | "restore-guest"
+            | "invite-shared-memory"
+    ) && user != app.operator
+    {
+        return Err(forbidden());
+    }
     operation(&app, &user, action, &request.data)
         .await
         .map(Json)
@@ -105,6 +117,8 @@ async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<
         "openrouter-key" => return models::save_openrouter_key(app, user, data).await,
         "openrouter-models" => return models::openrouter_models(app, user).await,
         "openrouter-model" => models::select_openrouter_model(app, user, data).await?,
+        "save-backup-model" => models::save_backup_model(app, user, data).await?,
+        "clear-backup-model" => app.models.clear_backup(user).await?,
         "openrouter-server-tool" => {
             app.models
                 .set_server_tool(
@@ -124,6 +138,19 @@ async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<
 
         "save-agent" => agents::save_agent(app, user, data).await?,
         "invite-agent" => return sharing::invite_agent(app, user, data).await,
+        "list-invites" => return invitations::list(app, user).await,
+        "create-invite" => return invitations::create(app, user).await,
+        "revoke-invite" => invitations::revoke(app, user, data).await?,
+        "suspend-guest" => invitations::suspend(app, user, data, true).await?,
+        "restore-guest" => invitations::suspend(app, user, data, false).await?,
+        "invite-shared-memory" => invitations::offer_shared_memory(app, user, data).await?,
+        "shared-memory-pairs" => return invitations::pairs(app, user).await,
+        "join-shared-memory" => invitations::set_joined(app, user, data, true).await?,
+        "leave-shared-memory" => invitations::set_joined(app, user, data, false).await?,
+        "shared-memory-notes" => return invitations::notes(app, user, data).await,
+        "publish-shared-memory" => invitations::publish(app, user, data).await?,
+        "remove-shared-memory" => invitations::remove(app, user, data).await?,
+        "open-shared-memory" => invitations::open(app, user, data).await?,
         "revoke-member" => sharing::revoke_member(app, user, data).await?,
         "publish-memory" => sharing::publish_memory(app, user, data).await?,
         "list-memories" => return memory::list(app, user, data).await,
@@ -135,6 +162,11 @@ async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<
         "search-mcp" => return connectors::search_mcp(app, data).await,
         "add-mcp" => return connectors::add_mcp(app, user, data).await,
         "add-anything-mcp" => return connectors::add_anything_mcp(app, user, data).await,
+        "docblock-oauth" => return connectors::docblock_oauth(app, user, data).await,
+        "docblock-workspaces" => return connectors::docblock_workspaces(app, user, data).await,
+        "docblock-shares" => return connectors::docblock_shares(app, user, data).await,
+        "revoke-docblock-share" => connectors::revoke_docblock_share(app, user, data).await?,
+        "approve-docblock-share" => connectors::approve_docblock_share(app, user, data).await?,
         "mcp-tools" => return connectors::list_tools(app, user, data).await,
         "mcp-oauth" => return connectors::oauth_start(app, user, data).await,
         "mcp-token" => connectors::save_token(app, user, data).await?,
@@ -144,11 +176,22 @@ async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<
 
         "select-agent" => bail!("Message your Chief in Telegram. It can delegate to saved agents."),
         "select-task" => tasks::select_task(app, user, data).await?,
+        "search-tasks" => return task_views::search(app, user, data).await,
+        "stop-task" => task_views::stop(app, user, data).await?,
+        "edit-email-draft" => return mail::edit_draft(app, user, data).await,
         "get-form" => return tasks::get_form(app, user, data).await,
         "submit-form" => tasks::submit_form(app, user, data).await?,
         "answer-form" => tasks::answer_form(app, user, data).await?,
         "time-zone" => tasks::set_time_zone(app, user, data).await?,
         "cancel-schedule" => tasks::cancel_schedule(app, user, data).await?,
+        "schedule-details" => return tasks::schedule_details(app, user, data).await,
+        "create-routine" => tasks::create_routine(app, user, data).await?,
+        "edit-schedule" => tasks::edit_schedule(app, user, data).await?,
+        "pause-schedule" | "resume-schedule" => {
+            tasks::pause_schedule(app, user, data, action == "pause-schedule").await?
+        }
+        "run-schedule" => return tasks::run_schedule(app, user, data).await,
+        "schedule-history" => return tasks::schedule_history(app, user, data).await,
         "approve" | "deny" => tasks::respond(app, user, data, action == "approve").await?,
         "always-approve-mcp" => tasks::always_approve_mcp(app, user, data).await?,
         _ => bail!("unknown Mini App action"),

@@ -1,4 +1,4 @@
-use super::{app_with_model, fixture, message, pending_id};
+use super::{app_with_model, fixture, message, pending_id, signed_mini_init};
 use crate::{
     App,
     model::{ModelProvider, TextDelta, ToolDefinition},
@@ -163,4 +163,61 @@ async fn interrupted_smtp_approval_cannot_send_again_after_restart() {
         .unwrap();
     assert_eq!(state, "uncertain");
     assert!(store::claim(&app.db).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn editing_a_draft_requires_its_owner_and_a_fresh_approval_for_exact_mail() {
+    let (app, task, _, old) = prepare().await;
+    let app = Arc::new(app);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/api/mini", listener.local_addr().unwrap());
+    let router = crate::web::router(app.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let client = reqwest::Client::new();
+    let draft = json!({"to":["updated@example.net"],"subject":"An edited subject","body":"New draft text.\r\nSecond line."});
+    let edit = |user| {
+        client.post(&endpoint).header("origin", &app.origin).json(&json!({
+        "init":signed_mini_init(&app, user),"action":"edit-email-draft","data":{"id":old,"draft":draft}
+    })).send()
+    };
+    assert_eq!(edit(2).await.unwrap().status(), 400);
+    let result: Value = edit(1)
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let next = result["id"].as_str().unwrap();
+    assert_ne!(next, old);
+    assert!(
+        store::respond_email(&app.db, "1", &old, true)
+            .await
+            .is_err()
+    );
+    assert!(
+        store::respond_email(&app.db, "2", next, true)
+            .await
+            .is_err()
+    );
+    assert!(store::claim(&app.db).await.unwrap().is_none());
+    store::respond_email(&app.db, "1", next, true)
+        .await
+        .unwrap();
+    let resumed = store::claim(&app.db).await.unwrap().unwrap();
+    assert_eq!(resumed.id, task.id);
+    let approved = store::claim_approval(&app.db, &resumed)
+        .await
+        .unwrap()
+        .unwrap();
+    let formatted =
+        String::from_utf8(runtime::smtp_approved_message(&app.vault, "1", &approved).unwrap())
+            .unwrap();
+    assert!(formatted.contains("From: sender@example.com\r\n"));
+    assert!(formatted.contains("To: updated@example.net\r\n"));
+    assert!(formatted.contains("Subject: An edited subject\r\n"));
+    assert!(formatted.contains("\r\n\r\nNew draft text.\r\nSecond line."));
+    assert!(!formatted.contains(BODY) && !formatted.contains(RECIPIENT));
+    server.abort();
 }

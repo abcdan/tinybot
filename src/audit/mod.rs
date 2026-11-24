@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use sqlx::{FromRow, Sqlite, SqlitePool, Transaction};
 use std::{future::Future, time::Instant};
 
-const RETENTION: i64 = 7 * 24 * 60 * 60;
+pub(crate) const RETENTION: i64 = 7 * 24 * 60 * 60;
 const SESSION_PAGE: usize = 20;
 const ENTRY_PAGE: usize = 100;
 

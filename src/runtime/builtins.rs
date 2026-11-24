@@ -12,6 +12,7 @@ pub(super) enum Builtin {
     Delegate,
     Discover,
     Connect,
+    ConnectDocblock,
     ListMcp,
     CallMcp,
     Browse,
@@ -22,6 +23,9 @@ pub(super) enum Builtin {
     Schedule,
     ListSchedules,
     CancelSchedule,
+    SaveRoutine,
+    RunRoutine,
+    RecordRoutineStep,
     Files,
     Python,
     SendReply,
@@ -37,6 +41,7 @@ pub fn tools() -> Vec<Box<dyn Tool>> {
         Builtin::Delegate,
         Builtin::Discover,
         Builtin::Connect,
+        Builtin::ConnectDocblock,
         Builtin::ListMcp,
         Builtin::CallMcp,
         Builtin::Browse,
@@ -47,6 +52,9 @@ pub fn tools() -> Vec<Box<dyn Tool>> {
         Builtin::Schedule,
         Builtin::ListSchedules,
         Builtin::CancelSchedule,
+        Builtin::SaveRoutine,
+        Builtin::RunRoutine,
+        Builtin::RecordRoutineStep,
         Builtin::Files,
         Builtin::Python,
         Builtin::SendReply,
@@ -68,6 +76,7 @@ impl Tool for Builtin {
             Self::Delegate => "delegate",
             Self::Discover => "discover_mcp",
             Self::Connect => "connect_mcp",
+            Self::ConnectDocblock => "connect_docblock",
             Self::ListMcp => "list_mcp_tools",
             Self::CallMcp => "call_mcp",
             Self::Browse => "browse",
@@ -78,6 +87,9 @@ impl Tool for Builtin {
             Self::Schedule => "schedule",
             Self::ListSchedules => "list_schedules",
             Self::CancelSchedule => "cancel_schedule",
+            Self::SaveRoutine => "save_routine",
+            Self::RunRoutine => "run_routine",
+            Self::RecordRoutineStep => "record_routine_step",
             Self::Files => "task_files",
             Self::Python => "python",
             Self::SendReply => "send_reply",
@@ -101,6 +113,9 @@ impl Tool for Builtin {
             Self::Discover => "Find official remote MCP endpoints. Args: name.",
             Self::Connect => {
                 "Prepare a discovered connector after review. Args: name, endpoint, transport (auto, streamable-http, sse or stdio)."
+            }
+            Self::ConnectDocblock => {
+                "Open Docblock sign-in when the user requests Docblock and no usable connection exists. Args: optional write=true when direct write access is needed."
             }
             Self::ListMcp => {
                 "Get available MCP tool names and schemas. Args: connector, optional search."
@@ -127,6 +142,15 @@ impl Tool for Builtin {
             Self::ListSchedules => "List the user's scheduled reminders and tasks. Args: {}.",
             Self::CancelSchedule => {
                 "Cancel a requested upcoming schedule. Args: id from list_schedules."
+            }
+            Self::SaveRoutine => {
+                "On explicit request, propose a reusable routine for review. Args: title, input (the overall goal), ordered steps (instruction and optional owned helper agent ID), and optional at or cron. Omit timing for a manual routine."
+            }
+            Self::RunRoutine => {
+                "Queue a saved routine now on the user's explicit request. Args: id and revision from list_schedules."
+            }
+            Self::RecordRoutineStep => {
+                "Finish the current routine step. Pass its zero-based index (the number of recorded results). For a Chief step, first do the work, then pass the result. For a helper step, omit result so the runtime can dispatch the saved helper."
             }
             Self::Files => "List or read task files. Args: optional name for reading a file.",
             Self::Python => {
@@ -164,6 +188,7 @@ impl Tool for Builtin {
                 json!({"name":text,"endpoint":text,"transport":{"type":"string","enum":["auto","streamable-http","sse","stdio"]}}),
                 &["name", "endpoint"],
             ),
+            Self::ConnectDocblock => (json!({"write":{"type":"boolean"}}), &[]),
             Self::ListMcp => (json!({"connector":text,"search":text}), &["connector"]),
             Self::CallMcp => (
                 json!({"connector":text,"tool":text,"arguments":{"type":"object"}}),
@@ -198,6 +223,24 @@ impl Tool for Builtin {
             ),
             Self::ListSchedules => (json!({}), &[]),
             Self::CancelSchedule => (json!({"id":text}), &["id"]),
+            Self::SaveRoutine => (
+                json!({
+                    "title":text,"input":text,"at":text,"cron":text,
+                    "steps":{"type":"array","minItems":1,"maxItems":6,"items":{
+                        "type":"object","properties":{"instruction":{"type":"string","maxLength":600},"agent":text},
+                        "required":["instruction"],"additionalProperties":false
+                    }}
+                }),
+                &["title", "input", "steps"],
+            ),
+            Self::RunRoutine => (
+                json!({"id":text,"revision":{"type":"integer","minimum":0}}),
+                &["id", "revision"],
+            ),
+            Self::RecordRoutineStep => (
+                json!({"index":{"type":"integer","minimum":0,"maximum":5},"result":{"type":"string","maxLength":1200}}),
+                &["index"],
+            ),
             Self::Files => (json!({"name":text}), &[]),
             Self::Python => (json!({"code":text}), &["code"]),
             Self::SendReply => (
@@ -255,6 +298,13 @@ impl Tool for Builtin {
                 destination = candidate.endpoint()?;
                 Risk::Write
             }
+            Self::ConnectDocblock => {
+                ensure!(
+                    ctx.owner && ctx.task.agent.is_none() && ctx.parent_task.is_none(),
+                    "use your Chief to sign in to Docblock"
+                );
+                Risk::Local
+            }
             Self::ListMcp | Self::CallMcp => {
                 let connector = ctx.connector(args)?;
                 destination = net::https(&connector.endpoint).map_or_else(
@@ -275,6 +325,23 @@ impl Tool for Builtin {
                         "MCP arguments must be an object"
                     );
                     detail = format!("MCP tool {tool}");
+                    if mcp::docblock::is_endpoint(&connector.endpoint)
+                        && mcp::docblock::reviewed_write(tool)
+                    {
+                        ensure!(
+                            ctx.owner && ctx.task.agent.is_none() && ctx.parent_task.is_none(),
+                            "use your Chief to change a Docblock note"
+                        );
+                        if connector.auth == "oauth" {
+                            let access = ctx.app.mcp.docblock_access(connector);
+                            ensure!(
+                                access == Some("write")
+                                    || (tool != "create_share" && access == Some("propose")),
+                                "Docblock direct write access is missing. Explain the current access and offer Docblock sign-in in Connections."
+                            );
+                        }
+                        mcp::docblock::review(tool, &args["arguments"])?;
+                    }
                     if !ctx.owner {
                         let agent = ctx.task.agent.as_deref().context("agent required")?;
                         ensure!(
@@ -298,12 +365,30 @@ impl Tool for Builtin {
                     }
                 }
             }
-            Self::Schedule | Self::ListSchedules | Self::CancelSchedule => {
+            Self::Schedule
+            | Self::ListSchedules
+            | Self::CancelSchedule
+            | Self::SaveRoutine
+            | Self::RunRoutine => {
                 ensure!(
                     ctx.owner && ctx.task.agent.is_none(),
                     "use your personal Chief to manage schedules"
                 );
-                if matches!(self, Self::Schedule) {
+                if matches!(self, Self::SaveRoutine) {
+                    ensure!(
+                        args.to_string().len() <= 2800,
+                        "shorten the routine so its entire plan fits the review"
+                    );
+                    let _: schedules::RoutineRequest = serde_json::from_value(args.clone())?;
+                    detail = "save a routine".into();
+                    Risk::Write
+                } else if matches!(self, Self::RunRoutine) {
+                    string(args, "id", 64)?;
+                    args["revision"]
+                        .as_u64()
+                        .context("invalid routine revision")?;
+                    Risk::Local
+                } else if matches!(self, Self::Schedule) {
                     let request: schedules::Request = serde_json::from_value(args.clone())?;
                     schedules::validate(
                         &request,
@@ -318,6 +403,30 @@ impl Tool for Builtin {
                 } else {
                     Risk::Local
                 }
+            }
+            Self::RecordRoutineStep => {
+                ensure!(ctx.owner && ctx.task.agent.is_none(), "routine unavailable");
+                let progress = schedules::progress(&ctx.app.db, ctx.task)
+                    .await?
+                    .context("routine unavailable")?;
+                let step = progress.current.context("all routine steps are complete")?;
+                ensure!(
+                    args["index"].as_u64() == Some(progress.results.len() as u64),
+                    "finish the current routine step first"
+                );
+                if step.agent.is_none() {
+                    string(args, "result", 1200)?;
+                }
+                Risk::Local
+            }
+            Self::SendReply | Self::SendCard => {
+                ensure!(
+                    schedules::progress(&ctx.app.db, ctx.task)
+                        .await?
+                        .is_none_or(|progress| progress.current.is_none()),
+                    "complete the remaining routine steps before sending the final reply"
+                );
+                Risk::Local
             }
             Self::AgentSpec => {
                 ensure!(
