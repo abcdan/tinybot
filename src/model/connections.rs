@@ -2,6 +2,7 @@ mod backup;
 mod catalog;
 mod onboarding;
 mod server_tools;
+mod settings;
 #[cfg(test)]
 mod tests;
 
@@ -12,8 +13,10 @@ pub(crate) use backup::BackupModel;
 pub use catalog::OpenRouterModel;
 use catalog::{openrouter_catalog, valid_model_id, verify_key};
 pub(crate) use onboarding::OnboardingError;
+pub(crate) use onboarding::display_label;
 use serde::Serialize;
-use sqlx::{Sqlite, Transaction};
+pub(crate) use settings::{ModelPreferences, ModelSelection};
+use sqlx::SqliteConnection;
 
 #[derive(Serialize)]
 pub struct ModelConnections {
@@ -68,17 +71,21 @@ impl Models {
         })
     }
 
+    async fn openrouter_material(&self, user: &str) -> Result<(Option<String>, Option<String>)> {
+        Ok(sqlx::query_as(
+            "SELECT openrouter_key, CASE WHEN provider='openrouter' THEN credential END
+             FROM users WHERE id=?",
+        )
+        .bind(user)
+        .fetch_one(&self.db)
+        .await?)
+    }
+
     pub(super) async fn user_openrouter_key(&self, user: &str) -> Result<Option<UserKey>> {
         // The Chief and Mercury can load the same legacy key concurrently.
         // The CAS loser reads the winner's new ciphertext rather than aborting the task.
         for _ in 0..2 {
-            let (stored, legacy): (Option<String>, Option<String>) = sqlx::query_as(
-                "SELECT openrouter_key, CASE WHEN provider='openrouter' THEN credential END
-                 FROM users WHERE id=?",
-            )
-            .bind(user)
-            .fetch_one(&self.db)
-            .await?;
+            let (stored, legacy) = self.openrouter_material(user).await?;
             let binding = format!("openrouter:{user}");
             if legacy.is_none()
                 && let Some(encrypted) = &stored
@@ -264,10 +271,10 @@ impl Models {
     }
 }
 
-async fn queue_setup_tasks(tx: &mut Transaction<'_, Sqlite>, user: &str) -> Result<()> {
+async fn queue_setup_tasks(db: &mut SqliteConnection, user: &str) -> Result<()> {
     sqlx::query("UPDATE tasks SET state='queued' WHERE user=? AND state='setup'")
         .bind(user)
-        .execute(&mut **tx)
+        .execute(db)
         .await?;
     Ok(())
 }

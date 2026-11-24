@@ -11,6 +11,7 @@ mod proxy;
 mod runtime;
 mod schedules;
 mod security;
+mod settings;
 mod siwc;
 mod store;
 mod web;

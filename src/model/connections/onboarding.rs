@@ -118,7 +118,7 @@ impl Models {
     }
 }
 
-fn display_label(input: &str) -> Option<&str> {
+pub(crate) fn display_label(input: &str) -> Option<&str> {
     let label = input.trim();
     (!label.is_empty()
         && input.len() <= 256
