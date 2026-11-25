@@ -122,6 +122,39 @@ pub(super) async fn preview_routine(app: &App, user: &str, data: &Value) -> Resu
     Ok(json!({"task":task}))
 }
 
+pub(super) async fn schedule_webhook(app: &App, user: &str, data: &Value) -> Result<Value> {
+    let hook = schedules::webhooks::status(&app.db, user, text(data, "id", 64)?).await?;
+    Ok(
+        json!({"webhook":hook.map(|hook| json!({"id":hook.id,"enabled":hook.enabled,
+        "url":format!("{}/hooks/routine/{}",app.origin,hook.id)}))}),
+    )
+}
+
+pub(super) async fn enable_schedule_webhook(app: &App, user: &str, data: &Value) -> Result<Value> {
+    let hook = schedules::webhooks::install(
+        &app.db,
+        &app.vault,
+        user,
+        text(data, "id", 64)?,
+        revision(data)?,
+        now(),
+    )
+    .await?;
+    Ok(
+        json!({"id":hook.id,"url":format!("{}/hooks/routine/{}",app.origin, hook.id),"secret":hook.secret}),
+    )
+}
+
+pub(super) async fn revoke_schedule_webhook(app: &App, user: &str, data: &Value) -> Result<()> {
+    schedules::webhooks::revoke(
+        &app.db,
+        user,
+        text(data, "id", 64)?,
+        text(data, "hook", 36)?,
+    )
+    .await
+}
+
 fn run_request(data: &Value) -> Result<&str> {
     let request = text(data, "request_id", 36)?;
     ensure!(

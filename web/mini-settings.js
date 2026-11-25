@@ -109,7 +109,10 @@ function scheduleCard(state, schedule) {
             const draft = await api('schedule-details', {id});
             return routineForm(state, draft, true);
         }), schedulePanel('Timing policy', async () => schedulePolicy(schedule)));
-        if (schedule.kind !== 'reminder') item.append(schedulePanel('Dry run', async () => previewForm(schedule)));
+        if (schedule.kind !== 'reminder') {
+            item.append(schedulePanel('Dry run', async () => previewForm(schedule)));
+            if (active || schedule.state === 'manual') item.append(schedulePanel('Webhook', () => routineWebhook(schedule)));
+        }
     } else if (controls.childElementCount) item.append(controls);
     item.append(schedulePanel('Run history', async () => {
         const {runs, occurrences = []} = await api('schedule-history', {id});
@@ -134,7 +137,7 @@ function scheduleCard(state, schedule) {
             history.append(entry);
         }
         for (const run of runs.filter(run => !seen.has(run.task))) {
-            const type = {manual: 'Manual', schedule: 'Scheduled'};
+            const type = {manual: 'Manual', schedule: 'Scheduled', webhook: 'Webhook'};
             const details = [
                 scheduleTime(run.started_at ?? run.updated, schedule.time_zone),
                 run.preview ? 'Dry run' : type[run.trigger],
@@ -147,6 +150,26 @@ function scheduleCard(state, schedule) {
         return history;
     }));
     return item;
+}
+
+async function routineWebhook(schedule) {
+    const {webhook} = await api('schedule-webhook', {id: schedule.id});
+    const panel = node('div');
+    if (webhook) {
+        panel.append(node('p', webhook.enabled ? 'Webhook enabled.' : 'Routine changed. Enable a fresh webhook.'));
+        if (webhook.enabled) panel.append(node('code', webhook.url));
+        panel.append(row(action('Revoke webhook', 'revoke-schedule-webhook', {id:schedule.id, hook:webhook.id}, 'Webhook revoked.', true)));
+    }
+    panel.append(row(button(webhook?.enabled ? 'Rotate signing key' : 'Enable webhook', async () => {
+        const hook = await api('enable-schedule-webhook', {id:schedule.id, revision:schedule.revision});
+        panel.replaceChildren(
+            node('p', 'Endpoint'), node('code', hook.url),
+            node('p', 'Signing key'), node('code', hook.secret),
+            node('p', 'Save the signing key now. It is shown once.', 'meta'),
+            row(action('Revoke webhook', 'revoke-schedule-webhook', {id:schedule.id, hook:hook.id}, 'Webhook revoked.', true)),
+        );
+    })));
+    return panel;
 }
 
 function previewForm(schedule) {
