@@ -73,6 +73,8 @@ pub(super) async fn mini(
                 ApiError(StatusCode::NOT_FOUND, "This audit session is no longer available.")
             } else if action == "task-detail" {
                 ApiError(StatusCode::NOT_FOUND, "This task is no longer available.")
+            } else if action == "start-new-task" {
+                ApiError(StatusCode::CONFLICT, "Your Telegram task changed. Refresh to see which task is selected.")
             } else if action == "download-task-file" {
                 ApiError(StatusCode::NOT_FOUND, "This task file is no longer available.")
             } else if error.downcast_ref::<crate::settings::Stale>().is_some() {
@@ -148,8 +150,6 @@ async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<
         "save-agent" => agents::save_agent(app, user, data).await?,
         "invite-agent" => return sharing::invite_agent(app, user, data).await,
         "list-invites" => return invitations::list(app, user).await,
-        "my-usage" => return invitations::my_usage(app, user).await,
-        "save-usage-alert" => invitations::save_usage_alert(app, user, data).await?,
         "create-invite" => return invitations::create(app, user).await,
         "revoke-invite" => invitations::revoke(app, user, data).await?,
         "suspend-guest" => invitations::suspend(app, user, data, true).await?,
@@ -187,6 +187,7 @@ async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<
 
         "select-agent" => bail!("Message your Chief in Telegram. It can delegate to saved agents."),
         "select-task" => task_views::select(app, user, data).await?,
+        "start-new-task" => task_views::start_new(app, user, data).await?,
         "search-tasks" => return task_views::search(app, user, data).await,
         "task-detail" => return task_views::detail(app, user, data).await,
         "download-task-file" => return task_views::download(app, user, data).await,
@@ -210,9 +211,6 @@ async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<
         }
         "run-schedule" => return tasks::run_schedule(app, user, data).await,
         "preview-routine" => return tasks::preview_routine(app, user, data).await,
-        "schedule-webhook" => return tasks::schedule_webhook(app, user, data).await,
-        "enable-schedule-webhook" => return tasks::enable_schedule_webhook(app, user, data).await,
-        "revoke-schedule-webhook" => tasks::revoke_schedule_webhook(app, user, data).await?,
         "schedule-history" => return tasks::schedule_history(app, user, data).await,
         "approve" | "deny" => tasks::respond(app, user, data, action == "approve").await?,
         "always-approve-mcp" => tasks::always_approve_mcp(app, user, data).await?,

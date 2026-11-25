@@ -73,6 +73,15 @@ pub(super) async fn select(app: &App, user: &str, data: &Value) -> Result<()> {
     Ok(())
 }
 
+pub(super) async fn start_new(app: &App, user: &str, data: &Value) -> Result<()> {
+    let (id, revision) = task_revision(data)?;
+    ensure!(
+        task_views::start_new(&app.db, user, id, revision).await?,
+        "The selected Telegram task changed. Refresh to check its status."
+    );
+    Ok(())
+}
+
 pub(super) async fn stop(app: &App, user: &str, data: &Value) -> Result<()> {
     let (id, revision) = task_revision(data)?;
     ensure!(

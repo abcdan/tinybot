@@ -1,4 +1,4 @@
-use super::{Pending, ReplyContext, Task, checkpoints, queue, requests};
+use super::{Pending, ReplyContext, Task, queue, requests};
 use crate::{
     audit,
     runtime::confirmed_step,
@@ -14,7 +14,9 @@ const VISIBLE: &str = "t.user=? AND t.chief_chat=1 AND t.state<>'revoked'
       WHERE p.id=t.shared_memory_pair AND (p.owner=t.user OR p.guest=t.user)))
     AND (t.agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=t.agent
       AND (a.owner=t.user OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=t.user))))";
-const FIELDS: &str = "t.id,t.title,t.state,t.revision,t.updated,t.agent";
+const FIELDS: &str = "t.id,t.title,t.state,t.revision,t.updated,t.created_at,t.agent,
+    (SELECT substr(e.body,1,160) FROM events e WHERE e.task=t.id AND e.role='assistant'
+     AND trim(e.body)<>'' ORDER BY e.id DESC LIMIT 1) AS recent_reply";
 
 pub(crate) fn completable(state: &str) -> bool {
     matches!(
@@ -23,14 +25,47 @@ pub(crate) fn completable(state: &str) -> bool {
     )
 }
 
+pub(crate) async fn start_new(
+    db: &SqlitePool,
+    user: &str,
+    task: &str,
+    revision: i64,
+) -> Result<bool> {
+    Ok(sqlx::query(&format!(
+        "UPDATE users SET active_task=NULL WHERE id=? AND active_task=? AND EXISTS(
+         SELECT 1 FROM tasks t WHERE {VISIBLE} AND t.id=users.active_task
+         AND t.revision=? AND t.state NOT IN ('cancelled','completed'))"
+    ))
+    .bind(user)
+    .bind(task)
+    .bind(user)
+    .bind(revision)
+    .execute(db)
+    .await?
+    .rows_affected()
+        == 1)
+}
+
+pub(crate) async fn telegram_task(db: &SqlitePool, user: &str) -> Result<Option<TaskView>> {
+    Ok(sqlx::query_as(&format!(
+        "SELECT {FIELDS} FROM tasks t JOIN users selected ON selected.active_task=t.id
+         WHERE {VISIBLE} AND selected.id=t.user AND t.state NOT IN ('cancelled','completed')"
+    ))
+    .bind(user)
+    .fetch_optional(db)
+    .await?)
+}
+
 #[derive(sqlx::FromRow, Serialize)]
 pub(crate) struct TaskView {
-    id: String,
+    pub(crate) id: String,
     title: String,
     state: String,
     revision: i64,
     updated: i64,
+    created_at: Option<i64>,
     agent: Option<String>,
+    recent_reply: Option<String>,
 }
 
 #[derive(sqlx::FromRow, Serialize)]
@@ -56,7 +91,6 @@ pub(crate) struct TaskDetail {
     last_confirmed: Option<&'static str>,
     failure: Option<String>,
     executing: bool,
-    plan: Vec<checkpoints::Step>,
     #[serde(skip)]
     pub(crate) requests: Vec<Pending>,
 }
@@ -138,7 +172,6 @@ pub(crate) async fn detail(db: &SqlitePool, user: &str, id: &str) -> Result<Opti
         None
     };
     let requests = requests::list_requests_in(&mut *tx, user, Some(id)).await?;
-    let plan = checkpoints::plan(&mut *tx, id, task.revision, task.state == "completed").await?;
     tx.commit().await?;
     Ok(Some(TaskDetail {
         task,
@@ -147,7 +180,6 @@ pub(crate) async fn detail(db: &SqlitePool, user: &str, id: &str) -> Result<Opti
         last_confirmed,
         failure,
         executing,
-        plan,
         requests,
     }))
 }
@@ -292,27 +324,11 @@ async fn queue_status(
     };
     let controls = if executing { "executing" } else { &task.state };
     let button = format!("task/{}/{}/{controls}", task.id, task.revision);
-    let mut body = format!("{}\n{state}", task.title);
-    for step in checkpoints::plan(
-        &mut **tx,
-        &task.id,
-        task.revision,
-        task.state == "completed",
-    )
-    .await?
-    {
-        let mark = if step.completed_at.is_some() {
-            "✓"
-        } else {
-            "○"
-        };
-        body.push_str(&format!("\n{mark} {}", step.title));
-    }
     sqlx::query("INSERT INTO outbox(user,task,agent,body,button) VALUES(?,?,?,?,?)")
         .bind(&task.user)
         .bind(&task.id)
         .bind(&task.agent)
-        .bind(body)
+        .bind(format!("{}\n{state}", task.title))
         .bind(button)
         .execute(&mut **tx)
         .await?;
