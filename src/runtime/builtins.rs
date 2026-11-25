@@ -137,7 +137,7 @@ impl Tool for Builtin {
                 "Propose an editable saved agent in the Mini App. Args: name, instructions."
             }
             Self::Schedule => {
-                "Schedule the Chief to send a reminder or carry out a task when due. Args: kind (reminder or task), title, input (a self-contained prompt for the run), exactly one of at (RFC 3339 with UTC offset) or cron (5 fields in the user's timezone)."
+                "Schedule a reminder or a task. Args: kind (reminder or task), title, input (exact text to send for a reminder, a self-contained instruction for a task), exactly one of at (RFC 3339 with UTC offset) or cron (5 fields in the user's timezone)."
             }
             Self::ListSchedules => "List the user's scheduled reminders and tasks. Args: {}.",
             Self::CancelSchedule => {
