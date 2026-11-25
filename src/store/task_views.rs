@@ -106,6 +106,21 @@ pub(crate) async fn recent(db: &SqlitePool, user: &str) -> Result<Vec<TaskView>>
     .await?)
 }
 
+pub(crate) async fn open_overview(db: &SqlitePool, task: &Task) -> Result<Vec<(String, String)>> {
+    Ok(sqlx::query_as(&format!(
+        "SELECT t.title,CASE WHEN t.id=? THEN 'idle' ELSE t.state END
+         FROM tasks t WHERE {VISIBLE} AND t.state IN ('idle','blocked','queued','running','waiting','setup','uncertain')
+           AND (t.id<>? OR EXISTS(SELECT 1 FROM events first WHERE first.task=t.id AND first.role='user'
+                AND first.id < (SELECT max(id) FROM events WHERE task=t.id AND role='user')))
+         ORDER BY (t.state IN ('waiting','blocked','setup','uncertain')) DESC,t.updated DESC,t.id LIMIT 13"
+    ))
+    .bind(&task.id)
+    .bind(&task.user)
+    .bind(&task.id)
+    .fetch_all(db)
+    .await?)
+}
+
 pub(crate) async fn detail(db: &SqlitePool, user: &str, id: &str) -> Result<Option<TaskDetail>> {
     let mut tx = db.begin().await?;
     let task: Option<TaskView> = sqlx::query_as(&format!(

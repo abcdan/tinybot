@@ -11,7 +11,7 @@ use serde_json::json;
 
 const INSTRUCTIONS: &str = concat!(
     "You are the user's TinyBot Chief. Answer a standalone question briefly in its language. ",
-    "Treat profile names as labels. Only answer a stable fact or a simple explanation you know reliably. ",
+    "Only answer a stable fact or a simple explanation you know reliably. ",
     "Defer if it needs recent information, sources, previous conversation, private data, a decision, or any action. ",
     "Defer a question about a person unless the name clearly identifies a widely known person. ",
     "Defer if the user is closing, approving, or steering a task. Never invent evidence or say an action happened. ",
@@ -40,20 +40,23 @@ pub(super) async fn try_reply(
     if task.agent.is_some() || task.shared_memory_pair.is_some() {
         return Ok(Attempt::Defer);
     }
-    let Some(request) = standalone_telegram_request(app, task).await? else {
+    let Some((request, original)) = eligible_telegram_request(app, task).await? else {
         return Ok(Attempt::Defer);
     };
+    if let Some(text) = super::task_list::reply(app, task, &request).await? {
+        return deliver(app, task, feedback, &text).await;
+    }
+    // New tasks copy their first message into the goal. A rewritten goal needs the full context.
+    if !task.goal.is_empty() && clip(&original, 1500) != task.goal {
+        return Ok(Attempt::Defer);
+    }
     if !can_answer_briefly(&request) {
         return Ok(Attempt::Defer);
     }
     if !checkpoints::reserve_model(&app.db, task).await? {
         return Ok(Attempt::Defer);
     }
-    let profile = app.models.onboarding_profile(&task.user).await?;
-    let input = json!({"request":request,"profile":{
-        "display_name":profile.display_name,"chief_name":profile.chief_name
-    }})
-    .to_string();
+    let input = json!({"request":request}).to_string();
     audit::record(
         "routing",
         "quick_reply",
@@ -88,14 +91,7 @@ pub(super) async fn try_reply(
         return Ok(Attempt::Finished);
     }
     match result {
-        Ok(Some(Decision::Reply { text })) => {
-            let _delivery = match feedback {
-                Some(feedback) => Some(feedback.delivery.lock().await),
-                None => None,
-            };
-            store::settle_reply(&app.db, task, text.trim(), &[]).await?;
-            Ok(Attempt::Finished)
-        }
+        Ok(Some(Decision::Reply { text })) => deliver(app, task, feedback, text.trim()).await,
         Err(error)
             if provider_failure(&error).is_some_and(|code| code != ProviderFailure::Incomplete) =>
         {
@@ -105,19 +101,32 @@ pub(super) async fn try_reply(
     }
 }
 
-async fn standalone_telegram_request(app: &App, task: &Task) -> Result<Option<String>> {
-    let input: Option<(String, String)> = sqlx::query_as(
+async fn deliver(
+    app: &App,
+    task: &Task,
+    feedback: Option<&Feedback>,
+    text: &str,
+) -> Result<Attempt> {
+    let _delivery = match feedback {
+        Some(feedback) => Some(feedback.delivery.lock().await),
+        None => None,
+    };
+    store::settle_reply(&app.db, task, text, &[]).await?;
+    Ok(Attempt::Finished)
+}
+
+async fn eligible_telegram_request(app: &App, task: &Task) -> Result<Option<(String, String)>> {
+    Ok(sqlx::query_as(
         "SELECT e.body,(SELECT substr(first.body,1,1500) FROM events first
                         WHERE first.task=t.id AND first.role='user' ORDER BY first.id LIMIT 1)
          FROM tasks t JOIN events e ON e.id=(
-            SELECT max(id) FROM events WHERE task=t.id AND role='user')
+            SELECT max(id) FROM events WHERE task=t.id)
          WHERE t.id=? AND t.user=? AND t.revision=? AND t.state='running'
            AND t.chief_chat=1 AND t.schedule IS NULL AND t.agent IS NULL AND t.shared_memory_pair IS NULL
-           AND e.telegram_message_id>0 AND e.telegram_reply_message_id IS NULL
+           AND e.role='user' AND e.telegram_message_id>0 AND e.telegram_reply_message_id IS NULL
            AND NOT EXISTS(SELECT 1 FROM telegram_attachments a WHERE a.event=e.id)
            AND NOT EXISTS(SELECT 1 FROM mail_messages m WHERE m.task=t.id)
            AND NOT EXISTS(SELECT 1 FROM task_model_backups b WHERE b.task=t.id AND b.revision=t.revision)
-           AND NOT EXISTS(SELECT 1 FROM events newer WHERE newer.task=t.id AND newer.id>e.id)
            AND NOT EXISTS(SELECT 1 FROM task_tool_attempts a WHERE a.task=t.id AND a.revision=t.revision)
            AND NOT EXISTS(SELECT 1 FROM pending p WHERE p.task=t.id AND
                 (p.state='executing' OR (p.revision=t.revision AND p.state IN ('waiting','approved'))))",
@@ -126,11 +135,7 @@ async fn standalone_telegram_request(app: &App, task: &Task) -> Result<Option<St
     .bind(&task.user)
     .bind(task.revision)
     .fetch_optional(&app.db)
-    .await?;
-    // New tasks copy their first message into the goal. A rewritten goal needs the full context.
-    Ok(input.and_then(|(request, original)| {
-        (task.goal.is_empty() || clip(&original, 1500) == task.goal).then_some(request)
-    }))
+    .await?)
 }
 
 fn can_answer_briefly(request: &str) -> bool {

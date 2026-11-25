@@ -34,7 +34,7 @@ pub struct Schedule {
     pub title: String,
     #[serde(skip)]
     input: String,
-    kind: String,
+    pub(crate) kind: String,
     cron: Option<String>,
     pub time_zone: String,
     pub next_run: Option<i64>,
