@@ -13,12 +13,21 @@ use async_trait::async_trait;
 use eventsource_stream::{EventStreamError, Eventsource};
 use futures::StreamExt;
 use serde_json::{Value, json};
-use std::{borrow::Cow, collections::BTreeMap, time::Duration};
+use std::{borrow::Cow, collections::BTreeMap, sync::LazyLock, time::Duration};
 use tokio::time::{Instant, timeout_at};
 
 const MAX_TOKENS: u64 = 3600;
 const MAX_STREAM_BYTES: usize = 1_000_000;
 const CHAT_COMPLETIONS: &str = "https://openrouter.ai/api/v1/chat/completions";
+
+static OPENROUTER_CLIENT: LazyLock<Result<reqwest::Client, reqwest::Error>> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10))
+        .pool_max_idle_per_host(8)
+        .build()
+});
 
 pub(super) struct OpenRouter {
     pub(super) key: String,
@@ -27,12 +36,14 @@ pub(super) struct OpenRouter {
 
 impl OpenRouter {
     async fn send(&self, request: Value) -> Result<reqwest::Response> {
-        let response = reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(10))
-            .build()?
-            .post(CHAT_COMPLETIONS)
+        self.send_to(CHAT_COMPLETIONS, request).await
+    }
+
+    async fn send_to(&self, endpoint: &str, request: Value) -> Result<reqwest::Response> {
+        let response = OPENROUTER_CLIENT
+            .as_ref()
+            .map_err(|_| ProviderFailure::Temporary)?
+            .post(endpoint)
             .bearer_auth(&self.key)
             .json(&request)
             .send()
@@ -473,6 +484,58 @@ impl StreamTurn {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn sequential_provider_calls_reuse_a_connection_with_request_scoped_keys() {
+        use axum::{
+            Json, Router,
+            extract::ConnectInfo,
+            http::{HeaderMap, header},
+            routing::post,
+        };
+        use std::net::SocketAddr;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/fixture", listener.local_addr().unwrap());
+        let app = Router::new().route(
+            "/fixture",
+            post(
+                |ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap| async move {
+                    Json(json!({
+                        "port":peer.port(),
+                        "authorization":headers[header::AUTHORIZATION].to_str().unwrap()
+                    }))
+                },
+            ),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let mut ports = Vec::new();
+        for key in ["fixture-a", "fixture-b"] {
+            let provider = OpenRouter {
+                key: key.into(),
+                model: "fixture/model".into(),
+            };
+            let reply: Value = provider
+                .send_to(&endpoint, json!({}))
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(reply["authorization"], format!("Bearer {key}"));
+            ports.push(reply["port"].as_u64().unwrap());
+        }
+        assert_eq!(ports[0], ports[1]);
+        server.abort();
+    }
 
     #[test]
     fn classifies_http_and_stream_failures_without_using_provider_text() {
