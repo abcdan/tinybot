@@ -11,6 +11,7 @@ use sqlx::sqlite::SqlitePoolOptions;
 use std::collections::BTreeMap;
 use tokio::sync::Notify;
 
+mod agent_media;
 mod agent_memory;
 mod anything_mcp;
 mod attachments;

@@ -96,6 +96,22 @@ browser traffic through it and disables hosted Web search and Web fetch. A confi
 Brave Search API key uses a separate connection. See [setup](setup.md) for proxy and
 search settings.
 
+## Capture a page or create an image
+
+> Record five seconds of example.org and scroll down as you go.
+>
+> Paint the background blue in this photo.
+
+In private chat, ask for a screenshot of a public page or a silent, 2–10 second
+MP4 recording. Ask for an image from a description, or attach a PNG, JPEG, or WebP
+and describe the edit you want. You can also reply to an earlier upload in the
+same task. Image generation and editing use your connected OpenRouter account.
+Gemini Nano Banana 2 is the default. To switch, open **Settings & forms → Model →
+Image model**.
+
+TinyBot sends the result in Telegram and removes the locally queued media after
+Telegram confirms delivery.
+
 ## Take a voice note or read a file
 
 > I’ve attached the minutes. Pull out decisions and give me three action items.
