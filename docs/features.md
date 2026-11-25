@@ -103,7 +103,10 @@ search settings.
 > Paint the background blue in this photo.
 
 In private chat, ask for a screenshot of a public page or a silent, 2–10 second
-MP4 recording. Ask for an image from a description, or attach a PNG, JPEG, or WebP
+MP4 recording. TinyBot uses the functional-only or reject option when it recognizes a
+cookie dialog. Ask to include the dialog if you want it visible in the capture.
+
+Ask for an image from a description, or attach a PNG, JPEG, or WebP
 and describe the edit you want. You can also reply to an earlier upload in the
 same task. Image generation and editing use your connected OpenRouter account.
 Gemini Nano Banana 2 is the default. To switch, open **Settings & forms → Model →

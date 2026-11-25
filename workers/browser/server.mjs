@@ -1,5 +1,5 @@
 import { InputError, requireInput, publicUrl, describe, populate } from './forms.mjs';
-import { captureTypes, captureViewport, encodeRecording, recordingOptions, recordPage, screenshot } from './capture.mjs';
+import { captureTypes, captureViewport, dismissCookieDialog, encodeRecording, prepareCookieDialog, recordingOptions, recordPage, screenshot } from './capture.mjs';
 import { chmod, mkdtemp, rm, unlink } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -131,7 +131,9 @@ export async function search(page, query) {
 export async function operate(browser, route, data, signal) {
     signal?.throwIfAborted();
     const recording = route === '/record' ? recordingOptions(data) : null;
-    const capture = captureTypes.has(route) ? {url: readableUrl(data?.url), recording} : null;
+    const capture = captureTypes.has(route) ? {
+        url: readableUrl(data?.url), recording, dismissCookieDialog: dismissCookieDialog(data),
+    } : null;
     const directory = recording ? await mkdtemp(join(tmpdir(), 'tinybot-recording-')) : null;
     try {
         const context = await browser.newContext({
@@ -152,7 +154,8 @@ export async function operate(browser, route, data, signal) {
             signal?.removeEventListener('abort', closeOnAbort);
             await context.close();
         }
-        return directory ? await encodeRecording(result, directory, recording, signal) : result;
+        if (!directory) return result;
+        return {...result, bytes: await encodeRecording(result.bytes, directory, recording, signal)};
     } finally {
         if (directory) await rm(directory, {recursive: true, force: true});
     }
@@ -194,10 +197,12 @@ async function operatePage(context, route, data, capture, signal) {
         try { await page.waitForLoadState('load', {timeout: 3000}); }
         catch (error) { if (!(error instanceof errors.TimeoutError)) throw error; }
         if (capture) {
+            const destination = readableUrl(page.url());
+            const cookieDialog = await prepareCookieDialog(page, capture.dismissCookieDialog, signal);
+            requireInput(page.url() === destination.href, 'The page navigated away while checking the cookie dialog.');
+            const bytes = capture.recording ? await recordPage(page, capture.recording, signal) : await screenshot(page);
             readableUrl(page.url());
-            const result = capture.recording ? await recordPage(page, capture.recording, signal) : await screenshot(page);
-            readableUrl(page.url());
-            return result;
+            return {bytes, cookieDialog};
         }
         const content = await page.locator('body').evaluate(body => ({
             title: document.title.slice(0, 200),
@@ -272,8 +277,10 @@ async function serve() {
             const result = await operate(browser, request.url, await readJson(request), signal);
             if (response.destroyed) return;
             if (contentType) {
-                response.writeHead(200, {'Content-Type': contentType, 'Cache-Control': 'no-store', 'Content-Length': result.length});
-                response.end(result);
+                const headers = {'Content-Type': contentType, 'Cache-Control': 'no-store', 'Content-Length': result.bytes.length};
+                if (result.cookieDialog) headers['X-TinyBot-Cookie-Dialog'] = result.cookieDialog;
+                response.writeHead(200, headers);
+                response.end(result.bytes);
             } else {
                 json(200, result);
             }

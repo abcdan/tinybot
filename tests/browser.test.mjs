@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {access} from 'node:fs/promises';
 import {test} from 'node:test';
 import {chromium, errors} from 'playwright';
-import {captureViewport, recordingOptions} from './capture.mjs';
+import {captureViewport, dismissCookieDialog, recordingOptions} from './capture.mjs';
 import {describe,populate,publicUrl} from './forms.mjs';
 import {allowsRead, indexedUrl, operate, readableUrl, search, visit} from './server.mjs';
 
@@ -71,6 +71,9 @@ test('captures allow visual assets but keep browser requests read-only', () => {
         assert.throws(() => recordingOptions({duration_seconds: duration}), /2 to 10 seconds/);
     }
     assert.throws(() => recordingOptions({scroll: 'yes'}), /boolean scroll/);
+    assert.equal(dismissCookieDialog({}), true);
+    assert.equal(dismissCookieDialog({dismiss_cookie_dialog: false}), false);
+    assert.throws(() => dismissCookieDialog({dismiss_cookie_dialog: 'yes'}), /boolean dismiss_cookie_dialog/);
 });
 
 test('captures a PNG and a playable MP4, and deletes recording files on success, error, or cancellation', async () => {
@@ -109,13 +112,14 @@ test('captures a PNG and a playable MP4, and deletes recording files on success,
         },
     };
     try {
-        const image = await operate(fixture, '/screenshot', {url: 'https://fixture.example/'});
+        const {bytes: image, cookieDialog} = await operate(fixture, '/screenshot', {url: 'https://fixture.example/'});
+        assert.equal(cookieDialog, null);
         assert.equal(image.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
         assert.equal(image.readUInt32BE(16), captureViewport.width);
         assert.equal(image.readUInt32BE(20), captureViewport.height);
         assert.deepEqual(directories, []);
 
-        const clip = await operate(fixture, '/record', {url: 'https://fixture.example/', duration_seconds: 2, scroll: true});
+        const {bytes: clip} = await operate(fixture, '/record', {url: 'https://fixture.example/', duration_seconds: 2, scroll: true});
         assert.equal(clip.subarray(4, 8).toString(), 'ftyp');
         assert.ok(clip.includes(Buffer.from('avc1')));
         const movie = clip.indexOf(Buffer.from('moov'));
@@ -128,6 +132,74 @@ test('captures a PNG and a playable MP4, and deletes recording files on success,
 
         await assert.rejects(operate(fixture, '/record', {url: 'https://fixture.example/cancel'}, abort.signal));
         await assert.rejects(access(directories[2]), {code: 'ENOENT'});
+    } finally {
+        await browser.close();
+    }
+});
+
+test('screenshot clicks functional-only in a cookie dialog and can keep the dialog when requested', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    const clicks = [];
+    const button = (label, effect) =>
+        '<button onclick="fetch(\'/choice/' + effect + '\'); this.closest(\'section\').remove()">' + label + '</button>';
+    const functional = button('Functional only', 'functional');
+    const accept = button('Allow all', 'allow-all');
+    const markup = {
+        '/': '<div id="app"><section><h2>Approve submissions</h2>' + button('Reject all', 'unrelated') + '</section>' +
+            '<section style="position:fixed;inset:20px;background:white">' +
+            '<h2>Cookies</h2><p>We use cookies to improve your browsing experience.</p>' + functional + accept + '</section></div>',
+        '/blocked': '<section role="dialog"><h2>Cookies</h2>' + accept + '</section>',
+        '/form': '<section role="dialog"><h2>Cookies</h2>' +
+            '<form action="/choice/form"><button>Reject all</button></form></section>',
+        '/framed': '<iframe src="https://consent.fixture.example/"></iframe>',
+        '/offer': '<section role="dialog"><h2>Special offer</h2><p>Get a cookie with your membership.</p>' +
+            button('No thanks', 'unrelated') + '</section>' +
+            '<footer class="cookie-settings"><button aria-label="Cookie settings">Cookie settings</button></footer>',
+    };
+    const fixture = {
+        async newContext(settings) {
+            const context = await browser.newContext(settings);
+            const newPage = context.newPage.bind(context);
+            context.newPage = async () => {
+                const page = await newPage();
+                await page.route(url => ['fixture.example', 'consent.fixture.example'].includes(url.hostname), request => {
+                    const url = new URL(request.request().url());
+                    if (url.pathname.startsWith('/choice/')) {
+                        clicks.push(url.pathname);
+                        return request.fulfill({status: 204});
+                    }
+                    return request.fulfill({contentType: 'text/html', body: url.hostname === 'consent.fixture.example'
+                        ? '<section role="dialog" hidden><h2>Cookies</h2>' + button('Alleen noodzakelijke cookies', 'necessary') +
+                            '</section><script>setTimeout(()=>document.querySelector("section").hidden=false, 150)</script>'
+                        : markup[url.pathname]});
+                });
+                return page;
+            };
+            return context;
+        },
+    };
+    try {
+        const kept = await operate(fixture, '/screenshot', {url: 'https://fixture.example/', dismiss_cookie_dialog: false});
+        assert.equal(kept.cookieDialog, 'visible');
+        assert.deepEqual(clicks, []);
+
+        const dismissed = await operate(fixture, '/screenshot', {url: 'https://fixture.example/'});
+        assert.equal(dismissed.cookieDialog, 'dismissed');
+        assert.notDeepEqual(dismissed.bytes, kept.bytes);
+        assert.deepEqual(clicks, ['/choice/functional']);
+
+        const fromIframe = await operate(fixture, '/record', {url: 'https://fixture.example/framed', duration_seconds: 2});
+        assert.equal(fromIframe.cookieDialog, 'dismissed');
+        assert.equal(fromIframe.bytes.subarray(4, 8).toString(), 'ftyp');
+        assert.deepEqual(clicks, ['/choice/functional', '/choice/necessary']);
+
+        for (const path of ['/blocked', '/form']) {
+            const blocked = await operate(fixture, '/screenshot', {url: 'https://fixture.example' + path});
+            assert.equal(blocked.cookieDialog, 'visible', path);
+        }
+        const offer = await operate(fixture, '/screenshot', {url: 'https://fixture.example/offer'});
+        assert.equal(offer.cookieDialog, null);
+        assert.deepEqual(clicks, ['/choice/functional', '/choice/necessary']);
     } finally {
         await browser.close();
     }
