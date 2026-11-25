@@ -5,10 +5,11 @@ use sqlx::{FromRow, Sqlite, SqlitePool, Transaction};
 
 pub(crate) const WAIT_PREFIX: &str = "ack-generate/";
 pub(crate) const READY_PREFIX: &str = "ack-progress/";
-const DELAY: i64 = 5;
+const DELAY: i64 = 2;
 const LEASE: i64 = 30;
+const FOLLOWUP_DELAY: i64 = 10;
 const EVIDENCE_RECHECK: i64 = 3;
-const EVIDENCE_WINDOW: i64 = 20;
+const EVIDENCE_WINDOW: i64 = 35;
 
 // A progress notice only follows a Telegram message in the user's personal Chief chat.
 const CHAT_SCOPE: &str = "t.chief_chat=1 AND t.agent IS NULL AND t.shared_memory_pair IS NULL
@@ -18,6 +19,14 @@ const CANDIDATE_SCOPE: &str =
 const CANDIDATE_JOIN: &str = "FROM outbox o JOIN tasks t ON t.id=o.task AND t.user=o.user
     JOIN users u ON u.id=t.user
     JOIN events e ON e.id=(SELECT max(id) FROM events WHERE task=t.id AND role='user')";
+const INITIAL: &str = "e.acknowledged=0 AND o.button='ack-generate/' || t.revision";
+const FOLLOWUP: &str = "e.acknowledged=1 AND t.state='running'
+    AND o.button='ack-generate/' || t.revision || '/followup'
+    AND EXISTS(SELECT 1 FROM outbox first JOIN audit_deliveries d ON d.outbox=first.id
+               WHERE first.task=t.id AND first.user=t.user AND first.reply_to_message_id=e.telegram_message_id
+                 AND first.id<o.id AND d.session=t.audit_session_id AND d.kind='progress' AND d.state='sent')
+    AND NOT EXISTS(SELECT 1 FROM events h WHERE h.task=t.id AND h.role='handoff'
+                   AND json_extract(h.body,'$.event')=e.id)";
 
 #[derive(FromRow)]
 pub(crate) struct Generation {
@@ -27,6 +36,7 @@ pub(crate) struct Generation {
     pub revision: i64,
     pub request: String,
     pub queued: bool,
+    pub followup: bool,
     event: i64,
     #[sqlx(default)]
     lease: i64,
@@ -55,7 +65,8 @@ pub(super) async fn schedule(
         // Retarget an unsent notice to the latest input, leaving delivered notices alone.
         sqlx::query(
             "UPDATE outbox SET state='queued',body='',button=?,reply_to_message_id=?,
-             retry_at=CASE WHEN state='queued' AND button LIKE 'ack-generate/%' THEN retry_at ELSE ? END
+             retry_at=CASE WHEN state='queued' AND button LIKE 'ack-generate/%'
+                           AND button NOT LIKE '%/followup' THEN retry_at ELSE ? END
              WHERE id=(SELECT id FROM outbox WHERE task=? AND user=?
                AND state IN ('queued','generating')
                AND (button LIKE 'ack-generate/%' OR button LIKE 'ack-progress/%')
@@ -103,15 +114,16 @@ pub(crate) async fn claim(db: &SqlitePool) -> Result<Option<Generation>> {
          WHERE button LIKE 'ack-generate/%' AND state IN ('queued','generating') AND retry_at<=?
            AND NOT EXISTS(SELECT 1 {CANDIDATE_JOIN}
              WHERE o.id=outbox.id AND {CHAT_SCOPE} AND {CANDIDATE_SCOPE}
-               AND e.acknowledged=0 AND o.button='ack-generate/' || t.revision)"
+               AND (({INITIAL}) OR ({FOLLOWUP})))"
     ))
     .bind(time)
     .execute(&mut *tx)
     .await?;
     let mut generation: Option<Generation> = sqlx::query_as(&format!(
-        "SELECT o.id,t.id AS task,t.user,t.revision,e.body AS request,t.state='queued' AS queued,e.id AS event
+        "SELECT o.id,t.id AS task,t.user,t.revision,e.body AS request,t.state='queued' AS queued,e.id AS event,
+                e.acknowledged=1 AS followup
          {CANDIDATE_JOIN} WHERE {CHAT_SCOPE} AND {CANDIDATE_SCOPE}
-           AND e.acknowledged=0 AND o.button='ack-generate/' || t.revision
+           AND (({INITIAL}) OR ({FOLLOWUP}))
            AND o.state IN ('queued','generating') AND o.retry_at<=?
          ORDER BY o.retry_at,o.id LIMIT 1"
     ))
@@ -139,8 +151,8 @@ pub(crate) async fn retry_for_evidence(db: &SqlitePool, generation: &Generation)
            AND EXISTS(SELECT 1 {CANDIDATE_JOIN}
              JOIN audit_sessions s ON s.id=t.audit_session_id AND s.task=t.id
              WHERE o.id=outbox.id AND {CHAT_SCOPE} AND {CANDIDATE_SCOPE}
-               AND t.state='running' AND t.revision=? AND o.button='ack-generate/' || t.revision
-               AND e.id=? AND e.acknowledged=0 AND s.started_at>=?)"
+               AND t.state='running' AND t.revision=? AND (({INITIAL}) OR ({FOLLOWUP}))
+               AND e.id=? AND s.started_at>=?)"
     ))
     .bind(retry_at)
     .bind(generation.id)
@@ -159,14 +171,16 @@ pub(crate) async fn finish(
     db: &SqlitePool,
     generation: &Generation,
     text: Option<&str>,
+    offer_followup: bool,
 ) -> Result<()> {
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
-    let button = format!("{WAIT_PREFIX}{}", generation.revision);
-    let phase: Option<String> = sqlx::query_scalar(&format!(
-        "SELECT t.state {CANDIDATE_JOIN}
+    let suffix = if generation.followup { "/followup" } else { "" };
+    let button = format!("{WAIT_PREFIX}{}{suffix}", generation.revision);
+    let current: Option<(String, i64)> = sqlx::query_as(&format!(
+        "SELECT t.state,e.telegram_message_id {CANDIDATE_JOIN}
          WHERE {CHAT_SCOPE} AND {CANDIDATE_SCOPE} AND o.id=? AND o.user=? AND o.task=?
            AND o.state='generating' AND o.retry_at=? AND o.button=? AND t.revision=?
-           AND e.id=? AND e.acknowledged=0"
+           AND e.id=? AND (({INITIAL}) OR ({FOLLOWUP}))"
     ))
     .bind(generation.id)
     .bind(&generation.user)
@@ -183,7 +197,7 @@ pub(crate) async fn finish(
         "running"
     };
     let text = text.map(str::trim).filter(|text| !text.is_empty());
-    if let (Some(phase), Some(text)) = (phase.as_deref(), text)
+    if let (Some((phase, message)), Some(text)) = (&current, text)
         && phase == expected
     {
         sqlx::query("UPDATE events SET acknowledged=1 WHERE id=?")
@@ -197,7 +211,25 @@ pub(crate) async fn finish(
             .bind(generation.id)
             .execute(&mut *tx)
             .await?;
-    } else if phase.as_deref() == Some("running") && generation.queued && text.is_some() {
+        if offer_followup && !generation.followup {
+            sqlx::query(
+                "INSERT INTO outbox(user,task,body,button,reply_to_message_id,retry_at)
+                 VALUES(?,?,'',?,?,?)",
+            )
+            .bind(&generation.user)
+            .bind(&generation.task)
+            .bind(format!("{WAIT_PREFIX}{}/followup", generation.revision))
+            .bind(message)
+            .bind(now() + FOLLOWUP_DELAY)
+            .execute(&mut *tx)
+            .await?;
+        }
+    } else if current
+        .as_ref()
+        .is_some_and(|(phase, _)| phase == "running")
+        && generation.queued
+        && text.is_some()
+    {
         // The task left the queue while this message was being written.
         sqlx::query("UPDATE outbox SET state='queued',retry_at=? WHERE id=?")
             .bind(now())
@@ -253,11 +285,12 @@ pub(crate) async fn suppress(db: &SqlitePool, task: &Task) -> Result<()> {
         sqlx::query(
             "UPDATE outbox SET state=CASE WHEN state='sending' THEN state ELSE 'skipped' END,
                  body='',button=NULL WHERE user=? AND task=?
-             AND state IN ('queued','generating','sending') AND button IN (?,?,?)",
+             AND state IN ('queued','generating','sending') AND button IN (?,?,?,?)",
         )
         .bind(&task.user)
         .bind(&task.id)
         .bind(format!("{WAIT_PREFIX}{}", task.revision))
+        .bind(format!("{WAIT_PREFIX}{}/followup", task.revision))
         .bind(format!("{READY_PREFIX}queued/{}", task.revision))
         .bind(format!("{READY_PREFIX}running/{}", task.revision))
         .execute(&mut *tx)
@@ -328,7 +361,7 @@ mod tests {
         let old = claim(&db).await.unwrap().unwrap();
         assert_eq!(old.revision, task.revision);
         message(&db, 21, "Compare one more option.").await;
-        finish(&db, &old, Some("Comparing the original options."))
+        finish(&db, &old, Some("Comparing the original options."), false)
             .await
             .unwrap();
         assert!(store::claim_outbox(&db).await.unwrap().is_none());
@@ -336,7 +369,7 @@ mod tests {
         assert_eq!(current.id, old.id);
         assert_eq!(current.revision, old.revision + 1);
         assert_eq!(current.request, "Compare one more option.");
-        finish(&db, &current, Some("Including the extra option."))
+        finish(&db, &current, Some("Including the extra option."), false)
             .await
             .unwrap();
         let item = store::claim_outbox(&db).await.unwrap().unwrap();
@@ -354,18 +387,67 @@ mod tests {
         let waiting = claim(&db).await.unwrap().unwrap();
         assert!(waiting.queued);
         let task = store::claim(&db).await.unwrap().unwrap();
-        finish(&db, &waiting, Some("I've queued the comparison."))
+        finish(&db, &waiting, Some("I've queued the comparison."), false)
             .await
             .unwrap();
         assert!(store::claim_outbox(&db).await.unwrap().is_none());
         let running = claim(&db).await.unwrap().unwrap();
         assert!(!running.queued);
         suppress(&db, &task).await.unwrap();
-        finish(&db, &running, Some("I'm comparing the options."))
+        finish(&db, &running, Some("I'm comparing the options."), false)
             .await
             .unwrap();
         assert!(store::claim_outbox(&db).await.unwrap().is_none());
         assert!(claim(&db).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn an_initial_notice_can_have_one_confirmed_followup_after_delivery() {
+        for outcome in ["sent", "skipped"] {
+            let db = fixture().await;
+            message(&db, 20, "Compare the opening hours on both websites.").await;
+            let task = store::claim(&db).await.unwrap().unwrap();
+            make_due(&db).await;
+            let first = claim(&db).await.unwrap().unwrap();
+            assert!(!first.followup);
+            finish(&db, &first, Some("I'll compare the opening hours."), true)
+                .await
+                .unwrap();
+            let first_delivery = store::claim_delivery(&db).await.unwrap().unwrap();
+            assert!(ready(&db, &first_delivery).await.unwrap());
+            assert!(claim(&db).await.unwrap().is_none());
+            sqlx::query("UPDATE outbox SET state=? WHERE id=?")
+                .bind(outcome)
+                .bind(first_delivery.id)
+                .execute(&db)
+                .await
+                .unwrap();
+            make_due(&db).await;
+            let next = claim(&db).await.unwrap();
+            if outcome == "sent" {
+                let next = next.unwrap();
+                assert!(next.followup);
+                finish(
+                    &db,
+                    &next,
+                    Some("I found the listed hours on one site."),
+                    true,
+                )
+                .await
+                .unwrap();
+                let item = store::claim_outbox(&db).await.unwrap().unwrap();
+                assert!(ready(&db, &item).await.unwrap());
+                assert_eq!(item.reply_to_message_id, Some(20));
+                store::settle_reply(&db, &task, "The two sites agree.", &[])
+                    .await
+                    .unwrap();
+                assert!(!ready(&db, &item).await.unwrap());
+            } else {
+                assert!(next.is_none());
+            }
+            make_due(&db).await;
+            assert!(claim(&db).await.unwrap().is_none());
+        }
     }
 
     #[tokio::test]
@@ -375,7 +457,7 @@ mod tests {
         let task = store::claim(&db).await.unwrap().unwrap();
         make_due(&db).await;
         let progress = claim(&db).await.unwrap().unwrap();
-        finish(&db, &progress, Some("I'm comparing the options."))
+        finish(&db, &progress, Some("I'm comparing the options."), false)
             .await
             .unwrap();
         let item = store::claim_delivery(&db).await.unwrap().unwrap();

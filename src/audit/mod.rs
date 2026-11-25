@@ -35,6 +35,13 @@ pub(crate) struct Trace {
     revision: i64,
 }
 
+#[derive(Default, Serialize)]
+pub(crate) struct ProgressEvidence {
+    pub completed_steps: usize,
+    pub searches_with_results: usize,
+    pub pages_read: usize,
+}
+
 impl Trace {
     pub(crate) async fn for_progress(
         db: &SqlitePool,
@@ -61,7 +68,7 @@ impl Trace {
         }))
     }
 
-    pub(crate) async fn confirmed_progress_steps(&self) -> Result<usize> {
+    pub(crate) async fn confirmed_progress(&self) -> Result<ProgressEvidence> {
         let entries: Vec<(String, String)> = sqlx::query_as(
             "SELECT e.name,e.detail FROM audit_sessions s
              JOIN tasks t ON t.id=s.task AND t.audit_session_id=s.id
@@ -81,15 +88,20 @@ impl Trace {
         .bind(self.revision)
         .fetch_all(&self.db)
         .await?;
-        Ok(entries
-            .iter()
-            .filter(|(name, raw)| {
-                serde_json::from_str(raw)
-                    .ok()
-                    .and_then(|detail| crate::runtime::confirmed_step(name, &detail))
-                    .is_some()
-            })
-            .count())
+        let mut progress = ProgressEvidence::default();
+        for (name, raw) in entries {
+            if serde_json::from_str(&raw)
+                .ok()
+                .and_then(|detail| crate::runtime::confirmed_step(&name, &detail))
+                .is_none()
+            {
+                continue;
+            }
+            progress.completed_steps += 1;
+            progress.searches_with_results += usize::from(name == "search_web");
+            progress.pages_read += usize::from(name == "browse");
+        }
+        Ok(progress)
     }
 
     pub(crate) async fn start(db: &SqlitePool, task: &Task) -> Result<Option<Self>> {

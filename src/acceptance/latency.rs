@@ -112,3 +112,123 @@ async fn telegram_ingress_and_delivery_wake_workers_before_their_fallback_polls(
         ("2".into(), "A durable item without a wake signal.".into())
     );
 }
+
+#[derive(Default)]
+struct ResearchReply {
+    started: tokio::sync::Notify,
+    finish: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl ModelProvider for ResearchReply {
+    async fn complete(&self, _: &str, _: &str) -> Result<String> {
+        self.started.notify_one();
+        self.finish.notified().await;
+        Ok(r#"{"kind":"reply","text":"Both sites list the same opening hours."}"#.into())
+    }
+
+    async fn complete_brief_reply(&self, _: &str, input: &str) -> Result<String> {
+        let input: serde_json::Value = serde_json::from_str(input)?;
+        let text = if input["progress"]["pages_read"] == 1 {
+            "I checked the hours on one site and am comparing them."
+        } else {
+            "I’ll compare the published opening hours on both sites."
+        };
+        Ok(serde_json::json!({"text":text}).to_string())
+    }
+}
+
+#[tokio::test]
+async fn research_sends_a_generated_first_reply_then_one_confirmed_update() {
+    let db = fixture().await;
+    let model = Arc::new(ResearchReply::default());
+    let app = Arc::new(app_with_model(&db, model.clone()));
+    let (_updates, inbound) = mpsc::unbounded_channel();
+    let (replies, mut delivered) = mpsc::unbounded_channel();
+    let telegram = Arc::new(TelegramFixture {
+        inbound: Mutex::new(inbound),
+        replies,
+    });
+    let workers = [
+        tokio::spawn(runtime::run(app.clone(), telegram.clone())),
+        tokio::spawn(channel::outbox(app.clone(), telegram)),
+    ];
+    store::ingest_telegram(
+        &db,
+        "1",
+        1,
+        "1",
+        "Research the opening hours on both websites.",
+        21,
+    )
+    .await
+    .unwrap();
+    app.task_ready.notify_one();
+    tokio::time::timeout(Duration::from_secs(3), model.started.notified())
+        .await
+        .unwrap();
+    let make_due = || {
+        sqlx::query("UPDATE outbox SET retry_at=0 WHERE button LIKE 'ack-generate/%'").execute(&db)
+    };
+    make_due().await.unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(3), delivered.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        first.1,
+        "I’ll compare the published opening hours on both sites."
+    );
+
+    let (task, revision): (String, i64) =
+        sqlx::query_as("SELECT id,revision FROM tasks WHERE user='1' AND state='running'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    let trace = crate::audit::Trace::for_progress(&db, &task, "1", revision)
+        .await
+        .unwrap()
+        .unwrap();
+    crate::audit::scope(
+        Some(trace),
+        crate::audit::record(
+            "tool",
+            "browse",
+            "completed",
+            serde_json::json!({"page_bytes":64}),
+        ),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM audit_deliveries WHERE kind='progress' AND state='sent')",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    make_due().await.unwrap();
+    let update = tokio::time::timeout(Duration::from_secs(3), delivered.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        update.1,
+        "I checked the hours on one site and am comparing them."
+    );
+
+    model.finish.notify_one();
+    let answer = tokio::time::timeout(Duration::from_secs(3), delivered.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    for worker in workers {
+        worker.abort();
+    }
+    assert_eq!(answer.1, "Both sites list the same opening hours.");
+}
