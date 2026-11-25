@@ -3,7 +3,7 @@ use crate::{
     App, audit,
     model::{ProviderFailure, parse_json_reply, provider_failure},
     security::clip,
-    store::{self, Task},
+    store::{self, Task, checkpoints},
 };
 use anyhow::{Result, ensure};
 use serde::Deserialize;
@@ -44,6 +44,9 @@ pub(super) async fn try_reply(
         return Ok(Attempt::Defer);
     };
     if !can_answer_briefly(&request) {
+        return Ok(Attempt::Defer);
+    }
+    if !checkpoints::reserve_model(&app.db, task).await? {
         return Ok(Attempt::Defer);
     }
     let profile = app.models.onboarding_profile(&task.user).await?;

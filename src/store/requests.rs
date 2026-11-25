@@ -118,18 +118,23 @@ pub async fn finish_action(
     announce: bool,
 ) -> Result<()> {
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
-    let changed =
-        sqlx::query("UPDATE pending SET state='done' WHERE id=? AND task=? AND state='executing'")
-            .bind(action_id)
-            .bind(&task.id)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
-    ensure!(changed == 1, "action checkpoint missing");
+    finish_action_in(&mut tx, task, action_id, result, announce).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(super) async fn finish_action_in(
+    tx: &mut Transaction<'_, Sqlite>,
+    task: &Task,
+    action_id: &str,
+    result: &str,
+    announce: bool,
+) -> Result<()> {
+    finish_pending_in(tx, task, action_id).await?;
     sqlx::query("INSERT INTO events(task,role,body) VALUES(?,'tool',?)")
         .bind(&task.id)
         .bind(clip(result, 12000))
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     if announce {
         sqlx::query("INSERT INTO outbox(user,task,agent,body) VALUES(?,?,?,?)")
@@ -137,10 +142,25 @@ pub async fn finish_action(
             .bind(&task.id)
             .bind(&task.agent)
             .bind(clip(result, 3000))
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
     }
-    tx.commit().await?;
+    Ok(())
+}
+
+pub(super) async fn finish_pending_in(
+    tx: &mut Transaction<'_, Sqlite>,
+    task: &Task,
+    action_id: &str,
+) -> Result<()> {
+    let changed =
+        sqlx::query("UPDATE pending SET state='done' WHERE id=? AND task=? AND state='executing'")
+            .bind(action_id)
+            .bind(&task.id)
+            .execute(&mut **tx)
+            .await?
+            .rows_affected();
+    ensure!(changed == 1, "action checkpoint missing");
     Ok(())
 }
 

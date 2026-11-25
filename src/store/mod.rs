@@ -1,5 +1,6 @@
 pub(crate) mod acknowledgements;
 pub mod attachments;
+pub(crate) mod checkpoints;
 pub(crate) mod groups;
 mod ingress;
 pub(crate) mod invitations;
