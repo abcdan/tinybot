@@ -225,7 +225,8 @@ pub(crate) async fn suppress(db: &SqlitePool, task: &Task) -> Result<()> {
     .await?;
     if current.rows_affected() != 0 {
         sqlx::query(
-            "UPDATE outbox SET state='failed',body='',button=NULL WHERE user=? AND task=?
+            "UPDATE outbox SET state=CASE WHEN state='sending' THEN state ELSE 'skipped' END,
+                 body='',button=NULL WHERE user=? AND task=?
              AND state IN ('queued','generating','sending') AND button IN (?,?,?)",
         )
         .bind(&task.user)
@@ -339,5 +340,34 @@ mod tests {
             .unwrap();
         assert!(store::claim_outbox(&db).await.unwrap().is_none());
         assert!(claim(&db).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn draft_suppression_does_not_open_the_lane_while_progress_is_claimed() {
+        let db = fixture().await;
+        message(&db, 20, "Compare the options.").await;
+        let task = store::claim(&db).await.unwrap().unwrap();
+        make_due(&db).await;
+        let progress = claim(&db).await.unwrap().unwrap();
+        finish(&db, &progress, Some("I'm comparing the options."))
+            .await
+            .unwrap();
+        let item = store::claim_delivery(&db).await.unwrap().unwrap();
+        assert!(ready(&db, &item).await.unwrap());
+        suppress(&db, &task).await.unwrap();
+        assert!(!ready(&db, &item).await.unwrap());
+        store::settle_reply(&db, &task, "Comparison complete.", &[])
+            .await
+            .unwrap();
+        assert!(store::claim_delivery(&db).await.unwrap().is_none());
+        sqlx::query("UPDATE outbox SET state='skipped' WHERE id=?")
+            .bind(item.id)
+            .execute(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            store::claim_delivery(&db).await.unwrap().unwrap().body,
+            "Comparison complete."
+        );
     }
 }
