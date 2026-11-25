@@ -132,12 +132,16 @@ pub fn local_iso(timestamp: i64, zone: Tz) -> String {
         .to_rfc3339()
 }
 
-fn next(expression: &str, zone: Tz, after: i64) -> Result<i64> {
+fn parse_cron(expression: &str) -> Result<Cron> {
     ensure!(
         expression.len() <= 110 && expression.split_whitespace().count() == 5,
         "use a five-field cron expression"
     );
-    let expression: Cron = expression.parse().context("invalid cron expression")?;
+    expression.parse().context("invalid cron expression")
+}
+
+fn next(expression: &str, zone: Tz, after: i64) -> Result<i64> {
+    let expression = parse_cron(expression)?;
     let time = DateTime::from_timestamp(after, 0)
         .context("invalid schedule time")?
         .with_timezone(&zone);
@@ -766,6 +770,9 @@ mod tests {
             serde_json::to_value(occurrences(&db, "1", &recurring.id).await.unwrap()).unwrap();
         assert_eq!(history[0]["outcome"], "skipped_overlap");
         assert_eq!(history[1]["outcome"], "queued");
+        assert_eq!(history[1]["due_at"], late);
+        assert_eq!(history[2]["outcome"], "coalesced");
+        assert_eq!(history[3]["outcome"], "coalesced");
         assert!(occurrences(&db, "2", &recurring.id).await.is_err());
         cancel(&db, "1", &recurring.id).await.unwrap();
     }
