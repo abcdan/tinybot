@@ -36,6 +36,7 @@ mod routines;
 mod self_settings;
 mod task_artifacts;
 mod task_workbench;
+mod telegram_media;
 mod telegram_workflows;
 mod tool_budget;
 mod usage_insights;
