@@ -7,6 +7,7 @@ mod groups;
 mod media;
 mod telegram;
 mod voice;
+mod voice_request;
 mod widget;
 
 pub use card::Card;
@@ -154,23 +155,6 @@ pub trait ChannelAdapter: Send + Sync {
     ) -> Result<MessageDelivery> {
         self.send_suggested_replies(user, &card.plain_text(), replies, reply_to)
             .await
-    }
-
-    async fn send_listenable(
-        &self,
-        user: &str,
-        body: &str,
-        card: Option<&Card>,
-        replies: &[store::SuggestedReply],
-        reply_to: Option<i64>,
-        _receipt: i64,
-    ) -> Result<MessageDelivery> {
-        if let Some(card) = card {
-            self.send_card(user, card, replies, reply_to).await
-        } else {
-            self.send_suggested_replies(user, body, replies, reply_to)
-                .await
-        }
     }
 
     async fn send_choice(&self, user: &str, choice: &WidgetChoice) -> Result<MessageDelivery> {

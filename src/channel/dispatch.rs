@@ -1,8 +1,12 @@
-use super::{Card, ChannelAdapter, Inbound, MessageDelivery, attachment, callback, voice, widget};
+use super::{
+    Card, ChannelAdapter, Inbound, MessageDelivery, attachment, callback, voice, voice_request,
+    widget,
+};
 use crate::{forms, security::now, store};
 use anyhow::Result;
 use sqlx::SqlitePool;
 use std::{sync::Arc, time::Duration};
+use store::outputs::{VoiceNotices, VoiceTarget};
 
 const PROGRESS_SEND_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -34,6 +38,28 @@ pub async fn listen(
                         reply,
                     } => {
                         if let Some(message_id) = telegram_message_id {
+                            if let Some(language) = voice_request::request(&text) {
+                                let target = match reply {
+                                    Some(reply) if reply.from_bot => Some(VoiceTarget::Exact(reply.message_id)),
+                                    Some(_) => None,
+                                    None => Some(VoiceTarget::Before(message_id)),
+                                };
+                                let (missing_reply, missing_connection) = match language {
+                                    voice_request::Language::Dutch => (
+                                        "Ik vind geen antwoord om voor te lezen. Reageer op het antwoord dat je wilt horen.",
+                                        "Verbind OpenRouter in Instellingen om antwoorden als audio te krijgen.",
+                                    ),
+                                    voice_request::Language::English => (
+                                        "I couldn’t find a reply to read aloud. Reply to the answer you want to hear.",
+                                        "Connect OpenRouter in Settings to get audio replies.",
+                                    ),
+                                };
+                                store::outputs::request_voice(db, &app.vault, &user, external_id, target, Some(VoiceNotices {
+                                    request_message: message_id, missing_reply, missing_connection,
+                                })).await?;
+                                app.delivery_ready.notify_one();
+                                continue;
+                            }
                             if show_invitation(db, &*adapter, &operator, external_id, &user, &text)
                                 .await?
                             {
@@ -100,15 +126,12 @@ pub async fn listen(
                         message_id,
                         emoji,
                     } => {
-                        store::ingest_telegram_reaction(
-                            db,
-                            &operator,
-                            external_id,
-                            &user,
-                            message_id,
-                            &emoji,
-                        )
-                        .await?;
+                        if emoji.trim_end_matches('\u{fe0f}') == "🙉" {
+                            store::outputs::request_voice(db, &app.vault, &user, external_id, Some(VoiceTarget::Exact(message_id)), None).await?;
+                            app.delivery_ready.notify_one();
+                            continue;
+                        }
+                        store::ingest_telegram_reaction(db, &operator, external_id, &user, message_id, &emoji).await?;
                     }
                 }
                 app.wake_queues();
@@ -393,22 +416,6 @@ async fn send_item(
         return adapter
             .send(&item.user, &preview, button, item.reply_to_message_id)
             .await;
-    }
-    if button.is_none() && item.agent.is_none() && item.task.is_some()
-        && sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM outbox o JOIN users u ON u.id=o.user JOIN tasks t ON t.id=o.task
-                           WHERE o.id=? AND o.assistant_event_id IS NOT NULL AND u.openrouter_key IS NOT NULL
-                             AND u.suspended_at IS NULL AND t.shared_memory_pair IS NULL
-                             AND NOT EXISTS(SELECT 1 FROM outbox later
-                                WHERE later.assistant_event_id=o.assistant_event_id AND later.id>o.id))",
-        )
-        .bind(item.id)
-        .fetch_one(&app.db)
-        .await?
-    {
-        let replies = store::suggested_replies(&app.db, item.id).await?;
-        let card = item.widget.as_deref().map(serde_json::from_str::<Card>).transpose()?;
-        return adapter.send_listenable(&item.user, &item.body, card.as_ref(), &replies, item.reply_to_message_id, item.id).await;
     }
     send_outbound(&app.db, adapter, item).await
 }

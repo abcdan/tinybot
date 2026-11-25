@@ -110,9 +110,13 @@ search settings.
 Reply directly to an earlier upload to use it again in the same task. TinyBot encrypts
 stored attachments. The Chief can also use offline Python on its task files for
 calculations and text processing. Ask for a CSV, Markdown, JSON, or text file to
-receive a Telegram document up to 32 KiB. Tap **Listen** on a supported reply to hear
-it as a voice message. TinyBot sends the reply text to OpenRouter using your saved
-key for speech synthesis.
+receive a Telegram document up to 32 KiB.
+
+In a private chat, ask **Can I get that as audio?** to hear the latest TinyBot
+answer. To hear a specific answer, reply to it with that question or with 🙉.
+A 🙉 reaction also works when Telegram delivers reaction updates to the bot.
+TinyBot sends the selected answer to OpenRouter using your saved key for speech
+synthesis.
 
 ## Ask TinyBot about its settings
 

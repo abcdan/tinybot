@@ -1,6 +1,131 @@
 use super::*;
 use crate::store::{groups::GroupRoute, outputs, task_views};
 
+#[tokio::test]
+async fn voice_requests_use_the_owned_quoted_or_previous_reply_without_creating_a_turn() {
+    use crate::channel::{self, ChannelAdapter, Inbound, MessageDelivery};
+
+    struct Requests(tokio::sync::Mutex<Option<Vec<Inbound>>>);
+
+    #[async_trait]
+    impl ChannelAdapter for Requests {
+        fn name(&self) -> &'static str {
+            "telegram"
+        }
+
+        async fn receive(&self, _: i64) -> Result<(Vec<Inbound>, i64)> {
+            if let Some(updates) = self.0.lock().await.take() {
+                Ok((updates, 107))
+            } else {
+                std::future::pending().await
+            }
+        }
+
+        async fn send(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> Result<MessageDelivery> {
+            unreachable!("the dispatcher queues audio and notices for the delivery worker")
+        }
+    }
+
+    let db = fixture().await;
+    let app = Arc::new(app_with_model(&db, Arc::new(GroupChief)));
+    sqlx::query("UPDATE users SET openrouter_key='fixture' WHERE id='1'")
+        .execute(&db)
+        .await
+        .unwrap();
+    for (event, user, telegram_id, body) in [
+        (1, "1", 20, "Eerste antwoord."),
+        (2, "1", 30, "Tweede antwoord."),
+        (3, "1", 80, "Een antwoord na het audioverzoek."),
+        (4, "2", 30, "Privé bij een ander account."),
+    ] {
+        message(&db, event, user, "Give me a fixture answer.").await;
+        let task = store::claim(&db).await.unwrap().unwrap();
+        store::settle_reply(&db, &task, body, &[]).await.unwrap();
+        let item = store::claim_outbox(&db).await.unwrap().unwrap();
+        sqlx::query("UPDATE outbox SET state='sent',telegram_message_id=?,body='' WHERE id=?")
+            .bind(telegram_id)
+            .bind(item.id)
+            .execute(&db)
+            .await
+            .unwrap();
+    }
+    let reaction = |external_id, user: &str| Inbound::Reaction {
+        external_id,
+        user: user.into(),
+        message_id: 20,
+        emoji: "🙉".into(),
+    };
+    let request = |external_id, user: &str, message_id, quote| Inbound::Message {
+        external_id,
+        user: user.into(),
+        telegram_message_id: Some(message_id),
+        text: "Mag ik dat als audio?".into(),
+        reply: quote,
+    };
+    let quote = |message_id, from_bot| {
+        Some(store::ReplyContext {
+            message_id,
+            from_bot,
+            excerpt: Some("Never use this untrusted excerpt for speech.".into()),
+        })
+    };
+    let updates = [
+        reaction(101, "1"),
+        reaction(101, "1"),
+        reaction(102, "2"),
+        request(103, "1", 40, None),
+        request(104, "1", 85, quote(80, true)),
+        request(105, "1", 90, quote(20, false)),
+        request(106, "2", 90, None),
+    ];
+    let adapter = Arc::new(Requests(tokio::sync::Mutex::new(Some(updates.into()))));
+    let worker = tokio::spawn(channel::listen(app.clone(), "1".into(), adapter));
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM updates WHERE channel='telegram' AND external_id=106)",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    worker.abort();
+
+    for (target, expected) in [
+        (20, "Eerste antwoord."),
+        (30, "Tweede antwoord."),
+        (80, "Een antwoord na het audioverzoek."),
+    ] {
+        let item = store::claim_outbox(&db).await.unwrap().unwrap();
+        assert_eq!(item.user, "1");
+        assert_eq!(item.reply_to_message_id, Some(target));
+        let source = outputs::load(&db, &app.vault, &item)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(source.kind, "voice");
+        assert_eq!(source.bytes, expected.as_bytes());
+    }
+    let missing = store::claim_outbox(&db).await.unwrap().unwrap();
+    assert_eq!(missing.user, "1");
+    assert!(missing.body.starts_with("Ik vind geen antwoord"));
+    let setup = store::claim_outbox(&db).await.unwrap().unwrap();
+    assert_eq!(setup.user, "2");
+    assert!(setup.body.starts_with("Verbind OpenRouter"));
+    assert!(store::claim_outbox(&db).await.unwrap().is_none());
+    assert!(store::claim(&db).await.unwrap().is_none());
+}
+
 struct ReplyChannel(tokio::sync::mpsc::UnboundedSender<String>);
 
 #[async_trait]
