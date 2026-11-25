@@ -349,6 +349,26 @@ pub async fn compaction_batch(
         .collect())
 }
 
+const COMPACTION_SCOPE: &str = "t.id=?1 AND t.user=?2 AND t.revision=?3 AND t.summary=?4
+    AND t.state IN ('idle','completed')
+    AND EXISTS(SELECT 1 FROM users u WHERE u.id=t.user AND u.suspended_at IS NULL)
+    AND (t.shared_memory_pair IS NULL OR EXISTS(SELECT 1 FROM available_shared_memory_pairs p
+        WHERE p.id=t.shared_memory_pair AND (p.owner=t.user OR p.guest=t.user)))
+    AND (t.agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=t.agent
+        AND (a.owner=t.user OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=t.user))))";
+
+pub(crate) async fn can_compact(db: &SqlitePool, task: &Task) -> Result<bool> {
+    Ok(sqlx::query_scalar(&format!(
+        "SELECT EXISTS(SELECT 1 FROM tasks t WHERE {COMPACTION_SCOPE})"
+    ))
+    .bind(&task.id)
+    .bind(&task.user)
+    .bind(task.revision)
+    .bind(&task.summary)
+    .fetch_one(db)
+    .await?)
+}
+
 pub async fn compact(
     db: &SqlitePool,
     task: &Task,
@@ -356,14 +376,17 @@ pub async fn compact(
     summary: &str,
 ) -> Result<Option<String>> {
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
-    let changed =
-        sqlx::query("UPDATE tasks SET summary=? WHERE id=? AND revision=? AND state='running'")
-            .bind(summary)
-            .bind(&task.id)
-            .bind(task.revision)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
+    let changed = sqlx::query(&format!(
+        "UPDATE tasks AS t SET summary=?5 WHERE {COMPACTION_SCOPE}"
+    ))
+    .bind(&task.id)
+    .bind(&task.user)
+    .bind(task.revision)
+    .bind(&task.summary)
+    .bind(summary)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
     if changed == 0 {
         return Ok(None);
     }
@@ -437,6 +460,9 @@ mod tests {
         assert_eq!(delivered, 2);
 
         let boundary = batch.last().unwrap().0;
+        assert!(!can_compact(&db, &task).await.unwrap());
+        settle(&db, &task, "idle", None).await.unwrap();
+        assert!(can_compact(&db, &task).await.unwrap());
         assert!(
             compact(&db, &task, boundary, "The user asked for a long reply.")
                 .await

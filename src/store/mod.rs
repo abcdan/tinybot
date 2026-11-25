@@ -34,6 +34,7 @@ pub use mcp_approvals::{
     McpApprovalDecision, McpApprovalScope, list_mcp_approvals, mcp_approval_current,
     mcp_denied_in_turn, revoke_mcp_approval, start_remembered_mcp,
 };
+pub(crate) use queue::can_compact;
 pub use queue::{
     append, claim, compact, compaction_batch, current, expire, has_access, history, list_tasks,
     recover, select_task, settle, settle_reply, settle_widget,

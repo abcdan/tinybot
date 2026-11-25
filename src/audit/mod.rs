@@ -174,6 +174,10 @@ pub(crate) async fn scope<T>(trace: Option<Trace>, future: impl Future<Output = 
     CURRENT.scope(trace, future).await
 }
 
+pub(crate) fn current_trace() -> Option<Trace> {
+    CURRENT.try_with(Clone::clone).ok().flatten()
+}
+
 pub(crate) async fn record(kind: &str, name: &str, status: &str, detail: Value) {
     if let Ok(Some(trace)) = CURRENT.try_with(Clone::clone)
         && trace.push(kind, name, status, &detail).await.is_err()

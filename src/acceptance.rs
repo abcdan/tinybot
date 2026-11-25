@@ -721,9 +721,13 @@ async fn compaction_is_atomic_and_preserves_new_and_unprocessed_context() {
         .unwrap();
     assert_eq!(batch.len(), 28);
     assert_eq!(batch[0].0, records[1].0);
-    store::compact(&db, &task, batch.last().unwrap().0, "persisted summary")
-        .await
-        .unwrap();
+    store::settle(&db, &task, "idle", None).await.unwrap();
+    assert!(
+        store::compact(&db, &task, batch.last().unwrap().0, "persisted summary")
+            .await
+            .unwrap()
+            .is_some()
+    );
     message(&db, 41, "1", "latest change").await;
     assert!(
         store::compact(&db, &task, records[30].0, "stale summary")
@@ -738,6 +742,80 @@ async fn compaction_is_atomic_and_preserves_new_and_unprocessed_context() {
     assert_eq!(remaining[0].2, "initial instruction");
     assert_eq!(remaining[1].0, records[29].0);
     assert_eq!(remaining.last().unwrap().2, "latest change");
+}
+
+#[tokio::test]
+async fn a_slow_history_summary_never_delays_the_current_reply() {
+    #[derive(Default)]
+    struct Model {
+        summary_started: Notify,
+        release_summary: Notify,
+    }
+
+    #[async_trait]
+    impl ModelProvider for Model {
+        async fn complete(&self, instructions: &str, input: &str) -> Result<String> {
+            if instructions.starts_with("Summarize only durable task context") {
+                let input: Value = serde_json::from_str(input)?;
+                assert!(
+                    input["history"][0][2]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("Older")
+                );
+                self.summary_started.notify_one();
+                self.release_summary.notified().await;
+                return Ok(json!({"summary": "Earlier decisions are retained."}).to_string());
+            }
+            let input: Value = serde_json::from_str(input)?;
+            assert_eq!(input["latest_request"], "Check the current decision.");
+            assert!(input["history"].to_string().contains("Latest decision"));
+            Ok(json!({"kind":"reply","text":"Here is the latest decision."}).to_string())
+        }
+    }
+
+    let db = fixture().await;
+    let model = Arc::new(Model::default());
+    let app = app_with_model(&db, model.clone());
+    message(&db, 1, "1", "Check the current decision.").await;
+    let task = store::claim(&db).await.unwrap().unwrap();
+    for _ in 0..7 {
+        store::append(&db, &task.id, "assistant", &"Older decision. ".repeat(225))
+            .await
+            .unwrap();
+    }
+    store::append(&db, &task.id, "assistant", "Latest decision.")
+        .await
+        .unwrap();
+
+    let limit = std::time::Duration::from_secs(3);
+    tokio::time::timeout(limit, runtime::work(&app, &task))
+        .await
+        .expect("the summary is still waiting for its provider")
+        .unwrap();
+    let reply = store::claim_outbox(&db).await.unwrap().unwrap();
+    assert_eq!(reply.body, "Here is the latest decision.");
+    tokio::time::timeout(limit, model.summary_started.notified())
+        .await
+        .unwrap();
+    assert!(task_for(&db, &task.id).await.summary.is_empty());
+    assert_eq!(store::history(&db, &task.id).await.unwrap().len(), 10);
+
+    model.release_summary.notify_one();
+    tokio::time::timeout(limit, async {
+        loop {
+            if task_for(&db, &task.id).await.summary == "Earlier decisions are retained." {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let history = store::history(&db, &task.id).await.unwrap();
+    assert_eq!(history.len(), 8);
+    assert_eq!(history[0].2, "Check the current decision.");
+    assert_eq!(history.last().unwrap().2, reply.body);
 }
 
 #[tokio::test]
