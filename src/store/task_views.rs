@@ -1,4 +1,4 @@
-use super::{Pending, ReplyContext, Task, queue, requests};
+use super::{Pending, ReplyContext, Task, checkpoints, queue, requests};
 use crate::{
     audit,
     runtime::confirmed_step,
@@ -91,6 +91,7 @@ pub(crate) struct TaskDetail {
     last_confirmed: Option<&'static str>,
     failure: Option<String>,
     executing: bool,
+    plan: Vec<checkpoints::Step>,
     #[serde(skip)]
     pub(crate) requests: Vec<Pending>,
 }
@@ -172,6 +173,7 @@ pub(crate) async fn detail(db: &SqlitePool, user: &str, id: &str) -> Result<Opti
         None
     };
     let requests = requests::list_requests_in(&mut *tx, user, Some(id)).await?;
+    let plan = checkpoints::plan(&mut *tx, id, task.revision, task.state == "completed").await?;
     tx.commit().await?;
     Ok(Some(TaskDetail {
         task,
@@ -180,6 +182,7 @@ pub(crate) async fn detail(db: &SqlitePool, user: &str, id: &str) -> Result<Opti
         last_confirmed,
         failure,
         executing,
+        plan,
         requests,
     }))
 }
@@ -324,11 +327,27 @@ async fn queue_status(
     };
     let controls = if executing { "executing" } else { &task.state };
     let button = format!("task/{}/{}/{controls}", task.id, task.revision);
+    let mut body = format!("{}\n{state}", task.title);
+    for step in checkpoints::plan(
+        &mut **tx,
+        &task.id,
+        task.revision,
+        task.state == "completed",
+    )
+    .await?
+    {
+        let mark = if step.completed_at.is_some() {
+            "✓"
+        } else {
+            "○"
+        };
+        body.push_str(&format!("\n{mark} {}", step.title));
+    }
     sqlx::query("INSERT INTO outbox(user,task,agent,body,button) VALUES(?,?,?,?,?)")
         .bind(&task.user)
         .bind(&task.id)
         .bind(&task.agent)
-        .bind(format!("{}\n{state}", task.title))
+        .bind(body)
         .bind(button)
         .execute(&mut **tx)
         .await?;
