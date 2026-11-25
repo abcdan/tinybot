@@ -217,18 +217,56 @@ async fn a_signed_webhook_queues_one_run_and_cannot_replay_after_revision_change
     )
     .await
     .unwrap();
+    let owner = super::signed_mini_init(&app, 1);
+    let other = super::signed_mini_init(&app, 2);
+    let mini = |identity: &str, action: &str, data: Value| {
+        Request::builder()
+            .method("POST")
+            .uri("/api/mini")
+            .header("origin", &app.origin)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({"init":identity,"action":action,"data":data}).to_string(),
+            ))
+            .unwrap()
+    };
+    let mut router = crate::web::router(app.clone());
+    let enable = json!({"id":routine.id,"revision":0});
     assert!(
-        schedules::webhooks::install(&db, &app.vault, "2", &routine.id, 0, time)
+        !router
+            .call(mini(&other, "enable-schedule-webhook", enable.clone()))
             .await
-            .is_err()
+            .unwrap()
+            .status()
+            .is_success()
     );
-    let hook = schedules::webhooks::install(&db, &app.vault, "1", &routine.id, 0, time)
+    let enabled = router
+        .call(mini(&owner, "enable-schedule-webhook", enable))
         .await
         .unwrap();
+    assert_eq!(enabled.status(), StatusCode::OK);
+    let hook: Value = serde_json::from_slice(
+        &axum::body::to_bytes(enabled.into_body(), 4096)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let secret = hook["secret"].as_str().unwrap();
+    let hook_id = hook["id"].as_str().unwrap();
+    let read = router
+        .call(mini(&owner, "schedule-webhook", json!({"id":routine.id})))
+        .await
+        .unwrap();
+    assert_eq!(read.status(), StatusCode::OK);
+    let metadata: Value =
+        serde_json::from_slice(&axum::body::to_bytes(read.into_body(), 4096).await.unwrap())
+            .unwrap();
+    assert_eq!(metadata["webhook"]["id"], hook_id);
+    assert!(metadata["webhook"]["secret"].is_null());
     let body = r#"{"event_id":"fixture-first"}"#;
     let request = |body: &str, at: i64, signed: bool| {
         let timestamp = at.to_string();
-        let mut mac = Hmac::<Sha256>::new_from_slice(hook.secret.as_bytes()).unwrap();
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
         mac.update(timestamp.as_bytes());
         mac.update(b".");
         mac.update(body.as_bytes());
@@ -239,13 +277,12 @@ async fn a_signed_webhook_queues_one_run_and_cannot_replay_after_revision_change
         };
         Request::builder()
             .method("POST")
-            .uri(format!("/hooks/routine/{}", hook.id))
+            .uri(format!("/hooks/routine/{hook_id}"))
             .header("x-tinybot-timestamp", timestamp)
             .header("x-tinybot-signature", signature)
             .body(Body::from(body.to_owned()))
             .unwrap()
     };
-    let mut router = crate::web::router(app);
     for (event, at, signed, expected) in [
         (body, time, false, StatusCode::UNAUTHORIZED),
         (body, time - 301, true, StatusCode::UNAUTHORIZED),
@@ -283,6 +320,15 @@ async fn a_signed_webhook_queues_one_run_and_cannot_replay_after_revision_change
             .status(),
         StatusCode::UNAUTHORIZED
     );
+    let revoked = router
+        .call(mini(
+            &owner,
+            "revoke-schedule-webhook",
+            json!({"id":routine.id,"hook":hook_id}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(revoked.status(), StatusCode::OK);
 }
 
 struct ChangeModel(AtomicUsize);
