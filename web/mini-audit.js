@@ -2,6 +2,7 @@ import { button, card, node, row } from './mini-ui.js';
 import { api, content, show } from './mini.js';
 
 const numbers = new Intl.NumberFormat();
+const seconds = new Intl.NumberFormat(undefined, {maximumFractionDigits: 1});
 const dollars = new Intl.NumberFormat(undefined, {
     style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 8,
 });
@@ -22,6 +23,8 @@ export function audit(state) {
     };
     const page = node('div', undefined, 'audit-page');
     const usage = usagePanel('Last 7 days', 'h3', 'audit-usage card');
+    const delivery = node('section', undefined, 'audit-delivery-summary card');
+    delivery.hidden = true;
     const sessions = card();
     sessions.classList.add('audit-runs');
     sessions.hidden = true;
@@ -36,7 +39,20 @@ export function audit(state) {
         more.hidden = true;
         try {
             const result = await api('audit-sessions', before === null ? {} : {before});
-            if (before === null) usage.update(result.usage);
+            if (before === null) {
+                usage.update(result.usage);
+                const measured = result.delivery;
+                if (measured?.runs > 0) {
+                    delivery.replaceChildren(node('h3', 'Runs and delivery'), metrics([
+                        ['Runs finished', numbers.format(measured.completed_runs)],
+                        ['Tasks checked off', numbers.format(measured.checked_off_tasks)],
+                        ['Results confirmed', numbers.format(measured.delivered_runs)],
+                        ['Average time to first feedback', formatDuration(measured.average_first_feedback_ms)],
+                        ['Average time to result', formatDuration(measured.average_result_delivery_ms)],
+                    ]));
+                    delivery.hidden = false;
+                }
+            }
             sessions.append(...result.sessions.map(run => auditRun(run, dates)));
             sessions.hidden = sessions.childElementCount === 0;
             before = result.next_before ?? null;
@@ -51,7 +67,7 @@ export function audit(state) {
         }
     }
 
-    page.append(node('h2', 'Audit log', 'audit-page-title'), usage.section,
+    page.append(node('h2', 'Audit log', 'audit-page-title'), usage.section, delivery,
         node('h3', 'Recent messages', 'audit-section-title'), sessions, status, more);
     content.append(page);
     void load();
@@ -69,6 +85,8 @@ function auditRun(run, dates) {
 
     const body = node('div', undefined, 'audit-run-body');
     const usage = usagePanel('Run usage', 'h4', 'audit-run-usage');
+    const delivery = node('section', undefined, 'audit-delivery-run');
+    delivery.hidden = true;
     const finished = node('p', undefined, 'audit-run-finished meta');
     const heading = node('h4', 'Activity', 'audit-timeline-heading');
     const timeline = node('ol', undefined, 'audit-timeline');
@@ -79,7 +97,7 @@ function auditRun(run, dates) {
     const refresh = button('Refresh entries', () => load(), true);
     const actions = row(more, refresh);
     actions.hidden = true;
-    body.append(usage.section, auditExport(group, run.id), heading, finished, timeline, status, actions);
+    body.append(usage.section, delivery, auditExport(group, run.id), heading, finished, timeline, status, actions);
     group.append(title, body);
     updateTitle(run);
     let after = null;
@@ -104,6 +122,20 @@ function auditRun(run, dates) {
             const result = await api('audit-session', nextPage ? {id: run.id, after} : {id: run.id});
             updateTitle(result.session);
             usage.update(result.usage);
+            const timing = result.delivery?.timing;
+            if (timing && (timing.queue_wait_ms != null || result.delivery.receipts.length)) {
+                const disposition = {
+                    none: 'No result queued', pending: 'Pending', delivered: 'Confirmed',
+                    failed: 'Failed', uncertain: 'Uncertain', skipped: 'Skipped',
+                }[timing.result_status];
+                delivery.replaceChildren(node('h4', 'Telegram delivery'), metrics([
+                    ['Result', disposition],
+                    ['Queue wait', formatDuration(timing.queue_wait_ms)],
+                    ['First feedback', formatDuration(timing.first_feedback_ms)],
+                    ['Result delivered', formatDuration(timing.result_delivery_ms)],
+                ]));
+                delivery.hidden = false;
+            }
             const entries = result.entries.map(item => auditEntry(item, dates));
             if (nextPage) timeline.append(...entries);
             else timeline.replaceChildren(...entries);
@@ -278,6 +310,11 @@ function usageCaption(usage) {
 
 function formatTokens(value) {
     return value == null ? 'Not reported' : numbers.format(value);
+}
+
+function formatDuration(value) {
+    if (value == null) return 'Not measured';
+    return value < 1000 ? `${numbers.format(value)} ms` : `${seconds.format(value / 1000)} s`;
 }
 
 function formatCost(value) {
