@@ -11,6 +11,8 @@ services:
     build:
       context: .
       target: core
+      args:
+        TINYBOT_RELEASE_SHA: ${TINYBOT_RELEASE_SHA:-}
     environment:
       TINYBOT_ORIGIN: https://${TINYBOT_DOMAIN:?Set TINYBOT_DOMAIN in .env}
       TELEGRAM_OPERATOR_ID: ${TELEGRAM_OPERATOR_ID:?Set TELEGRAM_OPERATOR_ID in .env}
@@ -39,7 +41,10 @@ services:
 
   browser:
     <<: *worker-security
-    build: ./workers/browser
+    build:
+      context: ./workers/browser
+      args:
+        TINYBOT_RELEASE_SHA: ${TINYBOT_RELEASE_SHA:-}
     security_opt:
       - "no-new-privileges:true"
       - "seccomp:./deploy/chromium-seccomp.json"
@@ -75,7 +80,10 @@ services:
 
   sandbox:
     <<: *worker-security
-    build: ./workers/sandbox
+    build:
+      context: ./workers/sandbox
+      args:
+        TINYBOT_RELEASE_SHA: ${TINYBOT_RELEASE_SHA:-}
     volumes:
       - sandbox_socket:/sandbox
     tmpfs:

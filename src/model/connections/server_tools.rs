@@ -1,5 +1,6 @@
 use super::UserKey;
 use crate::model::{Models, ServerTool};
+use crate::settings::{self, Key};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 
@@ -25,21 +26,13 @@ impl Models {
         tool: &str,
         enabled: bool,
     ) -> Result<()> {
-        let tool = ServerTool::ALL
+        let key = Key::ALL
             .into_iter()
-            .find(|allowed| allowed.key() == tool)
+            .find(|key| {
+                key.as_str() == tool && ServerTool::ALL.iter().any(|allowed| allowed.key() == tool)
+            })
             .context("unknown OpenRouter server tool")?;
-        let statement = if enabled {
-            "DELETE FROM openrouter_disabled_tools WHERE user=? AND tool=?"
-        } else {
-            "INSERT OR IGNORE INTO openrouter_disabled_tools(user,tool) VALUES(?,?)"
-        };
-        sqlx::query(statement)
-            .bind(user)
-            .bind(tool.key())
-            .execute(&self.db)
-            .await?;
-        Ok(())
+        settings::update_personal(&self.db, user, key, if enabled { "on" } else { "off" }).await
     }
 
     pub(crate) async fn enabled_server_tools(&self, user: &str) -> Result<Vec<ServerTool>> {

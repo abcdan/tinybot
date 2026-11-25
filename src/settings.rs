@@ -108,6 +108,10 @@ impl Key {
         matches!(self, Self::TaskModel | Self::BackupModel)
     }
 
+    pub(crate) fn history_eligible(self) -> bool {
+        !self.model()
+    }
+
     fn normalize(self, value: &str) -> Result<String> {
         let trimmed = value.trim();
         match self {
@@ -256,6 +260,18 @@ pub(crate) struct Preview {
 }
 
 impl Change {
+    pub(crate) fn personal_values(&self) -> impl Iterator<Item = (Key, &str, &str)> {
+        self.after.iter().filter_map(|(&key, after)| {
+            key.history_eligible().then(|| {
+                (
+                    key,
+                    self.before.get(&key).map_or("", String::as_str),
+                    after.as_str(),
+                )
+            })
+        })
+    }
+
     pub(crate) fn preview(&self) -> Vec<Preview> {
         self.after
             .iter()
@@ -305,6 +321,23 @@ pub(crate) async fn prepare(
     fields: &BTreeMap<Key, String>,
     baseline: &Snapshot,
 ) -> Result<Change> {
+    let change = prepare_values(fields, baseline)?;
+    let selections = check_models(&change, baseline)?;
+    if !selections.is_empty() {
+        app.models
+            .validate_settings_models(user, &selections)
+            .await?;
+    }
+    let mut tx = app.db.begin().await?;
+    change.verify(&snapshot(&mut tx, user).await?)?;
+    tx.commit().await?;
+    Ok(change)
+}
+
+pub(crate) fn prepare_values(
+    fields: &BTreeMap<Key, String>,
+    baseline: &Snapshot,
+) -> Result<Change> {
     let mut before = BTreeMap::new();
     let mut after = BTreeMap::new();
     for (&key, raw) in fields {
@@ -316,21 +349,11 @@ pub(crate) async fn prepare(
         }
     }
     let includes_model = after.keys().any(|key| key.model());
-    let change = Change {
+    Ok(Change {
         before,
         after,
         model_state: includes_model.then(|| baseline.models.clone()),
-    };
-    let selections = check_models(&change, baseline)?;
-    if !selections.is_empty() {
-        app.models
-            .validate_settings_models(user, &selections)
-            .await?;
-    }
-    let mut tx = app.db.begin().await?;
-    change.verify(&snapshot(&mut tx, user).await?)?;
-    tx.commit().await?;
-    Ok(change)
+    })
 }
 
 fn check_models<'a>(change: &'a Change, baseline: &'a Snapshot) -> Result<Vec<ModelSelection<'a>>> {
@@ -372,31 +395,8 @@ pub(crate) async fn apply(db: &mut SqliteConnection, user: &str, change: &Change
     let current = snapshot(&mut *db, user).await?;
     change.verify(&current)?;
     check_models(change, &current)?;
-    for (&key, value) in &change.after {
-        let statement = match key {
-            Key::DisplayName => "UPDATE users SET display_name=? WHERE id=?",
-            Key::ChiefName => "UPDATE users SET chief_name=? WHERE id=?",
-            Key::TimeZone => "UPDATE users SET time_zone=? WHERE id=?",
-            Key::TaskModel | Key::BackupModel => continue,
-            _ => {
-                let statement = if value == "on" {
-                    "DELETE FROM openrouter_disabled_tools WHERE user=? AND tool=?"
-                } else {
-                    "INSERT OR IGNORE INTO openrouter_disabled_tools(user,tool) VALUES(?,?)"
-                };
-                sqlx::query(statement)
-                    .bind(user)
-                    .bind(key.as_str())
-                    .execute(&mut *db)
-                    .await?;
-                continue;
-            }
-        };
-        sqlx::query(statement)
-            .bind((!value.is_empty()).then_some(value))
-            .bind(user)
-            .execute(&mut *db)
-            .await?;
+    for (key, _, value) in change.personal_values() {
+        write_personal(db, user, key, value).await?;
     }
     current
         .models
@@ -407,6 +407,65 @@ pub(crate) async fn apply(db: &mut SqliteConnection, user: &str, change: &Change
             change.after.get(&Key::BackupModel).map(String::as_str),
         )
         .await
+}
+
+pub(crate) async fn update_personal(
+    db: &sqlx::SqlitePool,
+    user: &str,
+    key: Key,
+    input: &str,
+) -> Result<()> {
+    ensure!(key.history_eligible(), "unsupported personal setting");
+    let value = key.normalize(input)?;
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+    let current = snapshot(&mut tx, user).await?;
+    let before = current.value(key);
+    write_personal(&mut tx, user, key, &value).await?;
+    if before != value {
+        crate::store::settings_history::record(
+            &mut tx,
+            user,
+            None,
+            "settings",
+            [(key, before, value.as_str())],
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn write_personal(
+    db: &mut SqliteConnection,
+    user: &str,
+    key: Key,
+    value: &str,
+) -> Result<()> {
+    let statement = match key {
+        Key::DisplayName => "UPDATE users SET display_name=? WHERE id=?",
+        Key::ChiefName => "UPDATE users SET chief_name=? WHERE id=?",
+        Key::TimeZone => "UPDATE users SET time_zone=? WHERE id=?",
+        Key::TaskModel | Key::BackupModel => anyhow::bail!("unsupported personal setting"),
+        _ => {
+            let statement = if value == "on" {
+                "DELETE FROM openrouter_disabled_tools WHERE user=? AND tool=?"
+            } else {
+                "INSERT OR IGNORE INTO openrouter_disabled_tools(user,tool) VALUES(?,?)"
+            };
+            sqlx::query(statement)
+                .bind(user)
+                .bind(key.as_str())
+                .execute(db)
+                .await?;
+            return Ok(());
+        }
+    };
+    sqlx::query(statement)
+        .bind((!value.is_empty()).then_some(value))
+        .bind(user)
+        .execute(db)
+        .await?;
+    Ok(())
 }
 
 #[cfg(test)]

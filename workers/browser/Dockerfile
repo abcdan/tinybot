@@ -1,4 +1,6 @@
 FROM mcr.microsoft.com/playwright:v1.58.2-noble
+ARG TINYBOT_RELEASE_SHA
+ENV TINYBOT_RELEASE_SHA=${TINYBOT_RELEASE_SHA}
 WORKDIR /opt/tinybot
 RUN npm install --no-audit --no-fund --ignore-scripts --save-exact playwright@1.58.2 \
     && mkdir -p /browser \

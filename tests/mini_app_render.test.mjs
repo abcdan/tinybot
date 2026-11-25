@@ -63,11 +63,17 @@ test('schedules edit instructions, pause and run a saved routine', async () => {
             }
             if (action === 'schedule-history') {
                 return {runs: [{task: 'fixture-run', title: 'Weekly review', state: 'idle', trigger: 'manual', started_at: 1795526400}],
-                    occurrences: [{due_at: 1795526400, outcome: 'skipped_overlap'}]};
+                    occurrences: [
+                        {due_at: 1795526400, outcome: 'skipped_overlap'},
+                        ...Array.from({length: 29}, (_, index) => ({
+                            due_at: 1795526340 - 60 * index, outcome: 'skipped_missed',
+                        })),
+                        {due_at: 1795524600, outcome: 'coalesced'},
+                    ]};
             }
             if (action === 'schedule-policy') {
                 assert.equal(data.revision, 2);
-                assert.deepEqual(data.policy, {catch_up: 'skip', quiet_start: 1320, quiet_end: 420});
+                assert.deepEqual(data.policy, {catch_up: 'skip', quiet_start: 1320, quiet_end: 420, notify_changes: true});
                 schedule.revision++;
                 return {ok: true};
             }
@@ -92,10 +98,15 @@ test('schedules edit instructions, pause and run a saved routine', async () => {
         await page.getByText('Run history', {exact: true}).click();
         await page.getByText('Manual · Finished', {exact: false}).waitFor();
         await page.getByText('Skipped · previous run still open', {exact: true}).waitFor();
+        assert.equal(await page.getByText('Combined into one run', {exact: true}).count(), 0);
+        await page.getByRole('button', {name: 'Show older occurrences'}).click();
+        await page.getByText('Combined into one run', {exact: true}).waitFor();
+        assert.equal(await page.getByRole('button', {name: 'Show older occurrences'}).count(), 0);
         await page.getByText('Timing policy', {exact: true}).click();
         await page.getByLabel('After downtime').selectOption('skip');
         await page.getByLabel('Quiet hours start').fill('22:00');
         await page.getByLabel('Quiet hours end').fill('07:00');
+        await page.getByLabel('Automation notifications').selectOption('1');
         await page.getByRole('button', {name: 'Save timing policy'}).click();
         await page.getByText('Timing policy saved.').waitFor();
         await page.getByText('Dry run', {exact: true}).click();
@@ -305,6 +316,34 @@ test('a task deep link shows the latest result and opens the exact pending revie
     }
 });
 
+test('task detail shows verified checkpoints and planned work as text', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 640}});
+        const page = await context.newPage();
+        const task = {id: 'research', title: 'Prepare a release note', state: 'waiting', revision: 4};
+        await mockMiniApp(context, ({action}) => {
+            if (action === 'status') return {user: '1', provider: 'codex', requests: [], tasks: [task]};
+            if (action === 'task-detail') return {task, requests: [], plan: [
+                {position: 0, title: 'Review the latest <draft>', checkpoint: 'Two decisions recorded.', completed_at: 1795555555},
+                {position: 1, title: 'Prepare summary', checkpoint: null, completed_at: null},
+            ]};
+            assert.fail('Unexpected Mini App request ' + action);
+        });
+        await page.goto('https://tinybot.test/mini?task=research');
+        const plan = page.locator('.card').filter({has: page.getByRole('heading', {name: 'Task plan'})});
+        await plan.getByText('Review the latest <draft>', {exact: true}).waitFor();
+        await plan.getByText('Verified', {exact: true}).waitFor();
+        await plan.getByText('Two decisions recorded.', {exact: true}).waitFor();
+        await plan.getByText('Planned', {exact: true}).waitFor();
+        assert.equal(await plan.getByRole('listitem').count(), 2);
+        assert.equal(await plan.getByRole('checkbox').count(), 0);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
+    } finally {
+        await browser.close();
+    }
+});
+
 test('the task files shelf downloads the selected retained version with its safe filename', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
     try {
@@ -334,6 +373,82 @@ test('the task files shelf downloads the selected retained version with its safe
         ]);
         assert.equal(file.suggestedFilename(), '_receipt.txt');
         assert.equal(await readFile(await file.path(), 'utf8'), 'Retained version one');
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
+    } finally {
+        await browser.close();
+    }
+});
+
+test('saving a retained reply signs in, chooses a folder and opens the exact Docblock review', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 640}});
+        const page = await context.newPage();
+        const task = {id: 'source', title: 'Review this week', state: 'completed', revision: 2};
+        const saveTask = {id: 'save-note', title: 'Save to Docblock', state: 'waiting', revision: 0};
+        const reply = {event: 13, text: 'Two decisions, one follow-up.', truncated: false};
+        const saved = {request: 'save-request', approval_task: saveTask.id, source_event: reply.event,
+            status: 'review', path: 'work/review-this-week-123'};
+        const request = {id: saved.request, kind: 'approve', task: saveTask.id, content: {
+            destination: 'https://docblock.dev', operation: 'Create Docblock note',
+            docblock: {workspace: 'my-workspace', target: saved.path, change: 'Title: Review this week\n' + reply.text},
+        }};
+        const state = {user: '1', provider: 'codex', requests: [], tasks: [task], docblock_access: {}};
+        const receipts = [];
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return state;
+            if (action === 'task-detail') {
+                if (data.task === saveTask.id) return {task: saveTask, requests: state.requests};
+                assert.deepEqual(data, {task: task.id});
+                return {task, reply, requests: [], docblock_saves: receipts};
+            }
+            if (action === 'docblock-oauth') {
+                assert.deepEqual(data, {});
+                return {consent_url: 'https://docblock.dev/oauth/authorize?state=task-fixture'};
+            }
+            if (action === 'docblock-workspaces') return {workspaces: [
+                {id: 'my-workspace', name: 'Personal', role: 'editor'}, {id: 'readonly', name: 'Reference', role: 'viewer'},
+            ]};
+            if (action === 'docblock-folders') {
+                assert.deepEqual(data, {id: 'docs', workspace: 'my-workspace'});
+                return {folders: ['work']};
+            }
+            if (action === 'save-result-to-docblock') {
+                assert.deepEqual(data, {id: 'docs', workspace: 'my-workspace', folder: 'work', title: task.title,
+                    task: task.id, revision: task.revision, event: reply.event});
+                state.requests = [request];
+                receipts.push(saved);
+                return saved;
+            }
+            if (action === 'approve') {
+                assert.deepEqual(data, {id: saved.request});
+                state.requests = [];
+                saveTask.state = 'completed';
+                saved.status = 'saved';
+                saved.url = 'https://docblock.dev/personal#/note/test-note';
+                return {ok: true};
+            }
+            assert.fail(action);
+        }, 'window.Telegram = {WebApp: {initData: "fixture", ready() {}, openLink(url) { window.openedLink = url; }}};');
+        await page.goto('https://tinybot.test/mini?task=source');
+        await page.getByRole('button', {name: 'Save to Docblock'}).click();
+        await page.getByRole('button', {name: 'Sign in to Docblock'}).click();
+        await page.waitForFunction(() => Boolean(window.openedLink));
+        assert.match(await page.evaluate(() => window.openedLink), /^https:\/\/docblock.dev\/oauth\/authorize/);
+        state.docblock_access.docs = 'write';
+        await page.getByRole('button', {name: 'Check connection'}).click();
+        await page.getByLabel('Docblock folder').selectOption('work');
+        assert.equal(await page.getByLabel('Docblock workspace').locator('option').count(), 1);
+        await page.getByRole('button', {name: 'Review note', exact: true}).click();
+        await page.getByText('Note: ' + saved.path).waitFor();
+        await page.getByText(reply.text, {exact: false}).waitFor();
+        assert.equal(await page.getByRole('button', {name: 'Always approve'}).count(), 0);
+        await page.getByRole('button', {name: 'Approve once'}).click();
+        await page.getByText('Change approved.').waitFor();
+        await page.goto('https://tinybot.test/mini?task=source');
+        await page.getByText('Saved in Docblock').waitFor();
+        await page.getByRole('button', {name: 'Open note'}).click();
+        assert.equal(await page.evaluate(() => window.openedLink), saved.url);
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
     } finally {
         await browser.close();
@@ -1260,6 +1375,47 @@ test('TinyBot settings form shows exact changes before explicit approval', async
     }
 });
 
+test('settings history reuses the exact signed review before restoring a change', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 640}});
+        const page = await context.newPage();
+        const original = {id: 42, source: 'approval', created: 1795555555, can_restore: true,
+            changes: [{label: 'Time zone', before: 'UTC', after: 'Europe/Amsterdam'}]};
+        const restored = {id: 43, source: 'restore', created: 1795555556, can_restore: true,
+            changes: [{label: 'Time zone', before: 'Europe/Amsterdam', after: 'UTC'}]};
+        let approved = false;
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return {user: '1', provider: 'codex', requests: [], tasks: []};
+            if (action === 'settings-history') return {items: approved ? [restored] : [original], next_before: null};
+            if (action === 'restore-settings') {
+                assert.deepEqual(data, {id: original.id});
+                return {id: 'restore-review', kind: 'settings-approve', content: {changes: restored.changes}};
+            }
+            if (action === 'approve-settings') {
+                assert.deepEqual(data, {id: 'restore-review'});
+                approved = true;
+                return {ok: true};
+            }
+            assert.fail(action);
+        });
+        await page.goto('https://tinybot.test/mini');
+        await page.getByRole('button', {name: 'Settings history', exact: true}).click();
+        await page.getByRole('heading', {name: 'Approved settings change'}).waitFor();
+        await page.getByRole('button', {name: 'Review restore'}).click();
+        const review = page.locator('.settings-review');
+        await review.getByRole('heading', {name: 'Approve settings changes'}).waitFor();
+        assert.deepEqual(await review.locator('dd').allTextContents(), ['Europe/Amsterdam', 'UTC']);
+        assert.equal(approved, false);
+        await review.getByRole('button', {name: 'Approve changes'}).click();
+        await page.getByRole('heading', {name: 'Approved restore'}).waitFor();
+        assert.equal(approved, true);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
+    } finally {
+        await browser.close();
+    }
+});
+
 test('a pending TinyBot settings review can be declined from Requests', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
     try {
@@ -1775,6 +1931,68 @@ test('operator invitations and guest shared memory respect the signed account vi
         await guest.getByRole('button', {name: 'Turn off spend alert', exact: true}).click();
         await guest.getByText('Spend alert turned off.', {exact: true}).waitFor();
         assert.equal(weekly_cents, null);
+    } finally {
+        await browser.close();
+    }
+});
+
+test('project publication reviews the audience and version before sharing', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 640}});
+        const page = await context.newPage();
+        const state = {
+            user: '1', time_zone: 'Europe/Amsterdam', provider: 'openrouter',
+            requests: [], tasks: [], agents: [], schedules: [],
+        };
+        const space = {id: 'space', title: 'Release prep', role: 'owner', joined: true, revision: 5, membership: 'owner'};
+        const members = [
+            {id: 'member', name: 'Casey', role: 'editor', active: true},
+            {id: 'owner', name: 'Jordan', role: 'owner', active: true},
+            {id: 'pending', name: 'Alex', role: 'viewer', active: false, joined: false},
+        ];
+        const items = [];
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return state;
+            if (action === 'list-memories') return {entries: [], next_before: null};
+            if (action === 'list-projects') return {projects: [space]};
+            if (action === 'project-detail') return {space, members, items, next_offset: null};
+            if (action === 'publish-project-item') {
+                assert.deepEqual(data, {
+                    project: 'space',
+                    review: {revision: 5, audience: ['member', 'owner']},
+                    source: {kind: 'note', title: 'Runbook', body: '<script>fixture</script>'},
+                });
+                items.push({
+                    id: 'item', kind: 'note', title: data.source.title, body: data.source.body,
+                    can_manage: true, can_remove: true, can_complete: true, revision: 0, eligible: members.slice(0, 2),
+                });
+                return {item: 'item'};
+            }
+            if (action === 'project-item') {
+                assert.deepEqual(data, {project: 'space', item: 'item', revision: 0, change: {assign: {member: 'member'}}});
+                Object.assign(items[0], {assignee: 'member', assignee_name: 'Casey', revision: 1});
+                return {ok: true};
+            }
+            assert.fail(`Unexpected Mini App action ${action}`);
+        });
+        await page.goto('https://tinybot.test/');
+        await page.getByRole('button', {name: 'Memory', exact: true}).click();
+        await page.getByText('Project spaces', {exact: true}).click();
+        await page.getByRole('button', {name: 'Open project'}).click();
+        await page.getByText('Publish to project', {exact: true}).click();
+        await page.getByLabel('Note title').fill('Runbook');
+        await page.getByRole('textbox', {name: 'Note', exact: true}).fill('<script>fixture</script>');
+        await page.getByRole('button', {name: 'Review note'}).click();
+        await page.getByText('Share with Casey, Jordan', {exact: true}).waitFor();
+        assert.deepEqual(items, []);
+        await page.getByRole('button', {name: 'Publish snapshot'}).click();
+        await page.getByText('Snapshot published.', {exact: true}).waitFor();
+        await page.getByText('<script>fixture</script>', {exact: true}).waitFor();
+        await page.getByLabel('Assign to').selectOption('member');
+        await page.getByRole('button', {name: 'Save assignment'}).click();
+        await page.getByText('Assigned · Casey', {exact: true}).waitFor();
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     } finally {
         await browser.close();
     }

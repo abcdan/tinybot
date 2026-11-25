@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Sqlite, SqlitePool, Transaction};
 use std::time::Duration;
 
+pub(crate) mod notifications;
 mod occurrences;
 mod preview;
 pub(crate) mod webhooks;
@@ -44,6 +45,7 @@ pub struct Schedule {
     quiet_end: Option<i64>,
     snoozed_until: Option<i64>,
     held_until: Option<i64>,
+    notify_changes: bool,
     #[serde(skip)]
     steps: String,
     #[serde(skip)]
@@ -89,6 +91,7 @@ pub struct Run {
     schedule_revision: Option<i64>,
     trigger: Option<String>,
     preview: bool,
+    notification_state: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -111,15 +114,7 @@ pub async fn timezone(db: &SqlitePool, user: &str) -> Result<Tz> {
 }
 
 pub async fn set_zone(db: &SqlitePool, user: &str, value: &str) -> Result<()> {
-    let zone: Tz = value
-        .parse()
-        .context("enter an IANA time zone, such as Europe/Amsterdam")?;
-    sqlx::query("UPDATE users SET time_zone=? WHERE id=?")
-        .bind(zone.name())
-        .bind(user)
-        .execute(db)
-        .await?;
-    Ok(())
+    crate::settings::update_personal(db, user, crate::settings::Key::TimeZone, value).await
 }
 
 pub fn local_iso(timestamp: i64, zone: Tz) -> String {
@@ -129,12 +124,16 @@ pub fn local_iso(timestamp: i64, zone: Tz) -> String {
         .to_rfc3339()
 }
 
-fn next(expression: &str, zone: Tz, after: i64) -> Result<i64> {
+fn parse_cron(expression: &str) -> Result<Cron> {
     ensure!(
         expression.len() <= 110 && expression.split_whitespace().count() == 5,
         "use a five-field cron expression"
     );
-    let expression: Cron = expression.parse().context("invalid cron expression")?;
+    expression.parse().context("invalid cron expression")
+}
+
+fn next(expression: &str, zone: Tz, after: i64) -> Result<i64> {
+    let expression = parse_cron(expression)?;
     let time = DateTime::from_timestamp(after, 0)
         .context("invalid schedule time")?
         .with_timezone(&zone);
@@ -494,7 +493,7 @@ pub async fn history(db: &SqlitePool, user: &str, id: &str) -> Result<Vec<Run>> 
     Ok(sqlx::query_as(
         "SELECT t.id AS task,t.title,t.state,t.updated,r.started_at,r.schedule_revision,
                 CASE WHEN r.request_id LIKE 'webhook/%' THEN 'webhook' ELSE r.trigger END AS trigger,
-                r.preview_sample IS NOT NULL AS preview
+                r.preview_sample IS NOT NULL AS preview,r.notification_state
          FROM tasks t LEFT JOIN schedule_runs r ON r.task=t.id
          WHERE t.schedule=? AND t.user=? AND t.state<>'revoked'
            AND (t.agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=t.agent AND
@@ -566,8 +565,8 @@ async fn enqueue(
         .execute(&mut **tx)
         .await?;
     sqlx::query(
-        "INSERT INTO schedule_runs(task,schedule,schedule_revision,started_at,trigger,request_id,steps,source)
-         VALUES(?,?,?,?,?,?,?,?)",
+        "INSERT INTO schedule_runs(task,schedule,schedule_revision,started_at,trigger,request_id,steps,source,notify_changes)
+         VALUES(?,?,?,?,?,?,?,?,?)",
     )
     .bind(&task)
     .bind(&schedule.id)
@@ -577,6 +576,7 @@ async fn enqueue(
     .bind(request)
     .bind(&schedule.steps)
     .bind(&schedule.source)
+    .bind(!reminder && schedule.notify_changes && request.is_none_or(|request| request.starts_with("webhook/")))
     .execute(&mut **tx)
     .await?;
     crate::audit::open(
@@ -762,6 +762,9 @@ mod tests {
             serde_json::to_value(occurrences(&db, "1", &recurring.id).await.unwrap()).unwrap();
         assert_eq!(history[0]["outcome"], "skipped_overlap");
         assert_eq!(history[1]["outcome"], "queued");
+        assert_eq!(history[1]["due_at"], late);
+        assert_eq!(history[2]["outcome"], "coalesced");
+        assert_eq!(history[3]["outcome"], "coalesced");
         assert!(occurrences(&db, "2", &recurring.id).await.is_err());
         cancel(&db, "1", &recurring.id).await.unwrap();
     }

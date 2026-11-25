@@ -109,7 +109,9 @@ class Worker(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
-            self.send_json(200, {"ok": True})
+            release = os.environ.get("TINYBOT_RELEASE_SHA", "")
+            valid = len(release) == 40 and all(c in "0123456789abcdef" for c in release)
+            self.send_json(200, {"ok": True, "release": release if valid else None})
         else:
             self.send_json(404, {"error": "Unknown sandbox operation."})
 

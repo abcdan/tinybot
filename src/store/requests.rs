@@ -374,6 +374,16 @@ async fn respond_to_request(
             .bind(message)
             .execute(&mut *tx)
             .await?;
+        if entry.kind == "settings-approve"
+            && let (Some(task), Some(revision)) = (&entry.task, entry.revision)
+            && super::settings_history::origin(&mut tx, task)
+                .await?
+                .is_some()
+        {
+            super::settings_history::close_review(&mut tx, task, revision).await?;
+            tx.commit().await?;
+            return Ok(());
+        }
     }
     sqlx::query("UPDATE tasks SET state='queued',updated=? WHERE id=?")
         .bind(now())

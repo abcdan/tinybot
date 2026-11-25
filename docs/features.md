@@ -67,6 +67,19 @@ an approval pause. With an OpenRouter key, Jev checks for repeating work every 1
 attempts. If tool work stops, the Chief works from the results it has and can tell you
 what remains open.
 
+## Share work in a project
+
+Open **Memory → Project spaces** to create a project. Invite existing TinyBot
+users by their Telegram account ID. Each person reviews and accepts their role.
+Editors can publish notes or copies of their private task results. Viewers can read
+items shared with them and check off items assigned to them. Owners manage
+membership and assignments.
+
+Review each snapshot’s version and audience before publishing. New members only
+receive access to items published for them. Revoking a member removes their
+access to the project and any existing assignments. Ordinary chats and memories stay
+private. Use **Shared memory** for a separate paired chat and published notes.
+
 ## Research the public web
 
 > Check this public page and compare the pricing with two official sources.
@@ -143,6 +156,8 @@ Fixed reminders send the saved text directly. Open **Timing policy** to set quie
 hours or decide whether a missed recurring schedule should run once or be skipped.
 **Run history** shows delayed and skipped occurrences as well as results. Use **Dry
 run** to preview a routine with sample input in Telegram.
+For recurring digests, choose **Only when the result changes** under **Timing policy**
+to skip notifications when the facts and next actions match the last delivered result.
 
 Open **Webhook** on an active or manual routine to run it from a trusted external
 service. The service sends `POST` with a JSON body containing a unique `event_id`.

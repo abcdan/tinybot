@@ -1,6 +1,7 @@
 mod accounts;
 mod agents;
 mod mini;
+mod readiness;
 mod routine_webhook;
 mod state;
 
@@ -22,6 +23,7 @@ pub fn router(app: Arc<App>) -> Router {
     Router::new()
         .route("/", get(mini_page))
         .route("/health", get(health))
+        .route("/ready", get(readiness::ready))
         .route("/mini", get(mini_page))
         .route(
             "/app.css",
@@ -64,6 +66,15 @@ pub fn router(app: Arc<App>) -> Router {
             }),
         )
         .route(
+            "/mini-docblock-save.js",
+            get(|| async {
+                asset(
+                    "application/javascript; charset=utf-8",
+                    include_str!("../../web/mini-docblock-save.js"),
+                )
+            }),
+        )
+        .route(
             "/mini-onboarding.js",
             get(|| async {
                 asset(
@@ -100,6 +111,15 @@ pub fn router(app: Arc<App>) -> Router {
             }),
         )
         .route(
+            "/mini-settings-history.js",
+            get(|| async {
+                asset(
+                    "application/javascript; charset=utf-8",
+                    include_str!("../../web/mini-settings-history.js"),
+                )
+            }),
+        )
+        .route(
             "/mini-settings.js",
             get(|| async {
                 asset(
@@ -123,6 +143,15 @@ pub fn router(app: Arc<App>) -> Router {
                 asset(
                     "application/javascript; charset=utf-8",
                     include_str!("../../web/mini-memory.js"),
+                )
+            }),
+        )
+        .route(
+            "/mini-projects.js",
+            get(|| async {
+                asset(
+                    "application/javascript; charset=utf-8",
+                    include_str!("../../web/mini-projects.js"),
                 )
             }),
         )

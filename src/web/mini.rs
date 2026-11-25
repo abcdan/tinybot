@@ -21,6 +21,7 @@ mod mail;
 mod memory;
 mod models;
 mod onboarding;
+mod projects;
 mod settings;
 mod sharing;
 mod task_views;
@@ -81,6 +82,14 @@ pub(super) async fn mini(
                 ApiError(StatusCode::CONFLICT, "Your settings changed. Ask your Chief for a fresh form.")
             } else if error.downcast_ref::<crate::store::settings_requests::NoChanges>().is_some() {
                 ApiError(StatusCode::BAD_REQUEST, crate::store::settings_requests::NoChanges::MESSAGE)
+            } else if let Some(error) = error.downcast_ref::<crate::store::projects::ProjectError>() {
+                use crate::store::projects::ProjectError;
+                let status = match error {
+                    ProjectError::Unavailable => StatusCode::NOT_FOUND,
+                    ProjectError::Forbidden => StatusCode::FORBIDDEN,
+                    ProjectError::Changed | ProjectError::Duplicate => StatusCode::CONFLICT,
+                };
+                ApiError(status, error.message())
             } else if let Some(error) = error.downcast_ref::<browser::SettingsError>() {
                 error.response()
             } else if let Some(error) = error.downcast_ref::<OnboardingError>() {
@@ -156,6 +165,15 @@ async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<
         "restore-guest" => invitations::suspend(app, user, data, false).await?,
         "invite-shared-memory" => invitations::offer_shared_memory(app, user, data).await?,
         "shared-memory-pairs" => return invitations::pairs(app, user).await,
+        "list-projects"
+        | "create-project"
+        | "project-detail"
+        | "project-member"
+        | "preview-project-result"
+        | "publish-project-item"
+        | "project-item" => {
+            return projects::operation(app, user, action, data).await;
+        }
         "join-shared-memory" => invitations::set_joined(app, user, data, true).await?,
         "leave-shared-memory" => invitations::set_joined(app, user, data, false).await?,
         "shared-memory-notes" => return invitations::notes(app, user, data).await,
@@ -175,6 +193,7 @@ async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<
         "add-anything-mcp" => return connectors::add_anything_mcp(app, user, data).await,
         "docblock-oauth" => return connectors::docblock_oauth(app, user, data).await,
         "docblock-workspaces" => return connectors::docblock_workspaces(app, user, data).await,
+        "docblock-folders" => return connectors::docblock_folders(app, user, data).await,
         "docblock-shares" => return connectors::docblock_shares(app, user, data).await,
         "revoke-docblock-share" => connectors::revoke_docblock_share(app, user, data).await?,
         "approve-docblock-share" => connectors::approve_docblock_share(app, user, data).await?,
@@ -191,12 +210,15 @@ async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<
         "search-tasks" => return task_views::search(app, user, data).await,
         "task-detail" => return task_views::detail(app, user, data).await,
         "download-task-file" => return task_views::download(app, user, data).await,
+        "save-result-to-docblock" => return task_views::save_result(app, user, data).await,
         "stop-task" => task_views::stop(app, user, data).await?,
         "complete-task" => task_views::complete(app, user, data).await?,
         "edit-email-draft" => return mail::edit_draft(app, user, data).await,
         "get-form" => return settings::get_form(app, user, data).await,
         "answer-settings-form" => return settings::answer_form(app, user, data).await,
         "approve-settings" => settings::approve(app, user, data).await?,
+        "settings-history" => return settings::history(app, user, data).await,
+        "restore-settings" => return settings::propose_restore(app, user, data).await,
         "submit-form" => tasks::submit_form(app, user, data).await?,
         "answer-form" => tasks::answer_form(app, user, data).await?,
         "time-zone" => tasks::set_time_zone(app, user, data).await?,
