@@ -306,6 +306,34 @@ test('a task deep link shows the latest result and opens the exact pending revie
     }
 });
 
+test('task detail shows verified checkpoints and planned work as text', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 640}});
+        const page = await context.newPage();
+        const task = {id: 'research', title: 'Prepare a release note', state: 'waiting', revision: 4};
+        await mockMiniApp(context, ({action}) => {
+            if (action === 'status') return {user: '1', provider: 'codex', requests: [], tasks: [task]};
+            if (action === 'task-detail') return {task, requests: [], plan: [
+                {position: 0, title: 'Review the latest <draft>', checkpoint: 'Two decisions recorded.', completed_at: 1795555555},
+                {position: 1, title: 'Prepare summary', checkpoint: null, completed_at: null},
+            ]};
+            assert.fail('Unexpected Mini App request ' + action);
+        });
+        await page.goto('https://tinybot.test/mini?task=research');
+        const plan = page.locator('.card').filter({has: page.getByRole('heading', {name: 'Task plan'})});
+        await plan.getByText('Review the latest <draft>', {exact: true}).waitFor();
+        await plan.getByText('Verified', {exact: true}).waitFor();
+        await plan.getByText('Two decisions recorded.', {exact: true}).waitFor();
+        await plan.getByText('Planned', {exact: true}).waitFor();
+        assert.equal(await plan.getByRole('listitem').count(), 2);
+        assert.equal(await plan.getByRole('checkbox').count(), 0);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
+    } finally {
+        await browser.close();
+    }
+});
+
 test('the task files shelf downloads the selected retained version with its safe filename', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
     try {
