@@ -1997,3 +1997,50 @@ test('project publication reviews the audience and version before sharing', asyn
         await browser.close();
     }
 });
+
+
+test('starting a fresh Telegram task clears only the selected continuation', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 640}});
+        const page = await context.newPage();
+        const first = {id: 'first', revision: 3, state: 'running', title: 'Duplicate task title',
+            created_at: 1795526400, updated: 1795526700, recent_reply: 'First run is still working.'};
+        const second = {id: 'second', revision: 2, state: 'idle', title: 'Duplicate task title',
+            created_at: 1795530000, updated: 1795530300, recent_reply: 'Second run gathered the notes.'};
+        const state = {user: '1', provider: 'openrouter', time_zone: 'UTC',
+            requests: [], tasks: [first, second], active_task: first.id, telegram_task: first};
+        const posted = [];
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return state;
+            posted.push({action, data});
+            if (action === 'start-new-task') {
+                assert.deepEqual(data, {task: first.id, revision: first.revision});
+                state.active_task = null;
+                state.telegram_task = null;
+            } else if (action === 'select-task') {
+                assert.deepEqual(data, {task: second.id, revision: second.revision});
+                state.active_task = second.id;
+                state.telegram_task = second;
+            } else assert.fail(`Unexpected action ${action}`);
+            return {ok: true};
+        });
+        await page.goto('https://tinybot.test/');
+        const current = page.locator('section.card').filter({has: page.getByRole('heading', {name: 'Your next Telegram message continues'})});
+        await current.getByText('Duplicate task title', {exact: true}).waitFor();
+        const firstCard = page.locator('.task-card').filter({hasText: first.recent_reply});
+        const secondCard = page.locator('.task-card').filter({hasText: second.recent_reply});
+        assert.notEqual(await firstCard.getByText(/^Started /).textContent(), await secondCard.getByText(/^Started /).textContent());
+        await current.getByRole('button', {name: 'Start new task'}).click();
+        await page.getByText('Send a message in Telegram to start your new task.').waitFor();
+        await current.waitFor({state: 'hidden'});
+        await firstCard.getByText('Working', {exact: true}).waitFor();
+        await secondCard.getByRole('button', {name: 'Continue', exact: true}).click();
+        await current.waitFor();
+        await secondCard.getByText('Current Chief task', {exact: true}).waitFor();
+        assert.deepEqual(posted.map(entry => entry.action), ['start-new-task', 'select-task']);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
+    } finally {
+        await browser.close();
+    }
+});

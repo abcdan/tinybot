@@ -10,15 +10,12 @@ pub(super) async fn status(app: &App, user: &str) -> Result<Value> {
     .bind(user)
     .fetch_one(&app.db)
     .await?;
-    let profile: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT u.provider,u.model,t.id FROM users u LEFT JOIN tasks t ON t.id=u.active_task
-         AND t.user=u.id AND t.chief_chat=1 AND t.state NOT IN ('cancelled','completed','revoked')
-         AND (t.agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=t.agent
-         AND (a.owner=u.id OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=u.id)))) WHERE u.id=?",
-    )
-    .bind(user)
-    .fetch_one(&app.db)
-    .await?;
+    let telegram_task = store::task_views::telegram_task(&app.db, user).await?;
+    let profile: (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT provider,model FROM users WHERE id=?")
+            .bind(user)
+            .fetch_one(&app.db)
+            .await?;
     let agents: Vec<store::Agent> = sqlx::query_as(
         "SELECT * FROM agents a WHERE owner=? OR EXISTS
         (SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=?) ORDER BY name LIMIT 100",
@@ -110,7 +107,8 @@ pub(super) async fn status(app: &App, user: &str) -> Result<Value> {
         .collect();
     Ok(
         json!({"user":user,"operator":user==app.operator,"shared_memory_available":shared_memory_available,
-        "provider":profile.0,"model":profile.1,"active_task":profile.2,
+        "provider":profile.0,"model":profile.1,"active_task":telegram_task.as_ref().map(|task| &task.id),
+        "telegram_task":telegram_task,
         "agents":agents,"tasks":tasks,"requests":requests,"connectors":connectors,"docblock_access":docblock_access,"members":members,"memory":memory,"grants":grants,
         "anything_mcp_origin":app.anything_mcp_origin,
         "schedules":schedules,"time_zone":zone.name(),"openrouter_connected":connections.openrouter_key,
