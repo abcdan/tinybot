@@ -374,10 +374,26 @@ pub async fn notify(db: &SqlitePool, user: &str, body: &str, button: Option<&str
     Ok(())
 }
 
+pub(crate) async fn claim_delivery(db: &SqlitePool) -> Result<Option<Outbound>> {
+    claim_next_outbox(db, true).await
+}
+
+/// Tests that inspect produced messages without running the dispatcher can
+/// claim independent replies even when their synthetic predecessors remain open.
+#[cfg(test)]
 pub async fn claim_outbox(db: &SqlitePool) -> Result<Option<Outbound>> {
+    claim_next_outbox(db, false).await
+}
+
+async fn claim_next_outbox(db: &SqlitePool, order_delivery: bool) -> Result<Option<Outbound>> {
     Ok(sqlx::query_as(
         "UPDATE outbox SET state='sending' WHERE id=(SELECT o.id FROM outbox o WHERE o.state='queued'
-        AND o.retry_at<=? AND (o.button IS NULL OR substr(o.button,1,?)<>?)
+        AND o.retry_at<=?1 AND (o.button IS NULL OR substr(o.button,1,?2)<>?3)
+        AND (NOT ?4 OR NOT EXISTS(
+            SELECT 1 FROM outbox prior WHERE prior.delivery_lane=o.delivery_lane
+            AND prior.state IN ('queued','sending')
+            AND (prior.state='sending' OR (prior.id<o.id
+                AND (prior.button IS NULL OR substr(prior.button,1,?2)<>?3)))))
         AND (o.assistant_event_id IS NULL OR NOT EXISTS(
             SELECT 1 FROM outbox prior WHERE prior.assistant_event_id=o.assistant_event_id
             AND prior.id<o.id AND prior.state IN ('queued','sending')))
@@ -386,6 +402,7 @@ pub async fn claim_outbox(db: &SqlitePool) -> Result<Option<Outbound>> {
     .bind(now())
     .bind(super::acknowledgements::WAIT_PREFIX.len() as i64)
     .bind(super::acknowledgements::WAIT_PREFIX)
+    .bind(order_delivery)
     .fetch_optional(db)
     .await?)
 }

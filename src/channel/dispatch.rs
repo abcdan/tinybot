@@ -2,7 +2,7 @@ use super::{Card, ChannelAdapter, Inbound, MessageDelivery, attachment, callback
 use crate::{forms, security::now, store};
 use anyhow::Result;
 use sqlx::SqlitePool;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 enum Dispatch {
     Sent(Option<i64>),
@@ -195,50 +195,81 @@ pub(super) async fn handle_callback(
     Ok(())
 }
 
-pub async fn outbox(app: std::sync::Arc<crate::App>, adapter: std::sync::Arc<dyn ChannelAdapter>) {
-    let db = &app.db;
+pub async fn outbox(app: Arc<crate::App>, adapter: Arc<dyn ChannelAdapter>) {
+    const DELIVERY_WORKERS: usize = 4;
+    let mut jobs = tokio::task::JoinSet::new();
     loop {
-        let Ok(Some(item)) = store::claim_outbox(db).await else {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            continue;
-        };
-        let dispatch = match store::can_deliver(db, &item).await {
-            Ok(true) => match send_item(&app, &*adapter, &item).await {
-                Ok(MessageDelivery::Sent(id)) => Dispatch::Sent(id),
-                Ok(MessageDelivery::Retry(delay)) => Dispatch::Retry(now() + delay),
-                Ok(MessageDelivery::Skipped) => Dispatch::Skipped,
-                Err(error)
-                    if error.is::<super::UploadUncertain>()
-                        || error.is::<super::DeliveryUncertain>() =>
-                {
-                    Dispatch::Uncertain
-                }
-                Err(_) => Dispatch::Failed,
-            },
-            Ok(false) => Dispatch::Skipped,
-            Err(_) => Dispatch::Retry(now() + 2),
-        };
-        let (state, retry, message_id) = match dispatch {
-            Dispatch::Sent(message_id) => ("sent", 0, message_id),
-            Dispatch::Retry(retry) => ("queued", retry, None),
-            Dispatch::Failed => ("failed", 0, None),
-            Dispatch::Uncertain => ("uncertain", 0, None),
-            Dispatch::Skipped => ("skipped", 0, None),
-        };
-        // A database error here must only retry saving the outcome, never the send itself.
-        loop {
-            let saved = sqlx::query("UPDATE outbox SET state=?,retry_at=?,body=CASE WHEN ?='queued' THEN body ELSE '' END,
-                button=CASE WHEN ?='queued' THEN button ELSE NULL END,
-                widget=CASE WHEN ?='queued' THEN widget ELSE NULL END,
-                telegram_message_id=CASE WHEN NOT EXISTS(SELECT 1 FROM telegram_group_tasks g WHERE g.task=outbox.task) THEN ? END,
-                telegram_group_message_id=CASE WHEN EXISTS(SELECT 1 FROM telegram_group_tasks g WHERE g.task=outbox.task) THEN ? END
-                WHERE id=? AND state='sending'")
-                .bind(state).bind(retry).bind(state).bind(state).bind(state).bind(message_id).bind(message_id).bind(item.id).execute(db).await;
-            if saved.is_ok() {
+        while jobs.len() < DELIVERY_WORKERS {
+            let Ok(Some(item)) = store::claim_delivery(&app.db).await else {
                 break;
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            };
+            let app = Arc::clone(&app);
+            let adapter = Arc::clone(&adapter);
+            jobs.spawn(async move { deliver(&app, &*adapter, &item).await });
         }
+        tokio::select! {
+            Some(result) = jobs.join_next(), if !jobs.is_empty() => {
+                if result.is_err() {
+                    tracing::warn!("an outbound delivery worker stopped unexpectedly");
+                }
+            },
+            _ = tokio::time::sleep(Duration::from_millis(500)), if jobs.len() < DELIVERY_WORKERS => {},
+        }
+    }
+}
+
+async fn deliver(app: &crate::App, adapter: &dyn ChannelAdapter, item: &store::Outbound) {
+    let db = &app.db;
+    let dispatch = match store::can_deliver(db, item).await {
+        Ok(true) => match send_item(app, adapter, item).await {
+            Ok(MessageDelivery::Sent(id)) => Dispatch::Sent(id),
+            Ok(MessageDelivery::Retry(delay)) => Dispatch::Retry(now() + delay),
+            Ok(MessageDelivery::Skipped) => Dispatch::Skipped,
+            Err(error)
+                if error.is::<super::UploadUncertain>()
+                    || error.is::<super::DeliveryUncertain>() =>
+            {
+                Dispatch::Uncertain
+            }
+            Err(_) => Dispatch::Failed,
+        },
+        Ok(false) => Dispatch::Skipped,
+        Err(_) => Dispatch::Retry(now() + 2),
+    };
+    let (state, retry, message_id) = match dispatch {
+        Dispatch::Sent(message_id) => ("sent", 0, message_id),
+        Dispatch::Retry(retry) => ("queued", retry, None),
+        Dispatch::Failed => ("failed", 0, None),
+        Dispatch::Uncertain => ("uncertain", 0, None),
+        Dispatch::Skipped => ("skipped", 0, None),
+    };
+    let progress = item
+        .button
+        .as_deref()
+        .is_some_and(|button| button.starts_with(store::acknowledgements::READY_PREFIX));
+    // On database failure, retry saving the outcome while holding the chat's
+    // claim. The adapter send must never be repeated to recover this write.
+    loop {
+        let saved = sqlx::query(
+            "UPDATE outbox SET state=CASE WHEN ?1='queued' AND ?5 AND button IS NULL THEN 'skipped' ELSE ?1 END,
+                retry_at=?2,body=CASE WHEN ?1='queued' THEN body ELSE '' END,
+                button=CASE WHEN ?1='queued' THEN button ELSE NULL END,
+                widget=CASE WHEN ?1='queued' THEN widget ELSE NULL END,
+                telegram_message_id=CASE WHEN NOT EXISTS(SELECT 1 FROM telegram_group_tasks g WHERE g.task=outbox.task) THEN ?3 END,
+                telegram_group_message_id=CASE WHEN EXISTS(SELECT 1 FROM telegram_group_tasks g WHERE g.task=outbox.task) THEN ?3 END
+             WHERE id=?4 AND state='sending'",
+        )
+        .bind(state)
+        .bind(retry)
+        .bind(message_id)
+        .bind(item.id)
+        .bind(progress)
+        .execute(db)
+        .await;
+        if saved.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
 

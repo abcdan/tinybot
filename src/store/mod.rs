@@ -36,10 +36,12 @@ pub use queue::{
 pub(crate) use reactions::has_queued_reaction;
 pub use reactions::{REACTION_EMOJIS, queue_reaction, reaction_target};
 pub use replies::{SuggestedReply, redeem_reply, suggested_replies};
+pub(crate) use requests::claim_delivery;
+#[cfg(test)]
+pub use requests::claim_outbox;
 pub use requests::{
-    approve_docblock_share, can_deliver, claim_approval, claim_outbox, finish_action,
-    list_requests, notify, pause, respond, respond_email, respond_mcp, start_action,
-    uncertain_action,
+    approve_docblock_share, can_deliver, claim_approval, finish_action, list_requests, notify,
+    pause, respond, respond_email, respond_mcp, start_action, uncertain_action,
 };
 
 use crate::security::{id, now};
