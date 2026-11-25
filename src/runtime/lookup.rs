@@ -1,7 +1,7 @@
-use super::{Outcome, string};
+use super::{Outcome, Step, string};
 use crate::{
     audit,
-    model::{ModelProvider, json_reply},
+    model::{ModelProvider, ProviderFailure, parse_json_reply},
     net,
     security::{clip, hash},
 };
@@ -18,7 +18,7 @@ const FINAL_REPLY: &str = concat!(
     "Distinguish opened pages from indexed search results and say what you could not verify. ",
     "If the evidence does not answer the question, explain that limitation without listing unrelated results or copying raw observations. ",
     "For a sourced answer, add a blank line, a Sources: (Dutch: Bronnen:) heading, and one HTTPS Markdown link per relevant source. ",
-    r#"Return only JSON {"text":string}."#,
+    "Return only the final message text.",
 );
 pub(super) const UNVERIFIED_REPLY: &str = "I couldn’t verify the requested information.";
 
@@ -151,8 +151,43 @@ pub(super) fn opened_page(observation: &Value) -> Option<Value> {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct FinalReply {
-    pub(super) text: String,
+struct FinalReply {
+    text: String,
+}
+
+pub(super) fn reply_text(response: &str, allow_empty: bool) -> Result<String> {
+    let text = match parse_json_reply::<Step>(response) {
+        Ok(Step::Reply { text, .. }) => text,
+        Ok(_) => return Err(ProviderFailure::Incomplete.into()),
+        Err(_) => match parse_json_reply::<FinalReply>(response) {
+            Ok(reply) => reply.text,
+            Err(_) => {
+                let text = response.trim();
+                let link_led = text
+                    .strip_prefix('[')
+                    .and_then(|rest| rest.split_once("]("))
+                    .and_then(|(_, target)| target.split_once(')'))
+                    .is_some_and(|(url, _)| {
+                        url.starts_with("https://") && net::website(url).is_ok()
+                    });
+                ensure!(
+                    !text.starts_with(['{', '"', '<'])
+                        && (!text.starts_with('[') || link_led)
+                        && !text.starts_with("```")
+                        && !matches!(text, "null" | "true" | "false")
+                        && text.chars().any(char::is_alphanumeric)
+                        && text.len() <= 8_000,
+                    ProviderFailure::Incomplete
+                );
+                text.to_owned()
+            }
+        },
+    };
+    ensure!(
+        !text.trim().is_empty() || allow_empty,
+        ProviderFailure::Incomplete
+    );
+    Ok(text)
 }
 
 pub(super) async fn reply(
@@ -176,13 +211,44 @@ pub(super) async fn reply(
         "tool_stop_reason":stop_reason,
     });
     audit::model("lookup_final_reply", async {
-        let reply = tokio::time::timeout(
+        let response = tokio::time::timeout(
             Duration::from_secs(45),
-            json_reply::<FinalReply>(model, FINAL_REPLY, &input),
+            model.complete(FINAL_REPLY, &input.to_string()),
         )
         .await??;
-        ensure!(!reply.text.trim().is_empty(), "empty final lookup reply");
-        Ok(reply.text)
+        reply_text(&response, false)
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+
+    struct PlainReply;
+
+    #[async_trait]
+    impl ModelProvider for PlainReply {
+        async fn complete(&self, system: &str, input: &str) -> Result<String> {
+            assert!(system.contains("Return only the final message text"));
+            let input: Value = serde_json::from_str(input)?;
+            assert_eq!(
+                input["latest_request"],
+                "When does the research meeting start?"
+            );
+            Ok("The meeting starts at 10:00.".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn the_final_model_can_answer_as_plain_text_without_exposing_tool_envelopes() {
+        let context = json!({"latest_request":"When does the research meeting start?"});
+        assert_eq!(
+            reply(&PlainReply, &context, None).await.unwrap(),
+            "The meeting starts at 10:00."
+        );
+        assert!(reply_text(r#"{"kind":"tool","name":"browse","args":{}}"#, false).is_err());
+        assert!(reply_text(r#"{"text":"A truncated message"#, false).is_err());
+    }
 }
