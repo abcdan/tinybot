@@ -71,6 +71,12 @@ test('schedules edit instructions, pause and run a saved routine', async () => {
                 schedule.revision++;
                 return {ok: true};
             }
+            if (action === 'preview-routine') {
+                assert.equal(data.revision, 3);
+                assert.equal(data.sample, 'Sample update: release ready.');
+                assert.match(data.request_id, /^[a-f0-9-]{36}$/);
+                return {task: 'fixture-preview'};
+            }
             assert.fail(`Unexpected Mini App action ${action}`);
         });
         await page.goto('https://tinybot.test/');
@@ -92,6 +98,10 @@ test('schedules edit instructions, pause and run a saved routine', async () => {
         await page.getByLabel('Quiet hours end').fill('07:00');
         await page.getByRole('button', {name: 'Save timing policy'}).click();
         await page.getByText('Timing policy saved.').waitFor();
+        await page.getByText('Dry run', {exact: true}).click();
+        await page.getByLabel('Sample input').fill('Sample update: release ready.');
+        await page.getByRole('button', {name: 'Preview in Telegram'}).click();
+        await page.getByText('Dry run queued. The preview will arrive in Telegram.').waitFor();
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
     } finally {
         await browser.close();
