@@ -40,8 +40,59 @@ export function dismissCookieDialog(data) {
     return value ?? true;
 }
 
+function findConsentRegion(element, {selector, words, title, allowAll, generic, plain}) {
+    const cookies = new RegExp(words, 'i');
+    const heading = new RegExp(title, 'i');
+    const affirmative = new RegExp(allowAll, 'i');
+    const decline = new RegExp(generic, 'i');
+    const label = (element.getAttribute('aria-label') || element.innerText || element.value || '').trim();
+    const formAction = element.form && (element.type === 'submit' || element.type === 'reset');
+    const navigates = element instanceof HTMLAnchorElement && Boolean(element.href)
+        && !element.getAttribute('href')?.startsWith('#');
+    if (formAction || navigates || affirmative.test(label) ||
+        affirmative.test(element.innerText?.trim() ?? '')) return null;
+    if (plain &&
+        (!element.matches('div,span') || element.closest('a,button,input,form,label,[role="link"],[role="button"]') ||
+         ![...element.parentElement?.children ?? []].some(other => other !== element &&
+             other.matches('div,span,button,[role="button"]') &&
+             affirmative.test((other.getAttribute('aria-label') || other.textContent || '').trim())))) {
+        return null;
+    }
+    let found = null;
+    for (let region = element.parentElement, depth = 0; region && region !== document.body && depth < 6;
+        region = region.parentElement ?? region.getRootNode().host, depth++) {
+        if (!cookies.test((region.innerText || region.textContent || '').slice(0, 2000))) continue;
+        const marked = region.matches(selector);
+        const positioned = ['fixed', 'sticky'].includes(getComputedStyle(region).position);
+        if (!marked && (plain || !positioned)) continue;
+        const headed = heading.test(region.getAttribute('aria-label')?.trim() ?? '') ||
+            [...region.querySelectorAll('h1,h2,h3,h4,h5,h6,[role="heading"]')]
+                .some(node => heading.test((node.innerText || node.textContent || '').trim()));
+        const allowsAll = plain || [...region.querySelectorAll('button,[role="button"],input[type="button"]')]
+            .some(other => affirmative.test((other.getAttribute('aria-label') || other.innerText || other.value || '').trim()));
+        if (!headed && !allowsAll && (!marked || !label || decline.test(label))) continue;
+        found ??= region;
+        if (positioned || region.matches('dialog,[role="dialog"],[role="alertdialog"],[aria-modal="true"]')) {
+            return region;
+        }
+    }
+    return found;
+}
+
+function onscreen(element) {
+    const visible = node => {
+        const rect = node.getBoundingClientRect();
+        return rect.right > 0 && rect.bottom > 0 && rect.left < innerWidth && rect.top < innerHeight &&
+            rect.width > 0 && rect.height > 0 &&
+            node.checkVisibility({opacityProperty: true, visibilityProperty: true});
+    };
+    return element.isConnected &&
+        (visible(element) || [...element.children].slice(0, 12).some(visible));
+}
+
 async function inspectCookieDialogs(page, signal) {
     let visible = false;
+    let dormant = false;
     for (const frame of page.frames().slice(0, 12)) {
         signal?.throwIfAborted();
         try {
@@ -76,58 +127,51 @@ async function inspectCookieDialogs(page, signal) {
                 modalSelector: modal, words: cookieText.source, title: cookieHeading.source,
                 allowAll: acceptAllChoice.source, required: requiredCookieChoice.source,
             });
-            const choices = frame.getByRole('button', {name: requiredCookieChoice});
-            const count = Math.min(8, await choices.count());
-            for (let index = 0; index < count; index++) {
-                const choice = await choices.nth(index).elementHandle({timeout: 200});
-                if (!choice) continue;
-                const evidence = await choice.evaluate((element, {selector, words, title, allowAll, generic}) => {
-                    const rect = element.getBoundingClientRect();
-                    if (rect.right <= 0 || rect.bottom <= 0 || rect.left >= innerWidth || rect.top >= innerHeight ||
-                            !element.checkVisibility({opacityProperty: true, visibilityProperty: true})) return null;
-                    const cookieWords = new RegExp(words, 'i');
-                    const explicitHeading = new RegExp(title, 'i');
-                    const affirmative = new RegExp(allowAll, 'i');
-                    const decline = new RegExp(generic, 'i');
-                    const label = element.getAttribute('aria-label') || element.innerText || element.value || '';
-                    for (let region = element.parentElement, depth = 0; region && region !== document.body && depth < 6;
-                        region = region.parentElement ?? region.getRootNode().host, depth++) {
-                        if (!cookieWords.test(region.innerText?.slice(0, 2000) ?? '')) continue;
-                        const marked = region.matches(selector);
-                        if (!marked && !['fixed', 'sticky'].includes(getComputedStyle(region).position)) continue;
-                        const headed = explicitHeading.test(region.getAttribute('aria-label')?.trim() ?? '') ||
-                            [...region.querySelectorAll('h1,h2,h3,h4,h5,h6,[role="heading"]')]
-                                .some(heading => explicitHeading.test(heading.innerText?.trim() ?? ''));
-                        const allowsAll = [...region.querySelectorAll('button,[role="button"],input[type="button"]')]
-                            .some(other => affirmative.test((other.getAttribute('aria-label') || other.innerText || other.value || '').trim()));
-                        if (!headed && !allowsAll && (!marked || !label || decline.test(label.trim()))) continue;
-                        const formAction = element.form && (element.type === 'submit' || element.type === 'reset');
-                        const navigates = element instanceof HTMLAnchorElement && Boolean(element.href)
-                            && !element.getAttribute('href')?.startsWith('#');
-                        return {safe: !formAction && !navigates};
+            for (const [choices, plain] of [
+                [frame.getByRole('button', {name: requiredCookieChoice, includeHidden: true}), false],
+                [frame.getByText(requiredCookieChoice), true],
+            ]) {
+                const count = Math.min(8, await choices.count());
+                for (let index = 0; index < count; index++) {
+                    const choice = await choices.nth(index).elementHandle({timeout: 200});
+                    if (!choice) continue;
+                    let region;
+                    let actionable = false;
+                    try {
+                        region = await choice.evaluateHandle(findConsentRegion, {
+                            selector: namedRegion, words: cookieText.source, title: cookieHeading.source,
+                            allowAll: acceptAllChoice.source, generic: genericDecline.source, plain,
+                        });
+                        if (!region.asElement()) continue;
+                        const shown = await region.evaluate(onscreen);
+                        const choiceShown = await choice.evaluate(onscreen);
+                        visible ||= shown || choiceShown;
+                        dormant ||= !shown && !choiceShown;
+                        actionable = choiceShown;
+                        if (actionable) return {visible: true, choice, region};
+                    } finally {
+                        if (!actionable) {
+                            await choice.dispose();
+                            await region?.dispose();
+                        }
                     }
-                    return null;
-                }, {
-                    selector: namedRegion, words: cookieText.source, title: cookieHeading.source,
-                    allowAll: acceptAllChoice.source, generic: genericDecline.source,
-                });
-                if (evidence?.safe) return {visible: true, choice};
-                visible ||= evidence !== null;
-                await choice.dispose();
+                }
             }
         } catch {
             // A consent frame can detach or redraw while Chromium is inspecting it.
             signal?.throwIfAborted();
         }
     }
-    return {visible, choice: null};
+    return {visible, dormant, choice: null};
 }
 
 export async function prepareCookieDialog(page, dismiss, signal) {
-    const deadline = performance.now() + 400;
+    const start = performance.now();
+    let deadline = start + 400;
     let result;
     do {
         result = await inspectCookieDialogs(page, signal);
+        if (result.dormant) deadline = start + 1450;
         if (result.choice || (!dismiss && result.visible) || performance.now() >= deadline) break;
         await delay(100, undefined, {signal});
     } while (true);
@@ -135,20 +179,25 @@ export async function prepareCookieDialog(page, dismiss, signal) {
     try {
         if (!dismiss) return 'visible';
         await result.choice.click({timeout: 500});
+        const settle = performance.now() + 500;
+        do {
+            const regionVisible = await result.region.evaluate(onscreen);
+            if (!regionVisible) {
+                const current = await inspectCookieDialogs(page, signal);
+                await current.choice?.dispose();
+                await current.region?.dispose();
+                if (!current.visible) return 'dismissed';
+            }
+            if (performance.now() >= settle) return 'visible';
+            await delay(100, undefined, {signal});
+        } while (true);
     } catch {
         signal?.throwIfAborted();
         return 'visible';
     } finally {
         await result.choice.dispose();
+        await result.region.dispose();
     }
-    const settle = performance.now() + 500;
-    do {
-        const current = await inspectCookieDialogs(page, signal);
-        await current.choice?.dispose();
-        if (!current.visible) return 'dismissed';
-        if (performance.now() >= settle) return 'visible';
-        await delay(100, undefined, {signal});
-    } while (true);
 }
 
 export function recordingOptions(data) {

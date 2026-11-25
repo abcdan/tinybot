@@ -155,6 +155,36 @@ test('screenshot clicks functional-only in a cookie dialog and can keep the dial
         '/offer': '<section role="dialog"><h2>Special offer</h2><p>Get a cookie with your membership.</p>' +
             button('No thanks', 'unrelated') + '</section>' +
             '<footer class="cookie-settings"><button aria-label="Cookie settings">Cookie settings</button></footer>',
+        '/delayed-popup': `
+            <style>
+                .cookie-warning-modal { position: fixed; top: 24px; left: 24px; width: 0; height: 0; }
+                .cookie-warning-modal__inner { display: none; width: 330px; padding: 24px; background: #eee; }
+                .show .cookie-warning-modal__inner { display: block; }
+                .btn-cookie { cursor: pointer; padding: 8px; }
+            </style>
+            <h1>Public page</h1>
+            <div class="btn-cookie" onclick="fetch('/choice/unrelated')">Functional only</div>
+            <div id="cookie" class="cookie-warning-modal cookie-warning-modal--popup">
+                <div class="cookie-warning-modal__inner cookie">
+                    <div class="cookie__body__title">Cookies</div>
+                    <p>Choose whether to allow optional website cookies.</p>
+                    <div class="cookie__footer-block">
+                        <div class="btn-cookie" aria-label="Allow all" onclick="fetch('/choice/unrelated')">Functional only</div>
+                        <div class="btn-cookie btn-cookie--ghost" id="accept-functional">Functional only</div>
+                        <div class="btn-cookie" id="accept-all" onclick="fetch('/choice/allow-all')">Allow all</div>
+                    </div>
+                </div>
+            </div>
+            <script>
+                const dialog = document.querySelector('#cookie');
+                document.querySelector('#accept-functional').addEventListener('click', () => {
+                    fetch('/choice/late-functional');
+                    dialog.classList.remove('show');
+                });
+                document.addEventListener('DOMContentLoaded', () => {
+                    setTimeout(() => dialog.classList.add('show'), 1000);
+                });
+            </script>`,
     };
     const fixture = {
         async newContext(settings) {
@@ -200,6 +230,15 @@ test('screenshot clicks functional-only in a cookie dialog and can keep the dial
         const offer = await operate(fixture, '/screenshot', {url: 'https://fixture.example/offer'});
         assert.equal(offer.cookieDialog, null);
         assert.deepEqual(clicks, ['/choice/functional', '/choice/necessary']);
+
+        const late = {url: 'https://fixture.example/delayed-popup'};
+        const visiblePopup = await operate(fixture, '/screenshot', {...late, dismiss_cookie_dialog: false});
+        assert.equal(visiblePopup.cookieDialog, 'visible');
+        assert.deepEqual(clicks, ['/choice/functional', '/choice/necessary']);
+        const dismissedPopup = await operate(fixture, '/screenshot', late);
+        assert.equal(dismissedPopup.cookieDialog, 'dismissed');
+        assert.notDeepEqual(dismissedPopup.bytes, visiblePopup.bytes);
+        assert.deepEqual(clicks, ['/choice/functional', '/choice/necessary', '/choice/late-functional']);
     } finally {
         await browser.close();
     }
