@@ -1,5 +1,5 @@
 use super::email;
-use super::execution::{finish, resume_approval};
+use super::execution::{ApprovalProgress, finish, resume_approval};
 use super::feedback::Feedback;
 use super::lookup::{self, Lookup};
 use super::loop_guard::{self, Progress};
@@ -84,8 +84,10 @@ async fn run_turn(
         connectors,
         allowed_tools,
     };
-    if !resume_approval(&ctx).await? {
-        return store::settle(&app.db, task, "idle", None).await;
+    match resume_approval(&ctx).await? {
+        ApprovalProgress::Continue => {}
+        ApprovalProgress::Settle => return store::settle(&app.db, task, "idle", None).await,
+        ApprovalProgress::Finished => return Ok(()),
     }
     let saved: Vec<(String, String, Option<String>)> = sqlx::query_as(
         "SELECT a.id,a.name,CASE WHEN a.owner=? THEN a.instructions END FROM agents a
@@ -706,7 +708,7 @@ async fn run_turn(
                     audit::tool_finished(tool.name(), &result).await;
                     match result {
                         Ok(Outcome::Pause) => return Ok(()),
-                        Ok(Outcome::Media { .. }) => {
+                        Ok(Outcome::Media(_)) => {
                             anyhow::bail!("media requires an action checkpoint")
                         }
                         Ok(Outcome::Continue(value)) => {
@@ -781,8 +783,8 @@ async fn run_turn(
                     )
                     .await?;
                     lookups.insert(lookup);
-                } else {
-                    finish(&ctx, &action, result, false).await?;
+                } else if finish(&ctx, &action, result, false).await? {
+                    return Ok(());
                 }
                 if name == "set_goal" {
                     goal = sqlx::query_scalar("SELECT goal FROM tasks WHERE id=?")

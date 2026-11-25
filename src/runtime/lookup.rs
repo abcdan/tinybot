@@ -61,7 +61,7 @@ impl Lookup {
                 "tool":self.tool,"target":self.target,"status":"failed","error":clip(&error.to_string(), 280)
             }),
             Ok(Outcome::Pause) => json!({"tool":self.tool,"target":self.target,"status":"paused"}),
-            Ok(Outcome::Media { .. }) => json!({
+            Ok(Outcome::Media(_)) => json!({
                 "tool":self.tool,"target":self.target,"status":"failed","error":"Unexpected media result."
             }),
         }

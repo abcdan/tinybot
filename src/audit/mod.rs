@@ -251,7 +251,7 @@ pub(crate) async fn tool_finished(name: &str, output: &Result<Outcome>) {
             ("completed", Value::Null)
         }
         Ok(Outcome::Pause) => ("paused", Value::Null),
-        Ok(Outcome::Media { .. }) => ("prepared", Value::Null),
+        Ok(Outcome::Media(_)) => ("prepared", Value::Null),
         Err(error) => ("failed", json!({"category":details::error_category(error)})),
     };
     record("tool", name, status, detail).await;

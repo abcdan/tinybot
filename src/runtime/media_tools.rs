@@ -1,5 +1,10 @@
 use super::{Intent, Outcome, Risk, Tool, ToolContext, string};
-use crate::{audit, model::MAX_IMAGE_PROMPT_BYTES, net, store, store::outputs::MediaFormat};
+use crate::{
+    audit,
+    model::MAX_IMAGE_PROMPT_BYTES,
+    net, store,
+    store::outputs::{MediaDelivery, MediaFormat},
+};
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -65,15 +70,21 @@ pub(super) async fn pin_image_model(
 #[serde(deny_unknown_fields)]
 struct Page {
     url: String,
+    dismiss_cookie_dialog: Option<bool>,
+    #[serde(default)]
+    continue_task: bool,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Recording {
     url: String,
+    dismiss_cookie_dialog: Option<bool>,
     duration_seconds: Option<u8>,
     #[serde(default)]
     scroll: bool,
+    #[serde(default)]
+    continue_task: bool,
 }
 
 #[derive(Deserialize)]
@@ -82,6 +93,17 @@ struct ImageRequest {
     prompt: String,
     #[serde(rename = "_image_model")]
     model: String,
+    #[serde(default)]
+    continue_task: bool,
+}
+
+struct CaptureRequest {
+    url: Url,
+    body: Value,
+    route: &'static str,
+    mime: &'static str,
+    format: MediaFormat,
+    continue_task: bool,
 }
 
 fn public_page(value: &str) -> Result<Url> {
@@ -103,16 +125,21 @@ fn public_page(value: &str) -> Result<Url> {
 }
 
 impl MediaTool {
-    fn capture(
-        &self,
-        args: &Value,
-    ) -> Result<(Url, Value, &'static str, &'static str, MediaFormat)> {
+    fn capture(&self, args: &Value) -> Result<CaptureRequest> {
         match self {
             Self::Screenshot => {
                 let page: Page = serde_json::from_value(args.clone())?;
                 let url = public_page(&page.url)?;
-                let request = json!({"url":url.as_str()});
-                Ok((url, request, "screenshot", "image/png", MediaFormat::Png))
+                let body = json!({"url":url.as_str(),
+                    "dismiss_cookie_dialog":page.dismiss_cookie_dialog.unwrap_or(true)});
+                Ok(CaptureRequest {
+                    url,
+                    body,
+                    route: "screenshot",
+                    mime: "image/png",
+                    format: MediaFormat::Png,
+                    continue_task: page.continue_task,
+                })
             }
             Self::Record => {
                 let recording: Recording = serde_json::from_value(args.clone())?;
@@ -122,8 +149,16 @@ impl MediaTool {
                     "recordings must be between 2 and 10 seconds"
                 );
                 let url = public_page(&recording.url)?;
-                let request = json!({"url":url.as_str(),"duration_seconds":seconds,"scroll":recording.scroll});
-                Ok((url, request, "record", "video/mp4", MediaFormat::Mp4))
+                let body = json!({"url":url.as_str(),"duration_seconds":seconds,"scroll":recording.scroll,
+                    "dismiss_cookie_dialog":recording.dismiss_cookie_dialog.unwrap_or(true)});
+                Ok(CaptureRequest {
+                    url,
+                    body,
+                    route: "record",
+                    mime: "video/mp4",
+                    format: MediaFormat::Mp4,
+                    continue_task: recording.continue_task,
+                })
             }
             _ => unreachable!("only browser tools capture pages"),
         }
@@ -170,7 +205,7 @@ impl Tool for MediaTool {
     }
 
     fn input_schema(&self) -> Value {
-        let (properties, required) = match self {
+        let (mut properties, required) = match self {
             Self::Screenshot => (json!({"url":{"type":"string","maxLength":2048}}), "url"),
             Self::Record => (
                 json!({"url":{"type":"string","maxLength":2048},
@@ -182,6 +217,12 @@ impl Tool for MediaTool {
                 "prompt",
             ),
         };
+        properties["continue_task"] = json!({"type":"boolean","description":
+            "Set true when there is other requested work after this media. Defaults to false."});
+        if matches!(self, Self::Screenshot | Self::Record) {
+            properties["dismiss_cookie_dialog"] = json!({"type":"boolean","description":
+                "Use a functional-only or reject option on recognized cookie dialogs. Defaults to true. Set false to capture the cookie dialog itself."});
+        }
         json!({"type":"object","properties":properties,"required":[required],"additionalProperties":false})
     }
 
@@ -192,13 +233,17 @@ impl Tool for MediaTool {
         );
         let (risk, destination, detail) = match self {
             Self::Screenshot | Self::Record => {
-                let (url, _, _, _, _) = self.capture(args)?;
+                let request = self.capture(args)?;
                 let action = if matches!(self, Self::Screenshot) {
                     "Capture a page screenshot"
                 } else {
                     "Record a short page video"
                 };
-                (Risk::PublicRead, url.origin().ascii_serialization(), action)
+                (
+                    Risk::PublicRead,
+                    request.url.origin().ascii_serialization(),
+                    action,
+                )
             }
             Self::Generate | Self::Edit => {
                 let request = Self::image_request(ctx, args).await?;
@@ -227,12 +272,20 @@ impl Tool for MediaTool {
             "task or authorization changed"
         );
         let app = ctx.app;
-        let (format, bytes) = match self {
+        let (format, bytes, finish_turn, cookie_dialog) = match self {
             Self::Screenshot | Self::Record => {
-                let (_, request, route, mime, format) = self.capture(&args)?;
+                let request = self.capture(&args)?;
+                let capture = app
+                    .workers
+                    .browser_capture(request.route, request.mime, &request.body)
+                    .await?;
+                let blocked = request.body["dismiss_cookie_dialog"] == true
+                    && capture.cookie_dialog == Some("visible");
                 (
-                    format,
-                    app.workers.browser_capture(route, mime, &request).await?,
+                    request.format,
+                    capture.bytes,
+                    !request.continue_task && !blocked,
+                    capture.cookie_dialog,
                 )
             }
             Self::Generate | Self::Edit => {
@@ -263,13 +316,20 @@ impl Tool for MediaTool {
                     "image/webp" => MediaFormat::Webp,
                     _ => anyhow::bail!("unsupported image format"),
                 };
-                (format, generated.bytes)
+                (format, generated.bytes, !request.continue_task, None)
             }
         };
-        Ok(Outcome::Media {
+        let unfinished_plan = finish_turn
+            && store::checkpoints::plan(&app.db, &ctx.task.id, ctx.task.revision, false)
+                .await?
+                .iter()
+                .any(|step| step.completed_at.is_none());
+        Ok(Outcome::Media(MediaDelivery {
             tool: self.name(),
             format,
             bytes,
-        })
+            finish_turn: finish_turn && !unfinished_plan,
+            cookie_dialog,
+        }))
     }
 }

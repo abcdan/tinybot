@@ -56,16 +56,25 @@ pub(crate) struct Output {
     pub ephemeral: bool,
 }
 
+pub(crate) struct MediaDelivery {
+    pub(crate) tool: &'static str,
+    pub(crate) format: MediaFormat,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) finish_turn: bool,
+    pub(crate) cookie_dialog: Option<&'static str>,
+}
+
 pub(crate) async fn queue_media(
     db: &SqlitePool,
     vault: &Vault,
     task: &Task,
     action: &str,
-    tool: &str,
-    format: MediaFormat,
-    bytes: &[u8],
+    media: &MediaDelivery,
 ) -> Result<bool> {
-    ensure!(format.valid(bytes), "invalid or oversized output media");
+    ensure!(
+        media.format.valid(&media.bytes),
+        "invalid or oversized output media"
+    );
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     let (reply,): (Option<i64>,) = sqlx::query_as(
         "SELECT (SELECT e.telegram_message_id FROM events e WHERE e.task=t.id
@@ -81,7 +90,7 @@ pub(crate) async fn queue_media(
     .fetch_optional(&mut *tx)
     .await?
     .context("private task is unavailable")?;
-    let label = if format.is_video() {
+    let label = if media.format.is_video() {
         "recording"
     } else {
         "image"
@@ -93,21 +102,24 @@ pub(crate) async fn queue_media(
         &task.id,
         task.revision,
         "document",
-        &format!("{label}.{}", format.extension()),
-        bytes,
+        &format!("{label}.{}", media.format.extension()),
+        &media.bytes,
         reply,
         None,
-        Some(format),
+        Some(media.format),
     )
     .await?;
-    super::requests::finish_action_in(
-        &mut tx,
-        task,
-        action,
-        &json!({"queued":queued,"media_delivery":tool}).to_string(),
-        false,
-    )
-    .await?;
+    if queued {
+        super::acknowledgements::skip_unwritten(&mut tx, task).await?;
+    }
+    let mut result = json!({"queued":queued,"media_delivery":media.tool});
+    if let Some(cookie_dialog) = media.cookie_dialog {
+        result["cookie_dialog"] = json!(cookie_dialog);
+    }
+    super::requests::finish_action_in(&mut tx, task, action, &result.to_string(), false).await?;
+    if queued && media.finish_turn {
+        super::queue::settle_state(&mut tx, task, "idle").await?;
+    }
     tx.commit().await?;
     Ok(queued)
 }
