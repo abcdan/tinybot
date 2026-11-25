@@ -127,23 +127,34 @@ function scheduleCard(state, schedule) {
         const history = node('div');
         if (!runs.length && !occurrences.length) history.append(node('p', 'No runs yet.'));
         const status = {idle: 'Finished', setup: 'Needs setup', completed: 'Finished', running: 'Working', waiting: 'Needs you'};
-        const seen = new Set();
-        for (const occurrence of occurrences) {
-            if (occurrence.task) seen.add(occurrence.task);
-            const labels = {deferred: 'Deferred', skipped_overlap: 'Skipped · previous run still open',
-                skipped_missed: 'Skipped · missed occurrence', invalid: 'Invalid schedule', superseded: 'Schedule changed'};
-            const delivery = {sent: 'Delivered', queued: 'Delivery queued', sending: 'Sending', failed: 'Delivery failed', uncertain: 'Delivery unconfirmed'};
-            const result = occurrence.notification_state === 'unchanged' ? 'Unchanged · no message sent'
-                : labels[occurrence.outcome] ?? delivery[occurrence.delivery]
-                ?? status[occurrence.task_state] ?? occurrence.task_state ?? 'Run queued';
-            const entry = card(scheduleTime(occurrence.due_at, schedule.time_zone), result);
-            if (occurrence.delayed_until) {
-                entry.append(node('p', `Held until ${scheduleTime(occurrence.delayed_until, schedule.time_zone)}`, 'meta'));
+        const seen = new Set(occurrences.map(occurrence => occurrence.task).filter(Boolean));
+        const receipts = node('div');
+        history.append(receipts);
+        const labels = {deferred: 'Deferred', skipped_overlap: 'Skipped · previous run still open',
+            skipped_missed: 'Skipped · missed occurrence', coalesced: 'Combined into one run',
+            invalid: 'Invalid schedule', superseded: 'Schedule changed'};
+        const delivery = {sent: 'Delivered', queued: 'Delivery queued', sending: 'Sending', failed: 'Delivery failed', uncertain: 'Delivery unconfirmed'};
+        let displayed = 0;
+        const older = button('Show older occurrences', showMore, true);
+        showMore();
+        history.append(older);
+        function showMore() {
+            const page = occurrences.slice(displayed, displayed + 30);
+            for (const occurrence of page) {
+                const result = occurrence.notification_state === 'unchanged' ? 'Unchanged · no message sent'
+                    : labels[occurrence.outcome] ?? delivery[occurrence.delivery]
+                    ?? status[occurrence.task_state] ?? occurrence.task_state ?? 'Run queued';
+                const entry = card(scheduleTime(occurrence.due_at, schedule.time_zone), result);
+                if (occurrence.delayed_until) {
+                    entry.append(node('p', `Held until ${scheduleTime(occurrence.delayed_until, schedule.time_zone)}`, 'meta'));
+                }
+                if (occurrence.task && occurrence.task_state !== 'cancelled') {
+                    entry.append(action('Continue in chat', 'select-task', {task: occurrence.task}, 'Send your next message in Telegram.', true));
+                }
+                receipts.append(entry);
             }
-            if (occurrence.task && occurrence.task_state !== 'cancelled') {
-                entry.append(action('Continue in chat', 'select-task', {task: occurrence.task}, 'Send your next message in Telegram.', true));
-            }
-            history.append(entry);
+            displayed += page.length;
+            older.hidden = displayed >= occurrences.length;
         }
         for (const run of runs.filter(run => !seen.has(run.task))) {
             const type = {manual: 'Manual', schedule: 'Scheduled', webhook: 'Webhook'};

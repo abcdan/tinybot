@@ -63,7 +63,13 @@ test('schedules edit instructions, pause and run a saved routine', async () => {
             }
             if (action === 'schedule-history') {
                 return {runs: [{task: 'fixture-run', title: 'Weekly review', state: 'idle', trigger: 'manual', started_at: 1795526400}],
-                    occurrences: [{due_at: 1795526400, outcome: 'skipped_overlap'}]};
+                    occurrences: [
+                        {due_at: 1795526400, outcome: 'skipped_overlap'},
+                        ...Array.from({length: 29}, (_, index) => ({
+                            due_at: 1795526340 - 60 * index, outcome: 'skipped_missed',
+                        })),
+                        {due_at: 1795524600, outcome: 'coalesced'},
+                    ]};
             }
             if (action === 'schedule-policy') {
                 assert.equal(data.revision, 2);
@@ -92,6 +98,10 @@ test('schedules edit instructions, pause and run a saved routine', async () => {
         await page.getByText('Run history', {exact: true}).click();
         await page.getByText('Manual · Finished', {exact: false}).waitFor();
         await page.getByText('Skipped · previous run still open', {exact: true}).waitFor();
+        assert.equal(await page.getByText('Combined into one run', {exact: true}).count(), 0);
+        await page.getByRole('button', {name: 'Show older occurrences'}).click();
+        await page.getByText('Combined into one run', {exact: true}).waitFor();
+        assert.equal(await page.getByRole('button', {name: 'Show older occurrences'}).count(), 0);
         await page.getByText('Timing policy', {exact: true}).click();
         await page.getByLabel('After downtime').selectOption('skip');
         await page.getByLabel('Quiet hours start').fill('22:00');
