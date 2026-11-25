@@ -1,4 +1,4 @@
-use super::{Outbound, Pending, Task, requests::pause_in};
+use super::{Outbound, Pending, Task, requests::pause_in, settings_history as history};
 use crate::{
     App, audit,
     security::{id, now},
@@ -20,8 +20,9 @@ pub(super) const TASK_SCOPE: &str = "t.chief_chat=1 AND t.agent IS NULL
     AND EXISTS(SELECT 1 FROM users u WHERE u.id=t.user AND u.suspended_at IS NULL)
     AND NOT EXISTS(SELECT 1 FROM mail_messages m WHERE m.task=t.id)
     AND NOT EXISTS(SELECT 1 FROM telegram_group_tasks g WHERE g.task=t.id)
-    AND (SELECT e.telegram_message_id FROM events e
-         WHERE e.task=t.id AND e.role='user' ORDER BY e.id DESC LIMIT 1)>0";
+    AND ((SELECT e.telegram_message_id FROM events e
+          WHERE e.task=t.id AND e.role='user' ORDER BY e.id DESC LIMIT 1)>0
+         OR EXISTS(SELECT 1 FROM settings_rollbacks r WHERE r.task=t.id))";
 
 #[derive(Debug)]
 pub(crate) struct NoChanges;
@@ -57,7 +58,8 @@ pub(crate) async fn permitted(db: &SqlitePool, task: &Task) -> Result<bool> {
 async fn permitted_on<'a>(db: impl Executor<'a, Database = Sqlite>, task: &Task) -> Result<bool> {
     Ok(sqlx::query_scalar(&format!(
         "SELECT EXISTS(SELECT 1 FROM tasks t WHERE t.id=? AND t.user=?
-         AND t.revision=? AND t.state='running' AND {TASK_SCOPE})"
+         AND t.revision=? AND t.state='running' AND {TASK_SCOPE}
+         AND NOT EXISTS(SELECT 1 FROM settings_rollbacks WHERE task=t.id))"
     ))
     .bind(&task.id)
     .bind(&task.user)
@@ -273,7 +275,33 @@ pub(crate) async fn approve(app: &App, user: &str, request: &str) -> Result<()> 
         .context("settings approval unavailable")?;
     let revision = pending.revision.context("settings approval unavailable")?;
     let change: Change = serde_json::from_str(&pending.payload)?;
+    let restored_from = history::origin(&mut tx, task).await?;
+    if let Some(original) = restored_from {
+        let current = settings::snapshot(&mut tx, user).await?;
+        let values = history::restore_target(&mut tx, user, original, &current).await?;
+        ensure!(
+            change.preview().len() == values.len()
+                && change
+                    .personal_values()
+                    .map(|(key, _, after)| (key, after))
+                    .eq(values.iter().map(|(&key, value)| (key, value.as_str()))),
+            settings::Stale
+        );
+    }
     settings::apply(&mut tx, user, &change).await?;
+    let source = if restored_from.is_some() {
+        "restore"
+    } else {
+        "approval"
+    };
+    history::record(
+        &mut tx,
+        user,
+        restored_from,
+        source,
+        change.personal_values(),
+    )
+    .await?;
     sqlx::query("UPDATE pending SET state='done',payload='{}' WHERE id=?")
         .bind(request)
         .execute(&mut *tx)
@@ -291,11 +319,70 @@ pub(crate) async fn approve(app: &App, user: &str, request: &str) -> Result<()> 
         .bind(message)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("UPDATE tasks SET state='queued',updated=? WHERE id=?")
-        .bind(now())
-        .bind(task)
-        .execute(&mut *tx)
-        .await?;
+    if restored_from.is_some() {
+        history::close_review(&mut tx, task, revision).await?;
+    } else {
+        sqlx::query("UPDATE tasks SET state='queued',updated=? WHERE id=?")
+            .bind(now())
+            .bind(task)
+            .execute(&mut *tx)
+            .await?;
+    }
     tx.commit().await?;
     Ok(())
+}
+
+pub(crate) async fn propose_restore(app: &App, user: &str, original: i64) -> Result<Value> {
+    let mut tx = app.db.begin_with("BEGIN IMMEDIATE").await?;
+    let current = settings::snapshot(&mut tx, user).await?;
+    let values = history::restore_target(&mut tx, user, original, &current).await?;
+    let existing: Option<Pending> = sqlx::query_as(
+        "SELECT p.* FROM settings_rollbacks r JOIN pending p ON p.task=r.task
+         JOIN tasks t ON t.id=p.task AND t.revision=p.revision AND t.user=p.user
+         WHERE r.change_id=? AND p.user=? AND p.state='waiting' AND p.kind='settings-approve'
+           AND p.expires>=? AND t.state='waiting' ORDER BY p.expires DESC LIMIT 1",
+    )
+    .bind(original)
+    .bind(user)
+    .bind(now())
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(existing) = existing {
+        return view(&existing);
+    }
+    let change = settings::prepare_values(&values, &current)?;
+    ensure!(!change.preview().is_empty(), NoChanges);
+    let task: Task = sqlx::query_as(
+        "INSERT INTO tasks(id,user,title,state,chief_chat,updated)
+         VALUES(?,?,'Restore personal settings','running',1,?) RETURNING *",
+    )
+    .bind(id())
+    .bind(user)
+    .bind(now())
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query("INSERT INTO settings_rollbacks(task,change_id) VALUES(?,?)")
+        .bind(&task.id)
+        .bind(original)
+        .execute(&mut *tx)
+        .await?;
+    let request = id();
+    audit::open(&mut tx, &task.id, "Restore personal settings").await?;
+    pause_in(
+        &mut tx,
+        &task,
+        APPROVAL,
+        &serde_json::to_value(&change)?,
+        "Review the exact changes before restoring your TinyBot settings.",
+        Some(&format!("{BUTTON_PREFIX}{request}")),
+        LIFETIME,
+        &request,
+    )
+    .await?;
+    let review = waiting(&mut *tx, user, &request)
+        .await?
+        .context("settings review unavailable")?;
+    let review = view(&review)?;
+    tx.commit().await?;
+    Ok(review)
 }

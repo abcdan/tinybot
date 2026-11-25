@@ -310,3 +310,218 @@ async fn settings_reject_a_stale_review_and_stay_out_of_scheduled_tasks() {
         .unwrap();
     runtime::work(&app, &task).await.unwrap();
 }
+
+#[tokio::test]
+async fn settings_history_restore_is_exact_private_and_bound_to_the_key_revision() {
+    let db = fixture().await;
+    sqlx::query("UPDATE users SET time_zone='UTC' WHERE id='1'")
+        .execute(&db)
+        .await
+        .unwrap();
+    let app = Arc::new(app_with_model(&db, Arc::new(SettingsChief)));
+    let mini = MiniFixture::start(app.clone()).await;
+    let zone = |zone| json!({"zone":zone});
+    assert!(
+        mini.post(true, "time-zone", zone("Europe/Amsterdam"))
+            .await
+            .status()
+            .is_success()
+    );
+    let history: Value = mini
+        .post(true, "settings-history", json!({}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    let change = &history["items"][0];
+    assert_eq!(change["source"], "settings");
+    assert_eq!(change["can_restore"], true);
+    assert_eq!(change["changes"][0]["before"], "UTC");
+    assert_eq!(change["changes"][0]["after"], "Europe/Amsterdam");
+    let id = json!({"id":change["id"]});
+    let other: Value = mini
+        .post(false, "settings-history", json!({}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(other["items"], json!([]));
+    assert!(
+        !mini
+            .post(false, "restore-settings", id.clone())
+            .await
+            .status()
+            .is_success()
+    );
+    let review: Value = mini
+        .post(true, "restore-settings", id.clone())
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(review["kind"], "settings-approve");
+    assert_eq!(
+        review["content"]["changes"][0]["before"],
+        "Europe/Amsterdam"
+    );
+    assert_eq!(review["content"]["changes"][0]["after"], "UTC");
+    let repeated: Value = mini
+        .post(true, "restore-settings", id)
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(repeated["id"], review["id"]);
+    let request = json!({"id":review["id"]});
+    assert!(
+        !mini
+            .post(false, "approve-settings", request.clone())
+            .await
+            .status()
+            .is_success()
+    );
+
+    for alternate in ["Europe/London", "Europe/Amsterdam"] {
+        assert!(
+            mini.post(true, "time-zone", zone(alternate))
+                .await
+                .status()
+                .is_success()
+        );
+    }
+    let stale = mini.post(true, "approve-settings", request.clone()).await;
+    assert_eq!(stale.status(), reqwest::StatusCode::CONFLICT);
+    assert!(mini.post(true, "deny", request).await.status().is_success());
+    assert!(store::claim(&db).await.unwrap().is_none());
+
+    let history: Value = mini
+        .post(true, "settings-history", json!({}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(history["items"][2]["can_restore"], false);
+    let latest = json!({"id":history["items"][0]["id"]});
+    let review: Value = mini
+        .post(true, "restore-settings", latest.clone())
+        .await
+        .json()
+        .await
+        .unwrap();
+    let approval = json!({"id":review["id"]});
+    assert!(
+        mini.post(true, "approve-settings", approval.clone())
+            .await
+            .status()
+            .is_success()
+    );
+    assert!(
+        !mini
+            .post(true, "approve-settings", approval)
+            .await
+            .status()
+            .is_success()
+    );
+    let history: Value = mini
+        .post(true, "settings-history", json!({}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    let restored = &history["items"][0];
+    assert_eq!(restored["source"], "restore");
+    assert_eq!(restored["restored_from"], latest["id"]);
+    assert_eq!(restored["changes"][0]["before"], "Europe/Amsterdam");
+    assert_eq!(restored["changes"][0]["after"], "Europe/London");
+    let current: String = sqlx::query_scalar("SELECT time_zone FROM users WHERE id='1'")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(current, "Europe/London");
+    assert!(store::claim(&db).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn settings_history_discards_credential_like_values_and_expires_pending_restores() {
+    let db = fixture().await;
+    let app = Arc::new(app_with_model(&db, Arc::new(SettingsChief)));
+    let mini = MiniFixture::start(app.clone()).await;
+    sqlx::query("UPDATE users SET chief_name=? WHERE id='1'")
+        .bind("sk-proj-synthetic-fixture")
+        .execute(&db)
+        .await
+        .unwrap();
+    crate::settings::update_personal(&db, "1", crate::settings::Key::ChiefName, "Atlas")
+        .await
+        .unwrap();
+    let listed: Value = mini
+        .post(true, "settings-history", json!({}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed["items"][0]["changes"][0]["before"], "Hidden");
+    assert_eq!(listed["items"][0]["can_restore"], false);
+    let stored: String = sqlx::query_scalar("SELECT changes FROM settings_history")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert!(!stored.contains("sk-proj-synthetic-fixture"));
+    assert!(
+        !mini
+            .post(
+                true,
+                "restore-settings",
+                json!({"id":listed["items"][0]["id"]})
+            )
+            .await
+            .status()
+            .is_success()
+    );
+
+    assert!(
+        mini.post(
+            true,
+            "openrouter-server-tool",
+            json!({"tool":"web_search","enabled":false})
+        )
+        .await
+        .status()
+        .is_success()
+    );
+    let listed: Value = mini
+        .post(true, "settings-history", json!({}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    let review: Value = mini
+        .post(
+            true,
+            "restore-settings",
+            json!({"id":listed["items"][0]["id"]}),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(review["content"]["changes"][0]["after"], "On");
+    sqlx::query("UPDATE pending SET expires=0 WHERE id=?")
+        .bind(review["id"].as_str().unwrap())
+        .execute(&db)
+        .await
+        .unwrap();
+    store::expire(&db).await.unwrap();
+    assert!(
+        !mini
+            .post(true, "approve-settings", json!({"id":review["id"]}))
+            .await
+            .status()
+            .is_success()
+    );
+    assert!(store::claim(&db).await.unwrap().is_none());
+    assert_eq!(
+        app.models.server_tool_settings("1").await.unwrap()["web_search"],
+        false
+    );
+}

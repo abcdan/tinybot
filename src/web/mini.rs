@@ -196,6 +196,8 @@ async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<
         "get-form" => return settings::get_form(app, user, data).await,
         "answer-settings-form" => return settings::answer_form(app, user, data).await,
         "approve-settings" => settings::approve(app, user, data).await?,
+        "settings-history" => return settings::history(app, user, data).await,
+        "restore-settings" => return settings::propose_restore(app, user, data).await,
         "submit-form" => tasks::submit_form(app, user, data).await?,
         "answer-form" => tasks::answer_form(app, user, data).await?,
         "time-zone" => tasks::set_time_zone(app, user, data).await?,

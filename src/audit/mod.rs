@@ -240,6 +240,10 @@ pub(crate) async fn open(
     Ok(())
 }
 
+pub(crate) fn safe_history_text(value: &str) -> Option<&str> {
+    (value.is_empty() || details::message_preview(value) == value).then_some(value)
+}
+
 pub(crate) async fn cancel(tx: &mut Transaction<'_, Sqlite>, task: &str, user: &str) -> Result<()> {
     sqlx::query(
         "UPDATE audit_sessions SET status='cancelled',finished_at=?
