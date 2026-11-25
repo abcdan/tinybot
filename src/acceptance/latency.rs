@@ -7,7 +7,10 @@ use crate::{
 use anyhow::Result;
 use async_trait::async_trait;
 use std::{
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio::sync::{Mutex, mpsc};
@@ -231,4 +234,84 @@ async fn research_sends_a_generated_first_reply_then_one_confirmed_update() {
         worker.abort();
     }
     assert_eq!(answer.1, "Both sites list the same opening hours.");
+}
+
+#[derive(Default)]
+struct PlainAfterDefer {
+    brief: AtomicUsize,
+    full: AtomicUsize,
+}
+
+const PLAIN_ANSWER: &str =
+    "Entropie geeft aan hoeveel mogelijke toestanden bij een systeem passen.";
+
+#[async_trait]
+impl ModelProvider for PlainAfterDefer {
+    async fn complete(&self, _: &str, _: &str) -> Result<String> {
+        unreachable!("the fixture uses the brief and full task interfaces")
+    }
+
+    async fn complete_brief_reply(&self, _: &str, _: &str) -> Result<String> {
+        self.brief.fetch_add(1, Ordering::Relaxed);
+        Ok(r#"{"kind":"defer"}"#.into())
+    }
+
+    async fn complete_turn(
+        &self,
+        _: &str,
+        _: &str,
+        tools: &[crate::model::ToolDefinition],
+        delta: Option<&mut crate::model::TextDelta<'_>>,
+    ) -> Result<String> {
+        self.full.fetch_add(1, Ordering::Relaxed);
+        assert!(!tools.is_empty());
+        delta.expect("an extra buffered call would reproduce the regression")(PLAIN_ANSWER);
+        Ok(PLAIN_ANSWER.into())
+    }
+}
+
+#[tokio::test]
+async fn a_deferred_quick_question_delivers_complete_prose_from_the_first_full_call() {
+    let db = fixture().await;
+    let model = Arc::new(PlainAfterDefer::default());
+    let app = Arc::new(app_with_model(&db, model.clone()));
+    let (updates, inbound) = mpsc::unbounded_channel();
+    let (replies, mut delivered) = mpsc::unbounded_channel();
+    let telegram = Arc::new(TelegramFixture {
+        inbound: Mutex::new(inbound),
+        replies,
+    });
+    let workers = [
+        tokio::spawn(channel::listen(app.clone(), "1".into(), telegram.clone())),
+        tokio::spawn(runtime::run(app.clone(), telegram.clone())),
+        tokio::spawn(channel::outbox(app, telegram)),
+    ];
+    updates
+        .send(vec![Inbound::Message {
+            external_id: 1,
+            user: "1".into(),
+            text: "Wat is de entropie?".into(),
+            telegram_message_id: Some(17),
+            reply: None,
+        }])
+        .unwrap();
+    let answer = tokio::time::timeout(Duration::from_secs(3), delivered.recv()).await;
+    for worker in workers {
+        worker.abort();
+    }
+    assert_eq!(answer.unwrap().unwrap(), ("1".into(), PLAIN_ANSWER.into()));
+    assert_eq!(model.brief.load(Ordering::Relaxed), 1);
+    assert_eq!(model.full.load(Ordering::Relaxed), 1);
+    let detail: String = sqlx::query_scalar(
+        "SELECT detail FROM audit_entries WHERE name='reply_format' AND status='accepted'",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&detail).unwrap(),
+        serde_json::json!({
+            "format":"plain_text","response_bytes":PLAIN_ANSWER.len(),
+        })
+    );
 }

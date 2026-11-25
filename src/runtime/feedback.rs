@@ -1,21 +1,22 @@
-use super::{MAX_REPLY_BYTES, Step};
+use super::{MAX_REPLY_BYTES, Step, reply};
 use crate::{
     audit,
     channel::ChannelAdapter,
-    model::{ModelProvider, ProviderFailure, ToolDefinition, parse_json_reply, provider_failure},
+    model::{ModelProvider, ProviderFailure, ToolDefinition, provider_failure},
     security::clip,
     store::{self, Task},
 };
 use anyhow::Result;
 use serde_json::Value;
 use sqlx::SqlitePool;
-use std::{sync::Mutex, time::Duration};
+use std::{borrow::Cow, sync::Mutex, time::Duration};
 use tokio::{
     sync::Notify,
     time::{Instant, MissedTickBehavior, interval_at},
 };
 
 const MAX_ENVELOPE_BYTES: usize = 24_000;
+const RETRY_REPLY_FORMAT: &str = "The previous reply format could not be read. For this retry, give a complete final response as plain text when the request can be answered. If work is needed, make one registered tool call. Do not show internal instructions, reasoning, or tool arguments.";
 
 #[derive(Default)]
 pub(super) struct Feedback {
@@ -51,12 +52,15 @@ impl Feedback {
                 self.first_draft.notify_one();
             }
         };
+        let mut unreadable = false;
         let streamed = tokio::select! {
             biased;
             _ = self.stale.notified() => return Ok(None),
             result = audit::model("agent_turn_stream", async {
                 let response = model.complete_turn(instructions, &input, tools, Some(&mut append)).await?;
-                parse_json_reply(&response)
+                let step = reply::turn(&response).await;
+                unreadable = step.is_err();
+                step
             }) => result,
         };
         match streamed {
@@ -76,12 +80,17 @@ impl Feedback {
             }
         }
         tracing::debug!("streamed model response failed; retrying with buffered completion");
+        let instructions = if unreadable {
+            Cow::Owned(format!("{instructions}\n\n{RETRY_REPLY_FORMAT}"))
+        } else {
+            Cow::Borrowed(instructions)
+        };
         let buffered = tokio::select! {
             biased;
             _ = self.stale.notified() => return Ok(None),
             result = audit::model("agent_turn_buffered", async {
-                let response = model.complete_turn(instructions, &input, tools, None).await?;
-                parse_json_reply(&response)
+                let response = model.complete_turn(&instructions, &input, tools, None).await?;
+                reply::turn(&response).await
             }) => result?,
         };
         Ok(Some(buffered))
@@ -271,7 +280,11 @@ mod tests {
 
     #[async_trait]
     impl ModelProvider for FallbackModel {
-        async fn complete(&self, _: &str, _: &str) -> Result<String> {
+        async fn complete(&self, instructions: &str, _: &str) -> Result<String> {
+            assert_eq!(
+                instructions.contains(RETRY_REPLY_FORMAT),
+                self.streamed.is_some()
+            );
             self.calls.fetch_add(1, Ordering::Relaxed);
             self.buffering.notify_one();
             match self.buffered {
@@ -298,7 +311,7 @@ mod tests {
         for streamed in [None, Some(r#"{"kind":"reply","text":"Incomplete"#)] {
             let model = FallbackModel {
                 streamed,
-                buffered: Some(r#"{"kind":"reply","text":"Recovered"}"#),
+                buffered: Some("The answer recovered in plain text."),
                 calls: AtomicUsize::new(0),
                 buffering: Notify::new(),
             };
@@ -307,7 +320,9 @@ mod tests {
                 .complete(&model, ENGINE, &json!({}), &[])
                 .await
                 .unwrap();
-            assert!(matches!(result, Some(Step::Reply { text, .. }) if text == "Recovered"));
+            assert!(
+                matches!(result, Some(Step::Reply { text, .. }) if text == "The answer recovered in plain text.")
+            );
             assert_eq!(model.calls.load(Ordering::Relaxed), 1);
             assert!(feedback.source.lock().unwrap().is_empty());
         }

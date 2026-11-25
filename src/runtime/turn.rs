@@ -13,10 +13,7 @@ use super::{
 };
 use crate::{
     App, audit,
-    model::{
-        ModelProvider, ProviderFailure, parse_json_reply, provider_failure,
-        temporary_provider_failure,
-    },
+    model::{ModelProvider, ProviderFailure, provider_failure, temporary_provider_failure},
     schedules,
     security::{clip, id, now},
     store::{self, Agent, Task, checkpoints},
@@ -341,7 +338,7 @@ async fn run_turn(
                 let response = model
                     .complete_turn(instructions, &model_input.to_string(), &definitions, None)
                     .await?;
-                parse_json_reply(&response).map(Some)
+                super::reply::turn(&response).await.map(Some)
             })
             .await
         };
