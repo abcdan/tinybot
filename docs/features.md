@@ -67,6 +67,19 @@ an approval pause. With an OpenRouter key, Jev checks for repeating work every 1
 attempts. If tool work stops, the Chief works from the results it has and can tell you
 what remains open.
 
+## Share work in a project
+
+Open **Memory → Project spaces** to create a project. Invite existing TinyBot
+users by their Telegram account ID. Each person reviews and accepts their role.
+Editors can publish notes or copies of their private task results. Viewers can read
+items shared with them and check off items assigned to them. Owners manage
+membership and assignments.
+
+Review each snapshot’s version and audience before publishing. New members only
+receive access to items published for them. Revoking a member removes their
+access to the project and any existing assignments. Ordinary chats and memories stay
+private. Use **Shared memory** for a separate paired chat and published notes.
+
 ## Research the public web
 
 > Check this public page and compare the pricing with two official sources.

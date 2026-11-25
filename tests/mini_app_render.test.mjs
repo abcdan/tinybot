@@ -1779,3 +1779,65 @@ test('operator invitations and guest shared memory respect the signed account vi
         await browser.close();
     }
 });
+
+test('project publication reviews the audience and version before sharing', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 640}});
+        const page = await context.newPage();
+        const state = {
+            user: '1', time_zone: 'Europe/Amsterdam', provider: 'openrouter',
+            requests: [], tasks: [], agents: [], schedules: [],
+        };
+        const space = {id: 'space', title: 'Release prep', role: 'owner', joined: true, revision: 5, membership: 'owner'};
+        const members = [
+            {id: 'member', name: 'Casey', role: 'editor', active: true},
+            {id: 'owner', name: 'Jordan', role: 'owner', active: true},
+            {id: 'pending', name: 'Alex', role: 'viewer', active: false, joined: false},
+        ];
+        const items = [];
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return state;
+            if (action === 'list-memories') return {entries: [], next_before: null};
+            if (action === 'list-projects') return {projects: [space]};
+            if (action === 'project-detail') return {space, members, items, next_offset: null};
+            if (action === 'publish-project-item') {
+                assert.deepEqual(data, {
+                    project: 'space',
+                    review: {revision: 5, audience: ['member', 'owner']},
+                    source: {kind: 'note', title: 'Runbook', body: '<script>fixture</script>'},
+                });
+                items.push({
+                    id: 'item', kind: 'note', title: data.source.title, body: data.source.body,
+                    can_manage: true, can_remove: true, can_complete: true, revision: 0, eligible: members.slice(0, 2),
+                });
+                return {item: 'item'};
+            }
+            if (action === 'project-item') {
+                assert.deepEqual(data, {project: 'space', item: 'item', revision: 0, change: {assign: {member: 'member'}}});
+                Object.assign(items[0], {assignee: 'member', assignee_name: 'Casey', revision: 1});
+                return {ok: true};
+            }
+            assert.fail(`Unexpected Mini App action ${action}`);
+        });
+        await page.goto('https://tinybot.test/');
+        await page.getByRole('button', {name: 'Memory', exact: true}).click();
+        await page.getByText('Project spaces', {exact: true}).click();
+        await page.getByRole('button', {name: 'Open project'}).click();
+        await page.getByText('Publish to project', {exact: true}).click();
+        await page.getByLabel('Note title').fill('Runbook');
+        await page.getByRole('textbox', {name: 'Note', exact: true}).fill('<script>fixture</script>');
+        await page.getByRole('button', {name: 'Review note'}).click();
+        await page.getByText('Share with Casey, Jordan', {exact: true}).waitFor();
+        assert.deepEqual(items, []);
+        await page.getByRole('button', {name: 'Publish snapshot'}).click();
+        await page.getByText('Snapshot published.', {exact: true}).waitFor();
+        await page.getByText('<script>fixture</script>', {exact: true}).waitFor();
+        await page.getByLabel('Assign to').selectOption('member');
+        await page.getByRole('button', {name: 'Save assignment'}).click();
+        await page.getByText('Assigned · Casey', {exact: true}).waitFor();
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    } finally {
+        await browser.close();
+    }
+});
