@@ -1,7 +1,10 @@
 use crate::{
     App,
     forms::{Field, FormSpec},
-    model::{ModelPreferences, ModelSelection, display_label},
+    model::{
+        IMAGE_MODELS, ModelPreferences, ModelSelection, display_label, resolve_image_model,
+        write_image_model,
+    },
 };
 use anyhow::{Context, Result, ensure};
 use chrono_tz::Tz;
@@ -22,10 +25,11 @@ pub(crate) enum Key {
     SearchModels,
     TaskModel,
     BackupModel,
+    ImageModel,
 }
 
 impl Key {
-    pub(crate) const ALL: [Self; 9] = [
+    pub(crate) const ALL: [Self; 10] = [
         Self::DisplayName,
         Self::ChiefName,
         Self::TimeZone,
@@ -35,6 +39,7 @@ impl Key {
         Self::SearchModels,
         Self::TaskModel,
         Self::BackupModel,
+        Self::ImageModel,
     ];
 
     pub(crate) fn as_str(self) -> &'static str {
@@ -48,6 +53,7 @@ impl Key {
             Self::SearchModels => "search_models",
             Self::TaskModel => "task_model",
             Self::BackupModel => "backup_model",
+            Self::ImageModel => "image_model",
         }
     }
 
@@ -62,6 +68,7 @@ impl Key {
             Self::SearchModels => "OpenRouter model search",
             Self::TaskModel => "Task model",
             Self::BackupModel => "Backup model",
+            Self::ImageModel => "Image generation and editing model",
         }
     }
 
@@ -82,16 +89,19 @@ impl Key {
     }
 
     pub(crate) fn field(self) -> Field {
+        let options: Vec<String> = if self.toggle() {
+            vec!["on".into(), "off".into()]
+        } else if self == Self::ImageModel {
+            IMAGE_MODELS.iter().map(|model| model.id.into()).collect()
+        } else {
+            Vec::new()
+        };
         Field {
             name: self.as_str().into(),
             label: self.label().into(),
-            kind: if self.toggle() { "select" } else { "text" }.into(),
+            kind: if options.is_empty() { "text" } else { "select" }.into(),
             required: !matches!(self, Self::DisplayName | Self::ChiefName),
-            options: if self.toggle() {
-                vec!["on".into(), "off".into()]
-            } else {
-                Vec::new()
-            },
+            options,
             private: false,
             hint: self.hint().map(str::to_owned),
         }
@@ -133,6 +143,11 @@ impl Key {
                 );
                 Ok(trimmed.to_owned())
             }
+            Self::ImageModel => IMAGE_MODELS
+                .iter()
+                .find(|model| model.id == trimmed)
+                .map(|model| model.id.into())
+                .context("Choose an available image model."),
             _ => match trimmed.to_ascii_lowercase().as_str() {
                 "on" | "true" | "enabled" => Ok("on".into()),
                 "off" | "false" | "disabled" => Ok("off".into()),
@@ -165,8 +180,8 @@ impl Snapshot {
 }
 
 pub(crate) async fn snapshot(db: &mut SqliteConnection, user: &str) -> Result<Snapshot> {
-    let (display_name, chief_name, time_zone): (Option<String>, Option<String>, Option<String>) =
-        sqlx::query_as("SELECT display_name,chief_name,time_zone FROM users WHERE id=? AND suspended_at IS NULL")
+    let (display_name, chief_name, time_zone, image_model): (Option<String>, Option<String>, Option<String>, Option<String>) =
+        sqlx::query_as("SELECT display_name,chief_name,time_zone,image_model FROM users WHERE id=? AND suspended_at IS NULL")
             .bind(user)
             .fetch_one(&mut *db)
             .await?;
@@ -180,6 +195,10 @@ pub(crate) async fn snapshot(db: &mut SqliteConnection, user: &str) -> Result<Sn
         (Key::TimeZone, time_zone),
         (Key::TaskModel, models.task_setting()),
         (Key::BackupModel, models.backup_setting()),
+        (
+            Key::ImageModel,
+            resolve_image_model(image_model.as_deref()).into(),
+        ),
     ]);
     let disabled: Vec<String> =
         sqlx::query_scalar("SELECT tool FROM openrouter_disabled_tools WHERE user=?")
@@ -226,6 +245,7 @@ pub(crate) async fn read(app: &App, user: &str) -> Result<Value> {
     Ok(json!({
         "settings":current.values,
         "models":current.models.public(),
+        "image_models":IMAGE_MODELS,
         "connections":connectors,
         "owned_helpers":helpers,
         "email":{"account_count":mail,"sending_enabled":smtp,"inbox_watched":inbox}
@@ -282,6 +302,11 @@ impl Change {
                         if let Some(models) = &self.model_state {
                             return models.describe(value);
                         }
+                    }
+                    if key == Key::ImageModel
+                        && let Some(model) = IMAGE_MODELS.iter().find(|model| model.id == value)
+                    {
+                        return model.name.into();
                     }
                     match value {
                         "" => "Default".into(),
@@ -445,6 +470,7 @@ async fn write_personal(
         Key::DisplayName => "UPDATE users SET display_name=? WHERE id=?",
         Key::ChiefName => "UPDATE users SET chief_name=? WHERE id=?",
         Key::TimeZone => "UPDATE users SET time_zone=? WHERE id=?",
+        Key::ImageModel => return write_image_model(db, user, value).await,
         Key::TaskModel | Key::BackupModel => anyhow::bail!("unsupported personal setting"),
         _ => {
             let statement = if value == "on" {

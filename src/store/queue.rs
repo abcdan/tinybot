@@ -109,6 +109,7 @@ pub async fn expire(db: &SqlitePool) -> Result<()> {
     crate::audit::prune(&mut tx).await?;
     super::settings_history::prune(&mut tx).await?;
     super::artifacts::prune(&mut tx).await?;
+    super::outputs::prune_media(&mut tx).await?;
     sqlx::query(
         "UPDATE pending SET state='expiring' WHERE expires<? AND state IN ('waiting','approved')",
     )

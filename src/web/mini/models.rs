@@ -2,6 +2,7 @@ use super::text;
 use crate::{
     App,
     security::{hash, now, token},
+    settings::{self, Key},
 };
 use anyhow::{Result, ensure};
 use serde_json::{Value, json};
@@ -28,6 +29,10 @@ pub(super) async fn save_backup_model(app: &App, user: &str, data: &Value) -> Re
     app.models
         .save_backup(user, text(data, "provider", 20)?, text(data, "model", 150)?)
         .await
+}
+
+pub(super) async fn save_image_model(app: &App, user: &str, data: &Value) -> Result<()> {
+    settings::update_personal(&app.db, user, Key::ImageModel, text(data, "model", 150)?).await
 }
 
 pub(super) async fn pair_codex(app: &App, user: &str, data: &Value) -> Result<Value> {

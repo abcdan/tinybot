@@ -110,6 +110,20 @@ pub async fn start_action(db: &SqlitePool, task: &Task, action_id: &str) -> Resu
     Ok(rows == 1)
 }
 
+pub(crate) async fn interrupt_action(db: &SqlitePool, task: &Task, action: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE pending SET state='interrupted'
+         WHERE id=? AND task=? AND user=? AND revision=? AND state='executing'",
+    )
+    .bind(action)
+    .bind(&task.id)
+    .bind(&task.user)
+    .bind(task.revision)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 pub async fn finish_action(
     db: &SqlitePool,
     task: &Task,

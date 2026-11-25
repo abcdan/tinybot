@@ -24,6 +24,15 @@ pub struct Telegram {
     pub(super) identity: tokio::sync::OnceCell<(i64, String)>,
 }
 
+#[cfg(test)]
+impl Telegram {
+    pub(crate) fn fixture(api: String) -> Self {
+        let mut telegram = Self::new("unused".into(), "https://example.test".into()).unwrap();
+        telegram.api = api;
+        telegram
+    }
+}
+
 #[async_trait]
 impl ChannelAdapter for Telegram {
     fn name(&self) -> &'static str {

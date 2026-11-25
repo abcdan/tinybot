@@ -67,7 +67,13 @@ pub(super) async fn resume_approval(ctx: &ToolContext<'_>) -> Result<bool> {
                     return store::current(&app.db, ctx.task).await;
                 }
             }
-            (execute_approved(ctx, call).await, true)
+            let media = super::media_tools::is_media_tool(&call.name);
+            let result = execute_approved(ctx, call).await;
+            if media && !store::current(&app.db, ctx.task).await? {
+                store::interrupt_action(&app.db, ctx.task, &pending.id).await?;
+                return Ok(false);
+            }
+            (result, !media)
         }
     };
     finish(ctx, &pending.id, result, announce).await?;
@@ -126,6 +132,28 @@ pub(super) async fn finish(
                 false,
             )
             .await?;
+        }
+        Ok(Outcome::Media {
+            tool,
+            format,
+            bytes,
+        }) => {
+            let app = ctx.app;
+            let queued = match store::outputs::queue_media(
+                &app.db, &app.vault, ctx.task, id, tool, format, &bytes,
+            )
+            .await
+            {
+                Ok(queued) => queued,
+                Err(_) if !store::current(&app.db, ctx.task).await? => {
+                    return store::interrupt_action(&app.db, ctx.task, id).await;
+                }
+                Err(error) => return Err(error),
+            };
+            if queued {
+                app.delivery_ready.notify_one();
+            }
+            audit::record("tool", tool, "completed", json!({"queued":queued})).await;
         }
         Err(error) => {
             let text = if announce {

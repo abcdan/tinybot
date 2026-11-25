@@ -82,6 +82,7 @@ pub(super) async fn status(app: &App, user: &str) -> Result<Value> {
     let zone = crate::schedules::timezone(&app.db, user).await?;
     let connections = app.models.connections(user).await?;
     let backup_model = app.models.backup_setting(user).await?;
+    let image_settings = app.models.image_settings(user).await?;
     let openrouter_server_tools = app.models.server_tool_settings(user).await?;
     let onboarding = app.models.onboarding_profile(user).await?;
     let browser_proxy = if user == app.operator {
@@ -113,7 +114,7 @@ pub(super) async fn status(app: &App, user: &str) -> Result<Value> {
         "anything_mcp_origin":app.anything_mcp_origin,
         "schedules":schedules,"time_zone":zone.name(),"openrouter_connected":connections.openrouter_key,
         "openrouter_server_tools":openrouter_server_tools,
-        "codex_model":connections.codex_model,"backup_model":backup_model,"read_tools":read_tools,"browser_proxy":browser_proxy,
+        "codex_model":connections.codex_model,"backup_model":backup_model,"image_settings":image_settings,"read_tools":read_tools,"browser_proxy":browser_proxy,
         "onboarding_required":onboarding.required,"display_name":onboarding.display_name,"chief_name":onboarding.chief_name,
         "mcp_approvals":mcp_approvals,"mail_accounts":mail_accounts}),
     )

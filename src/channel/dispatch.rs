@@ -390,7 +390,7 @@ async fn send_item(
             };
             output = current;
         }
-        return adapter
+        let delivery = adapter
             .upload_file(
                 &item.user,
                 &output.kind,
@@ -398,7 +398,13 @@ async fn send_item(
                 &output.bytes,
                 item.reply_to_message_id,
             )
-            .await;
+            .await?;
+        if output.ephemeral
+            && matches!(delivery, MessageDelivery::Sent(id) if id.is_none_or(|id| id<=0))
+        {
+            return Err(super::UploadUncertain.into());
+        }
+        return Ok(delivery);
     }
     if let Some(message) = button.and_then(|button| button.strip_prefix("mail-preview/")) {
         let preview = store::mail::mail_preview(&app.db, &app.vault, item, message)

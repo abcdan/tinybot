@@ -7,6 +7,8 @@ use anyhow::Result;
 use serde_json::{Value, json};
 use std::time::Duration;
 
+const MAX_PHOTO_BYTES: usize = 10_000_000;
+
 pub(super) enum WidgetDelivery {
     Sent(Option<i64>),
     Retry(i64),
@@ -59,11 +61,65 @@ impl Telegram {
                     .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte)),
             "invalid upload filename"
         );
-        let (method, mime) = match kind {
-            "document" => ("sendDocument", "application/octet-stream"),
-            "voice" => ("sendVoice", "audio/mpeg"),
+        let (mut method, mut field, mime) = match kind {
+            "document" => ("sendDocument", "document", "application/octet-stream"),
+            "voice" => ("sendVoice", "voice", "audio/mpeg"),
+            "png" => ("sendPhoto", "photo", "image/png"),
+            "jpeg" => ("sendPhoto", "photo", "image/jpeg"),
+            "webp" => ("sendDocument", "document", "image/webp"),
+            "mp4" => ("sendVideo", "video", "video/mp4"),
             _ => anyhow::bail!("unknown file type"),
         };
+        if method == "sendPhoto" && bytes.len() > MAX_PHOTO_BYTES {
+            (method, field) = ("sendDocument", "document");
+        }
+        let mut output = self
+            .upload_multipart(chat, method, field, mime, name, bytes, reply_to)
+            .await?;
+        if method == "sendPhoto"
+            && bad_request(&output).is_some_and(|description| {
+                description.contains("photo_invalid_dimensions")
+                    || description.contains("image_process_failed")
+            })
+        {
+            output = self
+                .upload_multipart(
+                    chat,
+                    "sendDocument",
+                    "document",
+                    mime,
+                    name,
+                    bytes,
+                    reply_to,
+                )
+                .await?;
+        }
+        if output["ok"] == true {
+            let message = accepted_message_id(&output).ok_or(UploadUncertain)?;
+            return Ok(MessageDelivery::Sent(Some(message)));
+        }
+        if ambiguous_reply(&output) {
+            return Err(UploadUncertain.into());
+        }
+        if output["error_code"] == 429
+            && let Some(delay) = retry_after(&output)
+        {
+            return Ok(MessageDelivery::Retry(delay));
+        }
+        anyhow::bail!("Telegram rejected the file")
+    }
+
+    async fn upload_multipart(
+        &self,
+        chat: i64,
+        method: &str,
+        field: &str,
+        mime: &str,
+        name: &str,
+        bytes: &[u8],
+        reply_to: Option<i64>,
+    ) -> Result<Value> {
+        use crate::channel::UploadUncertain;
         let boundary = uuid::Uuid::new_v4().simple().to_string();
         let mut body = format!(
             "--{boundary}\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n{chat}\r\n"
@@ -76,10 +132,12 @@ impl Telegram {
             ).as_bytes());
         }
         body.extend_from_slice(format!(
-            "--{boundary}\r\nContent-Disposition: form-data; name=\"{kind}\"; filename=\"{name}\"\r\nContent-Type: {mime}\r\n\r\n"
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"{field}\"; filename=\"{name}\"\r\nContent-Type: {mime}\r\n\r\n"
         ).as_bytes());
+        let trailer = format!("\r\n--{boundary}--\r\n");
+        body.reserve(bytes.len() + trailer.len());
         body.extend_from_slice(bytes);
-        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        body.extend_from_slice(trailer.as_bytes());
         let response = self
             .client
             .post(format!("{}/{method}", self.api))
@@ -97,28 +155,7 @@ impl Telegram {
         let body = net::body(response, 256_000)
             .await
             .map_err(|_| UploadUncertain)?;
-        let output: Value = serde_json::from_slice(&body).map_err(|_| UploadUncertain)?;
-        if output["ok"] == true && accepted_message_id(&output).is_none() {
-            return Err(UploadUncertain.into());
-        }
-        if output["ok"] != true && output["ok"] != false {
-            return Err(UploadUncertain.into());
-        }
-        if output["ok"] == true {
-            return Ok(MessageDelivery::Sent(accepted_message_id(&output)));
-        }
-        if output["error_code"]
-            .as_i64()
-            .is_some_and(|code| (500..600).contains(&code))
-        {
-            return Err(UploadUncertain.into());
-        }
-        if output["error_code"] == 429
-            && let Some(delay) = retry_after(&output)
-        {
-            return Ok(MessageDelivery::Retry(delay));
-        }
-        anyhow::bail!("Telegram rejected the file")
+        Ok(serde_json::from_slice(&body).map_err(|_| UploadUncertain)?)
     }
 
     pub fn new(token: String, origin: String) -> Result<Self> {

@@ -158,11 +158,15 @@ async fn run_turn(
         && task.agent.is_none()
         && !automatic_mail
         && checkpoints::can_plan(&app.db, task).await?;
+    let image_tools_available =
+        personal_settings && app.models.image_model_available(&task.user).await?;
     let mut tools: Vec<_> = app
         .tools
         .iter()
         .filter(|tool| {
             ctx.allows(tool.name())
+                && (!super::media_tools::is_media_tool(tool.name()) || personal_settings)
+                && (!super::media_tools::is_image_tool(tool.name()) || image_tools_available)
                 && (!super::settings::is_settings_tool(tool.name()) || personal_settings)
                 && (!matches!(
                     tool.name(),
@@ -481,6 +485,7 @@ async fn run_turn(
                         .await?;
                     continue;
                 };
+                super::media_tools::pin_image_model(&ctx, &name, &mut args).await?;
                 audit::record(
                     "model",
                     "agent_turn",
@@ -701,6 +706,9 @@ async fn run_turn(
                     audit::tool_finished(tool.name(), &result).await;
                     match result {
                         Ok(Outcome::Pause) => return Ok(()),
+                        Ok(Outcome::Media { .. }) => {
+                            anyhow::bail!("media requires an action checkpoint")
+                        }
                         Ok(Outcome::Continue(value)) => {
                             store::append(&app.db, &task.id, "tool", &value.to_string()).await?;
                             consulted_helper |= name == "delegate";
@@ -730,7 +738,25 @@ async fn run_turn(
                     return store::settle(&app.db, task, "idle", None).await;
                 }
                 audit::tool_started(tool.name(), &args).await;
-                let result = tool.execute(&ctx, args).await;
+                let execution = tool.execute(&ctx, args);
+                let media = super::media_tools::is_media_tool(&name);
+                let result = if let Some(feedback) = feedback
+                    && media
+                {
+                    tokio::select! {
+                        biased;
+                        () = feedback.superseded() => None,
+                        result = execution => Some(result),
+                    }
+                } else {
+                    Some(execution.await)
+                };
+                if media && (result.is_none() || !store::current(&app.db, task).await?) {
+                    store::interrupt_action(&app.db, task, &action).await?;
+                    audit::record("tool", tool.name(), "superseded", Value::Null).await;
+                    return store::settle(&app.db, task, "idle", None).await;
+                }
+                let result = result.context("media execution was interrupted")?;
                 audit::tool_finished(tool.name(), &result).await;
                 if name == "record_routine_step" && result.is_ok() {
                     asked_for_step = false;

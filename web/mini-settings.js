@@ -330,8 +330,26 @@ export function model(state) {
         content.append(backupModel(state));
     }
     content.append(openRouter(state));
+    if (state.image_settings) content.append(imageModel(state));
     if (state.openrouter_server_tools) content.append(openRouterTools(state.openrouter_server_tools));
     content.append(codexSettings(state));
+}
+
+function imageModel(state) {
+    const item = card('Image model');
+    if (!state.openrouter_connected) {
+        item.append(node('p', 'Connect OpenRouter to generate and edit images.'));
+        return item;
+    }
+    const {selected, choices} = state.image_settings;
+    item.append(form('Save image model', [field('model', 'Image generation and editing model', {
+        choices: choices.map(({id, name}) => [id, name]), value: selected,
+    })], async data => {
+        await api('save-image-model', data);
+        await refresh();
+        show('Image model saved.');
+    }));
+    return item;
 }
 
 function backupModel(state) {

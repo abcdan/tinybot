@@ -11,6 +11,7 @@ use sqlx::sqlite::SqlitePoolOptions;
 use std::collections::BTreeMap;
 use tokio::sync::Notify;
 
+mod agent_media;
 mod agent_memory;
 mod anything_mcp;
 mod attachments;
@@ -36,6 +37,7 @@ mod routines;
 mod self_settings;
 mod task_artifacts;
 mod task_workbench;
+mod telegram_media;
 mod telegram_workflows;
 mod tool_budget;
 mod usage_insights;

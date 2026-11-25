@@ -1,15 +1,115 @@
 use super::{Outbound, Task, has_access};
-use crate::security::{Vault, hash};
+use crate::security::{Vault, now};
 use anyhow::{Context, Result, ensure};
+use serde_json::json;
+use sha2::{Digest, Sha256};
 use sqlx::{Sqlite, SqlitePool, Transaction};
 
 pub const BUTTON: &str = "telegram-output";
+const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+const MAX_VIDEO_BYTES: usize = 20 * 1024 * 1024;
+const MEDIA_TTL_SECONDS: i64 = 15 * 60;
+
+#[derive(Clone, Copy)]
+pub(crate) enum MediaFormat {
+    Png,
+    Jpeg,
+    Webp,
+    Mp4,
+}
+
+impl MediaFormat {
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg => "jpeg",
+            Self::Webp => "webp",
+            Self::Mp4 => "mp4",
+        }
+    }
+
+    fn is_video(self) -> bool {
+        matches!(self, Self::Mp4)
+    }
+
+    fn valid(self, bytes: &[u8]) -> bool {
+        let limit = if self.is_video() {
+            MAX_VIDEO_BYTES
+        } else {
+            MAX_IMAGE_BYTES
+        };
+        bytes.len() <= limit
+            && match self {
+                Self::Png => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+                Self::Jpeg => bytes.starts_with(b"\xff\xd8\xff"),
+                Self::Webp => bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"),
+                Self::Mp4 => bytes.get(4..8) == Some(b"ftyp") && bytes.len() >= 16,
+            }
+    }
+}
 
 pub(crate) struct Output {
     pub kind: String,
     pub name: String,
     pub bytes: Vec<u8>,
     pub synthesized: bool,
+    pub ephemeral: bool,
+}
+
+pub(crate) async fn queue_media(
+    db: &SqlitePool,
+    vault: &Vault,
+    task: &Task,
+    action: &str,
+    tool: &str,
+    format: MediaFormat,
+    bytes: &[u8],
+) -> Result<bool> {
+    ensure!(format.valid(bytes), "invalid or oversized output media");
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+    let (reply,): (Option<i64>,) = sqlx::query_as(
+        "SELECT (SELECT e.telegram_message_id FROM events e WHERE e.task=t.id
+                   AND e.role='user' AND e.telegram_message_id>0 ORDER BY e.id DESC LIMIT 1)
+         FROM tasks t JOIN users u ON u.id=t.user AND u.suspended_at IS NULL
+         WHERE t.id=? AND t.user=? AND t.revision=? AND t.state='running'
+           AND t.agent IS NULL AND t.chief_chat=1 AND t.shared_memory_pair IS NULL AND t.schedule IS NULL
+           AND NOT EXISTS(SELECT 1 FROM telegram_group_tasks g WHERE g.task=t.id)",
+    )
+    .bind(&task.id)
+    .bind(&task.user)
+    .bind(task.revision)
+    .fetch_optional(&mut *tx)
+    .await?
+    .context("private task is unavailable")?;
+    let label = if format.is_video() {
+        "recording"
+    } else {
+        "image"
+    };
+    let queued = queue(
+        &mut tx,
+        vault,
+        &task.user,
+        &task.id,
+        task.revision,
+        "document",
+        &format!("{label}.{}", format.extension()),
+        bytes,
+        reply,
+        None,
+        Some(format),
+    )
+    .await?;
+    super::requests::finish_action_in(
+        &mut tx,
+        task,
+        action,
+        &json!({"queued":queued,"media_delivery":tool}).to_string(),
+        false,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(queued)
 }
 
 pub(crate) async fn queue_document(
@@ -45,9 +145,10 @@ pub(crate) async fn queue_document(
         task.revision,
         "document",
         name,
-        &body,
+        body.as_bytes(),
         None,
         artifact.as_deref(),
+        None,
     )
     .await?;
     tx.commit().await?;
@@ -162,8 +263,9 @@ impl VoiceReply {
             self.revision,
             "voice",
             "reply.mp3",
-            crate::security::clip(body, 4_000),
+            crate::security::clip(body, 4_000).as_bytes(),
             Some(self.message),
+            None,
             None,
         )
         .await
@@ -208,14 +310,17 @@ async fn queue(
     revision: i64,
     kind: &str,
     name: &str,
-    content: &str,
+    content: &[u8],
     reply: Option<i64>,
     artifact: Option<&str>,
+    media: Option<MediaFormat>,
 ) -> Result<bool> {
-    let fingerprint = hash(content);
+    let fingerprint = hex::encode(Sha256::digest(content));
+    let format = media.map(MediaFormat::extension);
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM telegram_outputs f JOIN outbox o ON o.id=f.outbox
          WHERE o.task=? AND o.user=? AND f.revision=? AND f.kind=? AND f.name=? AND f.fingerprint=?
+            AND f.media_format IS ?
             AND (o.state IN ('queued','sending','uncertain') OR (?='document' AND o.state='sent')))",
     )
     .bind(task)
@@ -224,6 +329,7 @@ async fn queue(
     .bind(kind)
     .bind(name)
     .bind(&fingerprint)
+    .bind(format)
     .bind(kind)
     .fetch_one(&mut **tx)
     .await?;
@@ -240,8 +346,8 @@ async fn queue(
     .execute(&mut **tx)
     .await?
     .last_insert_rowid();
-    let ciphertext = vault.seal(&binding(user, outbox), content.as_bytes())?;
-    sqlx::query("INSERT INTO telegram_outputs(outbox,revision,kind,name,fingerprint,ciphertext,artifact) VALUES(?,?,?,?,?,?,?)")
+    let ciphertext = vault.seal(&binding(user, outbox), content)?;
+    sqlx::query("INSERT INTO telegram_outputs(outbox,revision,kind,name,fingerprint,ciphertext,artifact,media_format,media_expires_at) VALUES(?,?,?,?,?,?,?,?,?)")
         .bind(outbox)
         .bind(revision)
         .bind(kind)
@@ -249,6 +355,8 @@ async fn queue(
         .bind(fingerprint)
         .bind(ciphertext)
         .bind(artifact)
+        .bind(format)
+        .bind(media.map(|_| now() + MEDIA_TTL_SECONDS))
         .execute(&mut **tx)
         .await?;
     Ok(true)
@@ -262,20 +370,24 @@ pub(crate) async fn load(
     if !has_access(db, &item.user, item.agent.as_deref()).await? {
         return Ok(None);
     }
-    let output: Option<(String, String, String, Option<String>)> = sqlx::query_as(
-        "SELECT f.kind,f.name,f.ciphertext,f.audio FROM telegram_outputs f JOIN outbox o ON o.id=f.outbox
+    let output: Option<(String, String, String, Option<String>, bool)> = sqlx::query_as(
+        "SELECT coalesce(f.media_format,f.kind),f.name,f.ciphertext,f.audio,f.media_format IS NOT NULL
+         FROM telegram_outputs f JOIN outbox o ON o.id=f.outbox
          JOIN tasks t ON t.id=o.task AND t.revision=f.revision AND t.user=o.user
          WHERE o.id=? AND o.user=? AND o.state='sending' AND t.agent IS NULL
            AND t.shared_memory_pair IS NULL
            AND EXISTS(SELECT 1 FROM users u WHERE u.id=t.user AND u.suspended_at IS NULL)
-           AND t.state NOT IN ('cancelled','revoked') AND f.ciphertext IS NOT NULL",
+           AND t.state NOT IN ('cancelled','revoked') AND f.ciphertext IS NOT NULL
+           AND (f.media_format IS NULL OR (t.chief_chat=1 AND t.schedule IS NULL AND f.media_expires_at>?
+                AND NOT EXISTS(SELECT 1 FROM telegram_group_tasks g WHERE g.task=t.id)))",
     )
     .bind(item.id)
     .bind(&item.user)
+    .bind(now())
     .fetch_optional(db)
     .await?;
     output
-        .map(|(kind, name, ciphertext, audio)| {
+        .map(|(kind, name, ciphertext, audio, ephemeral)| {
             let bytes = match &audio {
                 Some(audio) => vault.open(&audio_binding(item), audio)?,
                 None => vault.open(&binding(&item.user, item.id), &ciphertext)?,
@@ -285,9 +397,22 @@ pub(crate) async fn load(
                 name,
                 bytes,
                 synthesized: audio.is_some(),
+                ephemeral,
             })
         })
         .transpose()
+}
+
+pub(super) async fn prune_media(tx: &mut Transaction<'_, Sqlite>) -> Result<()> {
+    sqlx::query(
+        "UPDATE outbox SET state='failed',retry_at=0,body='',button=NULL
+         WHERE state='queued' AND id IN (
+             SELECT outbox FROM telegram_outputs WHERE media_expires_at<=?)",
+    )
+    .bind(now())
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 pub(crate) async fn save_audio(
