@@ -1,5 +1,6 @@
 mod backup;
 mod catalog;
+mod image_settings;
 mod onboarding;
 mod server_tools;
 mod settings;
@@ -12,6 +13,7 @@ use anyhow::{Context, Result, ensure};
 pub(crate) use backup::BackupModel;
 pub use catalog::OpenRouterModel;
 use catalog::{openrouter_catalog, valid_model_id, verify_key};
+pub(crate) use image_settings::write_image_model;
 pub(crate) use onboarding::OnboardingError;
 pub(crate) use onboarding::display_label;
 use serde::Serialize;

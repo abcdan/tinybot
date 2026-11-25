@@ -2,6 +2,7 @@ mod codex;
 mod connections;
 mod decisions;
 mod failure;
+mod images;
 mod inception;
 mod media;
 mod openrouter;
@@ -12,8 +13,9 @@ mod transcription;
 pub(crate) use connections::BackupModel;
 pub(crate) use connections::OnboardingError;
 pub use connections::OpenRouterSettingsError;
-pub(crate) use connections::{ModelPreferences, ModelSelection, display_label};
+pub(crate) use connections::{ModelPreferences, ModelSelection, display_label, write_image_model};
 pub(crate) use failure::{ProviderFailure, provider_failure, temporary_provider_failure};
+pub(crate) use images::{IMAGE_MODELS, MAX_IMAGE_PROMPT_BYTES, resolve_image_model};
 pub use media::{AttachmentInput, AttachmentRead};
 pub(crate) use server_tools::{ServerTool, ServerToolInput};
 pub(crate) use transcription::MAX_VOICE_BYTES;
@@ -110,6 +112,8 @@ pub struct Models {
     backup_fixture: Option<Arc<dyn ModelProvider>>,
     #[cfg(test)]
     memory_decisions_fixture: Option<Arc<dyn ModelProvider>>,
+    #[cfg(test)]
+    image_fixture: Option<String>,
 }
 
 impl Models {
@@ -134,6 +138,8 @@ impl Models {
             backup_fixture: None,
             #[cfg(test)]
             memory_decisions_fixture: None,
+            #[cfg(test)]
+            image_fixture: None,
         }
     }
 

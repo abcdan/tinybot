@@ -9,6 +9,9 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+const DEFAULT_IMAGE: &str = "google/gemini-3.1-flash-image";
+const PRO_IMAGE: &str = "google/gemini-3-pro-image";
+
 struct SettingsChief;
 
 #[async_trait]
@@ -46,7 +49,15 @@ impl ModelProvider for SettingsChief {
                 assert!(!output.contains("fixture-connector-secret"));
                 assert!(!output.contains("private-endpoint"));
                 assert!(!output.contains("Other account"));
+                assert_eq!(settings["settings"]["image_model"], DEFAULT_IMAGE);
+                assert!(output.contains(PRO_IMAGE));
                 Ok(json!({"kind":"reply","text":"Your timezone is Europe/London."}).to_string())
+            }
+            ("Use Gemini Nano Banana Pro for images", Some("user")) => {
+                Ok(json!({"kind":"tool","name":"configure_settings","args":{
+                    "fields":["image_model"],"values":{"image_model":PRO_IMAGE}
+                }})
+                .to_string())
             }
             ("Rename yourself to Atlas and update my timezone", Some("user")) => {
                 Ok(json!({"kind":"tool","name":"configure_settings","args":{
@@ -253,6 +264,55 @@ async fn chief_reads_redacted_settings_and_applies_only_the_exact_signed_approva
     let audit: Vec<String> = sqlx::query_scalar("SELECT e.detail FROM audit_entries e JOIN audit_sessions s ON s.id=e.session WHERE s.task=?")
         .bind(task).fetch_all(&db).await.unwrap();
     assert!(!audit.join(" ").contains("Orion"));
+}
+
+#[tokio::test]
+async fn chief_prepares_an_image_model_change_for_signed_approval() {
+    let db = fixture().await;
+    let app = Arc::new(app_with_model(&db, Arc::new(SettingsChief)));
+    let task = send(&app, 13, "Use Gemini Nano Banana Pro for images").await;
+    let form: String = sqlx::query_scalar(
+        "SELECT id FROM pending WHERE task=? AND kind='settings-form' AND state='waiting'",
+    )
+    .bind(&task.id)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    let mini = MiniFixture::start(app.clone()).await;
+    let form_state: Value = mini
+        .post(true, "get-form", json!({"id":form}))
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(form_state["content"]["fields"][0]["value"], PRO_IMAGE);
+    assert_eq!(form_state["content"]["fields"][0]["type"], "select");
+
+    let review: Value = mini
+        .post(
+            true,
+            "answer-settings-form",
+            json!({"id":form,"values":{"image_model":PRO_IMAGE}}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        review["content"]["changes"][0]["after"],
+        "Gemini Nano Banana Pro"
+    );
+    assert_eq!(app.models.image_model("1").await.unwrap(), DEFAULT_IMAGE);
+    mini.post(true, "approve-settings", json!({"id":review["id"]}))
+        .await
+        .error_for_status()
+        .unwrap();
+    assert_eq!(app.models.image_model("1").await.unwrap(), PRO_IMAGE);
+    assert_eq!(app.models.image_model("2").await.unwrap(), DEFAULT_IMAGE);
 }
 
 #[tokio::test]

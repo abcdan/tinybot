@@ -88,7 +88,7 @@ impl Tool for ConfigureSettings {
     }
 
     fn describe(&self) -> &'static str {
-        "Open a personal settings form on the user's request. Supply the specific fields they want to change and optionally prefill values explicitly given by the user. Use on or off for OpenRouter tools. Use codex or openrouter:publisher/model for model fields, or off for the backup model. The user reviews and approves the exact changes after the form. Never ask for authentication secrets or use this tool for access grants."
+        "Open a personal settings form on the user's request. Supply the specific fields they want to change and optionally prefill values explicitly given by the user. Use on or off for OpenRouter tools. Use codex or openrouter:publisher/model for task and backup models, or off for the backup model. For image_model, use a model ID from read_settings. The user reviews and approves the exact changes after the form. Never ask for authentication secrets or use this tool for access grants."
     }
 
     fn input_schema(&self) -> Value {

@@ -630,6 +630,39 @@ test('a paired Codex model becomes the backup only after enabling it', async () 
     }
 });
 
+test('the image model is saved independently of the task model', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 640}});
+        const page = await context.newPage();
+        const gemini = {id: 'google/gemini-3.1-flash-image', name: 'Gemini Nano Banana 2 (default)'};
+        const pro = {id: 'google/gemini-3-pro-image', name: 'Gemini Nano Banana Pro'};
+        const state = {user: '1', provider: 'codex', model: 'fixture-codex', requests: [], tasks: [],
+            openrouter_connected: true, image_settings: {selected: gemini.id, choices: [gemini, pro]}};
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return state;
+            if (action === 'openrouter-models') return {models: []};
+            if (action === 'save-image-model') {
+                assert.deepEqual(data, {model: pro.id});
+                state.image_settings.selected = data.model;
+                return {ok: true};
+            }
+            assert.fail(action);
+        });
+        await page.goto('https://tinybot.test/mini');
+        await page.locator('[data-tab="model"]').click();
+        const picker = page.getByLabel('Image generation and editing model');
+        assert.equal(await picker.inputValue(), gemini.id);
+        await picker.selectOption(pro.id);
+        await page.getByRole('button', {name: 'Save image model', exact: true}).click();
+        await page.getByText('Image model saved.', {exact: true}).waitFor();
+        assert.equal(await picker.inputValue(), pro.id);
+        await page.getByText('ChatGPT for Codex · fixture-codex', {exact: true}).waitFor();
+    } finally {
+        await browser.close();
+    }
+});
+
 test('Docblock sign-in and note link management stay inside the signed Mini App', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
     try {

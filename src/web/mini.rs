@@ -139,6 +139,7 @@ async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<
         "openrouter-model" => models::select_openrouter_model(app, user, data).await?,
         "save-backup-model" => models::save_backup_model(app, user, data).await?,
         "clear-backup-model" => app.models.clear_backup(user).await?,
+        "save-image-model" => models::save_image_model(app, user, data).await?,
         "openrouter-server-tool" => {
             app.models
                 .set_server_tool(
