@@ -62,42 +62,142 @@ pub(crate) async fn queue_voice(
     message: i64,
 ) -> Result<bool> {
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
-    let item: Option<(String, i64, String)> = sqlx::query_as(
-        "SELECT t.id,t.revision,e.body FROM outbox o JOIN events e ON e.id=o.assistant_event_id
-         JOIN tasks t ON t.id=o.task AND t.id=e.task
-         WHERE o.id=? AND o.telegram_message_id=? AND o.user=? AND o.state='sent'
-            AND t.user=o.user AND t.agent IS NULL AND t.chief_chat=1
-            AND t.shared_memory_pair IS NULL
-            AND EXISTS(SELECT 1 FROM users u WHERE u.id=t.user AND u.suspended_at IS NULL)
-            AND t.state NOT IN ('cancelled','revoked')",
-    )
-    .bind(outbox)
-    .bind(message)
-    .bind(user)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let Some((task, revision, body)) = item else {
+    let Some(reply) = voice_reply(&mut tx, user, VoiceTarget::Exact(message), Some(outbox)).await?
+    else {
         return Ok(false);
     };
-    let body = crate::security::clip(body.trim(), 4_000);
-    if body.is_empty() {
-        return Ok(false);
-    }
-    let queued = queue(
-        &mut tx,
-        vault,
-        user,
-        &task,
-        revision,
-        "voice",
-        "reply.mp3",
-        body,
-        Some(message),
-        None,
-    )
-    .await?;
+    let queued = reply.enqueue(&mut tx, vault, user).await?;
     tx.commit().await?;
     Ok(queued)
+}
+
+pub(crate) enum VoiceTarget {
+    Exact(i64),
+    Before(i64),
+}
+
+pub(crate) struct VoiceNotices {
+    pub request_message: i64,
+    pub missing_reply: &'static str,
+    pub missing_connection: &'static str,
+}
+
+pub(crate) async fn request_voice(
+    db: &SqlitePool,
+    vault: &Vault,
+    user: &str,
+    update: i64,
+    target: Option<VoiceTarget>,
+    notices: Option<VoiceNotices>,
+) -> Result<()> {
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+    let inserted = sqlx::query("INSERT OR IGNORE INTO updates VALUES('telegram',?)")
+        .bind(update)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    if inserted == 0 {
+        return Ok(());
+    }
+    let reply = if let Some(target) = target {
+        voice_reply(&mut tx, user, target, None).await?
+    } else {
+        None
+    };
+    let notice = match reply {
+        Some(reply) if reply.configured => {
+            reply.enqueue(&mut tx, vault, user).await?;
+            None
+        }
+        Some(_) => notices.map(|notice| {
+            (
+                notice.request_message,
+                notice.missing_connection,
+                Some("mini"),
+            )
+        }),
+        None => notices.map(|notice| (notice.request_message, notice.missing_reply, None)),
+    };
+    if let Some((message, text, button)) = notice {
+        sqlx::query(
+            "INSERT INTO outbox(user,body,button,reply_to_message_id)
+             SELECT id,?,?,? FROM users WHERE id=? AND suspended_at IS NULL",
+        )
+        .bind(text)
+        .bind(button)
+        .bind(message)
+        .bind(user)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+#[derive(sqlx::FromRow)]
+struct VoiceReply {
+    task: String,
+    revision: i64,
+    body: String,
+    message: i64,
+    configured: bool,
+}
+
+impl VoiceReply {
+    async fn enqueue(
+        self,
+        tx: &mut Transaction<'_, Sqlite>,
+        vault: &Vault,
+        user: &str,
+    ) -> Result<bool> {
+        let body = self.body.trim();
+        if !self.configured || body.is_empty() {
+            return Ok(false);
+        }
+        queue(
+            tx,
+            vault,
+            user,
+            &self.task,
+            self.revision,
+            "voice",
+            "reply.mp3",
+            crate::security::clip(body, 4_000),
+            Some(self.message),
+            None,
+        )
+        .await
+    }
+}
+
+async fn voice_reply(
+    tx: &mut Transaction<'_, Sqlite>,
+    user: &str,
+    target: VoiceTarget,
+    outbox: Option<i64>,
+) -> Result<Option<VoiceReply>> {
+    let (first, last) = match target {
+        VoiceTarget::Exact(message) => (message, message),
+        VoiceTarget::Before(message) => (1, message.saturating_sub(1)),
+    };
+    Ok(sqlx::query_as(
+        "SELECT t.id AS task,t.revision,e.body,o.telegram_message_id AS message,
+                (u.openrouter_key IS NOT NULL OR (u.provider IS 'openrouter' AND u.credential IS NOT NULL)) AS configured
+         FROM outbox o JOIN events e ON e.id=o.assistant_event_id
+         JOIN tasks t ON t.id=o.task AND t.id=e.task AND t.user=o.user
+         JOIN users u ON u.id=t.user AND u.suspended_at IS NULL
+         WHERE o.user=?1 AND o.telegram_message_id BETWEEN ?2 AND ?3 AND o.state='sent'
+            AND (?4 IS NULL OR o.id=?4) AND e.role='assistant' AND trim(e.body)<>''
+            AND t.agent IS NULL AND t.chief_chat=1 AND t.shared_memory_pair IS NULL
+            AND t.state NOT IN ('cancelled','revoked')
+         ORDER BY o.telegram_message_id DESC LIMIT 1",
+    )
+    .bind(user)
+    .bind(first)
+    .bind(last)
+    .bind(outbox)
+    .fetch_optional(&mut **tx)
+    .await?)
 }
 
 async fn queue(

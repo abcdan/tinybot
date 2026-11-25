@@ -7,6 +7,7 @@ mod groups;
 mod media;
 mod telegram;
 mod voice;
+mod voice_request;
 mod widget;
 
 pub use card::Card;
