@@ -32,6 +32,7 @@ mod task_artifacts;
 mod task_workbench;
 mod telegram_workflows;
 mod tool_budget;
+mod usage_insights;
 
 async fn fixture() -> SqlitePool {
     let db = SqlitePoolOptions::new()

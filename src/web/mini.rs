@@ -148,6 +148,8 @@ async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<
         "save-agent" => agents::save_agent(app, user, data).await?,
         "invite-agent" => return sharing::invite_agent(app, user, data).await,
         "list-invites" => return invitations::list(app, user).await,
+        "my-usage" => return invitations::my_usage(app, user).await,
+        "save-usage-alert" => invitations::save_usage_alert(app, user, data).await?,
         "create-invite" => return invitations::create(app, user).await,
         "revoke-invite" => invitations::revoke(app, user, data).await?,
         "suspend-guest" => invitations::suspend(app, user, data, true).await?,
