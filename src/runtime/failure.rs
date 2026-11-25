@@ -177,7 +177,7 @@ pub(super) async fn explain(db: &SqlitePool, task: &Task, failure: &Failure) -> 
     .join(" "))
 }
 
-fn confirmed_step(name: &str, detail: &Value) -> Option<&'static str> {
+pub(crate) fn confirmed_step(name: &str, detail: &Value) -> Option<&'static str> {
     match name {
         "send_email" => Some("The mail server had already accepted the email."),
         "form_submission" if detail["submitted"] == true => {

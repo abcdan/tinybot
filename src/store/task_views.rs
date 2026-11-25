@@ -1,6 +1,7 @@
-use super::{ReplyContext, Task};
+use super::{Pending, ReplyContext, Task, queue, requests};
 use crate::{
     audit,
+    runtime::confirmed_step,
     security::{clip, now},
 };
 use anyhow::Result;
@@ -13,6 +14,7 @@ const VISIBLE: &str = "t.user=? AND t.chief_chat=1 AND t.state<>'revoked'
       WHERE p.id=t.shared_memory_pair AND (p.owner=t.user OR p.guest=t.user)))
     AND (t.agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=t.agent
       AND (a.owner=t.user OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=t.user))))";
+const FIELDS: &str = "t.id,t.title,t.state,t.revision,t.updated,t.agent";
 
 pub(crate) fn completable(state: &str) -> bool {
     matches!(
@@ -27,6 +29,124 @@ pub(crate) struct TaskView {
     title: String,
     state: String,
     revision: i64,
+    updated: i64,
+    agent: Option<String>,
+}
+
+#[derive(sqlx::FromRow, Serialize)]
+pub(crate) struct AuditSummary {
+    id: i64,
+    started_at: i64,
+    finished_at: Option<i64>,
+    status: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ReplyPreview {
+    event: i64,
+    text: String,
+    truncated: bool,
+}
+
+#[derive(Serialize)]
+pub(crate) struct TaskDetail {
+    task: TaskView,
+    audit: Option<AuditSummary>,
+    reply: Option<ReplyPreview>,
+    last_confirmed: Option<&'static str>,
+    failure: Option<String>,
+    executing: bool,
+    #[serde(skip)]
+    pub(crate) requests: Vec<Pending>,
+}
+
+pub(crate) async fn recent(db: &SqlitePool, user: &str) -> Result<Vec<TaskView>> {
+    Ok(sqlx::query_as(&format!(
+        "SELECT {FIELDS} FROM tasks t WHERE {VISIBLE}
+         ORDER BY t.state IN ('completed','cancelled'),t.updated DESC,t.id LIMIT 40"
+    ))
+    .bind(user)
+    .fetch_all(db)
+    .await?)
+}
+
+pub(crate) async fn detail(db: &SqlitePool, user: &str, id: &str) -> Result<Option<TaskDetail>> {
+    let mut tx = db.begin().await?;
+    let task: Option<TaskView> = sqlx::query_as(&format!(
+        "SELECT {FIELDS} FROM tasks t WHERE {VISIBLE} AND t.id=?"
+    ))
+    .bind(user)
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(task) = task else {
+        return Ok(None);
+    };
+    let audit: Option<AuditSummary> = sqlx::query_as(
+        "SELECT s.id,s.started_at,s.finished_at,s.status FROM tasks t
+         JOIN audit_sessions s ON s.id=t.audit_session_id AND s.task=t.id
+         WHERE t.id=? AND s.started_at>?",
+    )
+    .bind(id)
+    .bind(now() - audit::RETENTION)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let last_confirmed = if let Some(session) = &audit {
+        let steps: Vec<(String, String)> = sqlx::query_as(
+            "SELECT name,detail FROM audit_entries WHERE session=? AND kind='tool' AND status='completed'
+             ORDER BY id DESC LIMIT 32",
+        )
+        .bind(session.id)
+        .fetch_all(&mut *tx)
+        .await?;
+        steps.iter().find_map(|(name, raw)| {
+            let detail = serde_json::from_str(raw).ok()?;
+            confirmed_step(name, &detail)
+        })
+    } else {
+        None
+    };
+    let reply: Option<(i64, String)> = sqlx::query_as(
+        "SELECT id,body FROM events WHERE task=? AND role='assistant' AND body<>'' ORDER BY id DESC LIMIT 1",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let reply = reply.map(|(event, body)| {
+        let text = clip(&body, 8_000);
+        ReplyPreview {
+            event,
+            truncated: text.len() < body.len(),
+            text: text.into(),
+        }
+    });
+    let executing = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pending WHERE task=? AND user=? AND state='executing')",
+    )
+    .bind(id)
+    .bind(user)
+    .fetch_one(&mut *tx)
+    .await?;
+    let failure = if task.state == "blocked" {
+        sqlx::query_scalar("SELECT message FROM task_failures WHERE task=? AND revision=?")
+            .bind(id)
+            .bind(task.revision)
+            .fetch_optional(&mut *tx)
+            .await?
+    } else {
+        None
+    };
+    let requests = requests::list_requests_in(&mut *tx, user, Some(id)).await?;
+    tx.commit().await?;
+    Ok(Some(TaskDetail {
+        task,
+        audit,
+        reply,
+        last_confirmed,
+        failure,
+        executing,
+        requests,
+    }))
 }
 
 pub(crate) async fn search(
@@ -46,7 +166,7 @@ pub(crate) async fn search_in_scope(
     completed_only: bool,
 ) -> Result<Vec<TaskView>> {
     Ok(sqlx::query_as(&format!(
-        "SELECT t.id,t.title,t.state,t.revision FROM tasks t WHERE {VISIBLE}
+        "SELECT {FIELDS} FROM tasks t WHERE {VISIBLE}
          AND (?=0 OR t.state='completed')
          AND (?='' OR instr(lower(t.title),lower(?))>0 OR instr(lower(t.summary),lower(?))>0
          OR EXISTS(SELECT 1 FROM events e WHERE e.task=t.id AND e.role IN ('user','assistant')
@@ -185,6 +305,21 @@ pub(crate) async fn stop(db: &SqlitePool, user: &str, task: &str, revision: i64)
     let result = stop_current(&mut tx, user, task, revision).await?;
     tx.commit().await?;
     Ok(result)
+}
+
+pub(crate) async fn select_at(
+    db: &SqlitePool,
+    user: &str,
+    task: &str,
+    revision: i64,
+) -> Result<bool> {
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+    let selected = visible(&mut *tx, user, task)
+        .await?
+        .is_some_and(|task| task.revision == revision)
+        && queue::select_task_in(&mut tx, user, task).await?;
+    tx.commit().await?;
+    Ok(selected)
 }
 
 pub(crate) async fn complete(

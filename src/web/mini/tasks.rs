@@ -31,15 +31,6 @@ fn audit_cursor(data: &Value, field: &str) -> Result<Option<i64>> {
         .transpose()
 }
 
-pub(super) async fn select_task(app: &App, user: &str, data: &Value) -> Result<()> {
-    let task = text(data, "task", 64)?;
-    ensure!(
-        store::select_task(&app.db, user, task).await?,
-        "task unavailable"
-    );
-    Ok(())
-}
-
 pub(super) async fn get_form(app: &App, user: &str, data: &Value) -> Result<Value> {
     forms::input_request(&app.db, user, text(data, "id", 36)?).await
 }

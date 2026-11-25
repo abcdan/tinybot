@@ -15,12 +15,7 @@ const statusTones = new Map([
 ]);
 
 export function audit(state) {
-    const timeZone = state.time_zone;
-    const dates = {
-        message: new Intl.DateTimeFormat(undefined, {month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone}),
-        time: new Intl.DateTimeFormat(undefined, {timeStyle: 'medium', timeZone}),
-        full: new Intl.DateTimeFormat(undefined, {dateStyle: 'medium', timeStyle: 'medium', timeZone}),
-    };
+    const dates = auditDates(state.time_zone);
     const page = node('div', undefined, 'audit-page');
     const usage = usagePanel('Last 7 days', 'h3', 'audit-usage card');
     const delivery = node('section', undefined, 'audit-delivery-summary card');
@@ -71,6 +66,20 @@ export function audit(state) {
         node('h3', 'Recent messages', 'audit-section-title'), sessions, status, more);
     content.append(page);
     void load();
+}
+
+export function focusedAudit(mount, state, run, back) {
+    const details = auditRun(run, auditDates(state.time_zone));
+    mount.replaceChildren(button('Back to task', back, true), node('h2', 'Task audit'), details);
+    details.open = true;
+}
+
+function auditDates(timeZone) {
+    return {
+        message: new Intl.DateTimeFormat(undefined, {month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone}),
+        time: new Intl.DateTimeFormat(undefined, {timeStyle: 'medium', timeZone}),
+        full: new Intl.DateTimeFormat(undefined, {dateStyle: 'medium', timeStyle: 'medium', timeZone}),
+    };
 }
 
 function auditRun(run, dates) {

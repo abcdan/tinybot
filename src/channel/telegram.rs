@@ -197,7 +197,7 @@ impl ChannelAdapter for Telegram {
                 let mut buttons = Vec::new();
                 if !matches!(state, "cancelled" | "revoked") {
                     let label = if state == "completed" { "Reopen" } else { "Continue" };
-                    buttons.push(json!({"text":label,"callback_data":format!("tc/{task}")}));
+                    buttons.push(json!({"text":label,"callback_data":format!("tc/{task}/{revision}")}));
                 }
                 if matches!(state, "queued" | "running" | "waiting" | "setup") {
                     buttons.push(json!({"text":"Stop","callback_data":format!("ts/{task}/{revision}")}));
@@ -205,11 +205,16 @@ impl ChannelAdapter for Telegram {
                 if store::task_views::completable(state) {
                     buttons.push(json!({"text":"Done","callback_data":format!("td/{task}/{revision}")}));
                 }
-                if matches!(state, "waiting" | "setup") {
-                    buttons.push(json!({"text":"Review","web_app":{"url":format!("{}/mini",self.origin)}}));
-                }
+                let mut rows = Vec::new();
                 if !buttons.is_empty() {
-                    data["reply_markup"] = json!({"inline_keyboard":[buttons]});
+                    rows.push(buttons);
+                }
+                if let Ok(task) = uuid::Uuid::parse_str(task) {
+                    let label = if matches!(state, "waiting" | "setup") { "Review" } else { "Open task" };
+                    rows.push(vec![json!({"text":label,"web_app":{"url":format!("{}/mini?task={task}",self.origin)}})]);
+                }
+                if !rows.is_empty() {
+                    data["reply_markup"] = json!({"inline_keyboard":rows});
                 }
             }
             Some(button) if button.starts_with(callback::MCP_APPROVAL_PREFIX) => {
