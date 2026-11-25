@@ -109,6 +109,82 @@ impl Mcp {
         )
     }
 
+    pub(crate) async fn docblock_folders(
+        &self,
+        connector: &Connector,
+        workspace: &str,
+    ) -> Result<Vec<String>> {
+        ensure!(
+            matches!(self.docblock_access(connector), Some("write" | "propose")),
+            "Sign in with Docblock note access first."
+        );
+        let available = self.docblock_workspaces(connector).await?;
+        ensure!(
+            available["workspaces"]
+                .as_array()
+                .is_some_and(
+                    |entries| entries.iter().any(|entry| entry["id"] == workspace
+                        && matches!(entry["role"].as_str(), Some("owner" | "editor")))
+                ),
+            "Choose a granted Docblock workspace you can edit."
+        );
+        let output = tool_output(
+            &self
+                .call(
+                    connector,
+                    "list_notes",
+                    &json!({"workspace":workspace,"limit":1}),
+                )
+                .await?,
+        )?;
+        let folders = output["folders"]
+            .as_array()
+            .context("Docblock did not return its folders")?;
+        Ok(folders
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|path| {
+                path.len() <= 240
+                    && !path.is_empty()
+                    && path.split('/').all(|part| {
+                        part.len() <= 80
+                            && part
+                                .as_bytes()
+                                .first()
+                                .is_some_and(u8::is_ascii_alphanumeric)
+                            && part.bytes().all(|b| {
+                                b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b)
+                            })
+                    })
+            })
+            .take(750)
+            .map(str::to_owned)
+            .collect())
+    }
+
+    pub(crate) async fn docblock_note_absent(
+        &self,
+        connector: &Connector,
+        args: &Value,
+    ) -> Result<bool> {
+        let result = self
+            .call(
+                connector,
+                "read_note",
+                &json!({"workspace":args["workspace"],"path":args["path"]}),
+            )
+            .await?;
+        Ok(result["isError"] == true
+            && result["content"].as_array().is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry["type"] == "text"
+                        && entry["text"]
+                            .as_str()
+                            .is_some_and(|text| text.starts_with("not_found: "))
+                })
+            }))
+    }
+
     pub(crate) async fn docblock_shares(
         &self,
         connector: &Connector,

@@ -2,6 +2,7 @@ mod acknowledgement;
 mod builtins;
 mod completion;
 mod delegation;
+mod docblock_save;
 mod effects;
 mod email;
 mod engine;

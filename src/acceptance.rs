@@ -20,6 +20,7 @@ mod browser_settings;
 mod browsing;
 mod checkpoints;
 mod completion_chat;
+mod docblock_saves;
 mod mail_settings;
 mod mail_workflow;
 mod mcp_approvals;

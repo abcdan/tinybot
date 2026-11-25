@@ -2,6 +2,7 @@ pub(crate) mod acknowledgements;
 pub(crate) mod artifacts;
 pub mod attachments;
 pub(crate) mod checkpoints;
+pub(crate) mod docblock_saves;
 pub(crate) mod groups;
 mod ingress;
 pub(crate) mod invitations;

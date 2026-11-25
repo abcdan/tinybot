@@ -66,6 +66,15 @@ pub fn router(app: Arc<App>) -> Router {
             }),
         )
         .route(
+            "/mini-docblock-save.js",
+            get(|| async {
+                asset(
+                    "application/javascript; charset=utf-8",
+                    include_str!("../../web/mini-docblock-save.js"),
+                )
+            }),
+        )
+        .route(
             "/mini-onboarding.js",
             get(|| async {
                 asset(

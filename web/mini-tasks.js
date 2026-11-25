@@ -1,6 +1,7 @@
 import { api, content } from './mini.js';
 import { fileShelf } from './mini-artifacts.js';
 import { focusedAudit } from './mini-audit.js';
+import { saveToDocblock } from './mini-docblock-save.js';
 import { action, button, card, field, form, node, row } from './mini-ui.js';
 
 let view;
@@ -207,6 +208,7 @@ export function tasks(state, requestCard, openModel) {
                 body.append(latest);
             }
             if (data.files?.length) body.append(fileShelf(task, data.files, date));
+            if (data.docblock_saves) body.append(saveToDocblock(state, task, reply, data.docblock_saves, select));
         } catch (error) {
             if (!body.isConnected) return;
             const item = card(null, error.message);
