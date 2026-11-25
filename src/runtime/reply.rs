@@ -112,6 +112,9 @@ mod tests {
 
     #[tokio::test]
     async fn complete_prose_or_a_text_object_can_only_become_a_reply() {
+        let proposal = r#"{"kind":"tool","name":"browse","args":{}}"#;
+        assert!(matches!(turn(proposal).await.unwrap(), Step::Tool {name, ..} if name == "browse"));
+        assert!(text(proposal, false).is_err());
         for response in [
             "Het begint om tien uur.",
             r#"{"text":"Het begint om tien uur."}"#,

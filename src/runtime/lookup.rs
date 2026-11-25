@@ -5,7 +5,7 @@ use crate::{
     net,
     security::{clip, hash},
 };
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use serde_json::{Value, json};
 use std::time::Duration;
 
