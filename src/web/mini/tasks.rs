@@ -95,22 +95,40 @@ pub(super) async fn pause_schedule(app: &App, user: &str, data: &Value, pause: b
 }
 
 pub(super) async fn run_schedule(app: &App, user: &str, data: &Value) -> Result<Value> {
-    let request = text(data, "request_id", 36)?;
-    ensure!(
-        uuid::Uuid::parse_str(request).is_ok(),
-        "invalid run request"
-    );
     let task = schedules::run_now(
         &app.db,
         user,
         text(data, "id", 64)?,
         revision(data)?,
-        request,
+        run_request(data)?,
         now(),
         None,
     )
     .await?;
     Ok(json!({"task":task}))
+}
+
+pub(super) async fn preview_routine(app: &App, user: &str, data: &Value) -> Result<Value> {
+    let task = schedules::queue_preview(
+        &app.db,
+        user,
+        text(data, "id", 64)?,
+        revision(data)?,
+        run_request(data)?,
+        text(data, "sample", 2_000)?,
+        now(),
+    )
+    .await?;
+    Ok(json!({"task":task}))
+}
+
+fn run_request(data: &Value) -> Result<&str> {
+    let request = text(data, "request_id", 36)?;
+    ensure!(
+        uuid::Uuid::parse_str(request).is_ok(),
+        "invalid run request"
+    );
+    Ok(request)
 }
 
 pub(super) async fn schedule_history(app: &App, user: &str, data: &Value) -> Result<Value> {

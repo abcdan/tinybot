@@ -204,6 +204,7 @@ async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<
             tasks::pause_schedule(app, user, data, action == "pause-schedule").await?
         }
         "run-schedule" => return tasks::run_schedule(app, user, data).await,
+        "preview-routine" => return tasks::preview_routine(app, user, data).await,
         "schedule-history" => return tasks::schedule_history(app, user, data).await,
         "approve" | "deny" => tasks::respond(app, user, data, action == "approve").await?,
         "always-approve-mcp" => tasks::always_approve_mcp(app, user, data).await?,

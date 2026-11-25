@@ -16,6 +16,7 @@ mod media;
 mod memory;
 mod openrouter_tools;
 mod output;
+mod preview;
 mod review;
 mod settings;
 mod suggestions;
