@@ -26,6 +26,9 @@ use url::Url;
 
 const LIMIT: usize = 512 * 1024;
 
+#[cfg(test)]
+type DocblockFixture = Box<dyn Fn(&str, &Value) -> Result<Value> + Send + Sync>;
+
 #[derive(Clone, FromRow, Serialize)]
 pub struct Connector {
     pub id: String,
@@ -47,6 +50,8 @@ pub struct Mcp {
     origin: Url,
     refresh: Mutex<()>,
     policy: policy::Policy,
+    #[cfg(test)]
+    docblock_fixture: Option<DocblockFixture>,
 }
 
 impl Mcp {
@@ -57,7 +62,17 @@ impl Mcp {
             origin,
             refresh: Mutex::new(()),
             policy: policy::Policy::load(),
+            #[cfg(test)]
+            docblock_fixture: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_docblock_fixture(
+        &mut self,
+        fixture: impl Fn(&str, &Value) -> Result<Value> + Send + Sync + 'static,
+    ) {
+        self.docblock_fixture = Some(Box::new(fixture));
     }
 
     pub async fn prepare(&self, user: &str, candidate: &Candidate) -> Result<String> {
@@ -318,6 +333,14 @@ impl Mcp {
     }
 
     pub async fn call(&self, connector: &Connector, tool: &str, args: &Value) -> Result<Value> {
+        #[cfg(test)]
+        if docblock::is_endpoint(&connector.endpoint)
+            && let Some(fixture) = &self.docblock_fixture
+        {
+            let current = self.current_connection(connector).await?;
+            ensure!(current.auth == "oauth", "fixture authorization changed");
+            return fixture(tool, args);
+        }
         if connector.transport == discovery::STDIO {
             return self
                 .stdio(
