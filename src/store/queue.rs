@@ -142,7 +142,7 @@ pub async fn expire(db: &SqlitePool) -> Result<()> {
         .await?;
     sqlx::query(
         "DELETE FROM outbox WHERE id < (SELECT max(id)-10000 FROM outbox)
-        AND state IN ('sent','uncertain','failed')
+        AND state IN ('sent','uncertain','failed','skipped')
         AND NOT EXISTS(SELECT 1 FROM mail_messages m WHERE m.notice=outbox.id OR m.preview=outbox.id)",
     )
     .execute(&mut *tx)

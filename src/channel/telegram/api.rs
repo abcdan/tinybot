@@ -1,6 +1,6 @@
 use super::{Telegram, formatting, rich};
 use crate::{
-    channel::{Card, MessageDelivery},
+    channel::{Card, DeliveryUncertain, MessageDelivery},
     net, store,
 };
 use anyhow::Result;
@@ -159,16 +159,32 @@ impl Telegram {
     }
 
     pub(in crate::channel) async fn call(&self, method: &str, data: Value) -> Result<Value> {
-        let response = self
-            .client
-            .post(format!("{}/{method}", self.api))
-            .json(&data)
-            .send()
-            .await
-            .map_err(|_| anyhow::anyhow!("Telegram request failed"))?;
-        Ok(serde_json::from_slice(
-            &net::body(response, 2_000_000).await?,
-        )?)
+        let delivery = matches!(
+            method,
+            "sendMessage" | "sendRichMessage" | "sendWidget" | "setMessageReaction"
+        );
+        let result = async {
+            let response = self
+                .client
+                .post(format!("{}/{method}", self.api))
+                .json(&data)
+                .send()
+                .await
+                .map_err(|_| anyhow::anyhow!("Telegram request failed"))?;
+            anyhow::ensure!(
+                !delivery || !response.status().is_server_error(),
+                DeliveryUncertain
+            );
+            Ok(serde_json::from_slice(
+                &net::body(response, 2_000_000).await?,
+            )?)
+        }
+        .await;
+        if delivery {
+            result.map_err(|_| DeliveryUncertain.into())
+        } else {
+            result
+        }
     }
 
     pub(super) async fn send_widget(&self, kind: &str, data: Value) -> Result<WidgetDelivery> {
@@ -184,6 +200,7 @@ impl Telegram {
         if let Some(delay) = retry_after(&response) {
             return Ok(WidgetDelivery::Retry(delay));
         }
+        anyhow::ensure!(!ambiguous_reply(&response), DeliveryUncertain);
         let error_code = response["error_code"].as_i64();
         let category = widget_rejection(&response);
         tracing::warn!(
@@ -290,7 +307,15 @@ fn message_result(response: &Value) -> Result<MessageDelivery> {
     if let Some(delay) = retry_after(response) {
         return Ok(MessageDelivery::Retry(delay));
     }
+    anyhow::ensure!(!ambiguous_reply(response), DeliveryUncertain);
     anyhow::bail!("Telegram rejected the reply")
+}
+
+fn ambiguous_reply(response: &Value) -> bool {
+    response["ok"] != false
+        || response["error_code"]
+            .as_i64()
+            .is_some_and(|code| (500..600).contains(&code))
 }
 
 fn bad_request(response: &Value) -> Option<String> {

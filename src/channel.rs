@@ -45,7 +45,19 @@ pub enum Inbound {
 pub enum MessageDelivery {
     Sent(Option<i64>),
     Retry(i64),
+    Skipped,
 }
+
+#[derive(Debug)]
+pub(super) struct DeliveryUncertain;
+
+impl std::fmt::Display for DeliveryUncertain {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Telegram did not confirm the delivery")
+    }
+}
+
+impl std::error::Error for DeliveryUncertain {}
 
 #[derive(Debug)]
 pub(crate) struct UploadUncertain;

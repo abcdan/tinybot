@@ -200,7 +200,7 @@ async fn generated_progress_replies_to_the_request_without_controls() {
         .unwrap();
     assert_eq!(
         send_outbound(&db, &telegram, &item).await.unwrap(),
-        MessageDelivery::Sent(None)
+        MessageDelivery::Skipped
     );
 
     let captured = mock.lock().await;
@@ -1012,6 +1012,8 @@ async fn sends_native_cards_and_direct_choices_with_honest_delivery_fallbacks() 
             json!({"ok":true}),
             json!({"ok":true}),
             json!({"ok":true}),
+            json!({"unexpected":"missing acknowledgement"}),
+            json!({"ok":false,"error_code":503}),
         ]),
     )));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1084,6 +1086,20 @@ async fn sends_native_cards_and_direct_choices_with_honest_delivery_fallbacks() 
             .unwrap(),
         MessageDelivery::Sent(None)
     );
+    assert!(
+        telegram
+            .send_card("42", &card, &[], None)
+            .await
+            .unwrap_err()
+            .is::<DeliveryUncertain>()
+    );
+    assert!(
+        telegram
+            .send("42", "Fixture reply", None, None)
+            .await
+            .unwrap_err()
+            .is::<DeliveryUncertain>()
+    );
 
     let mock = mock.lock().await;
     let calls = &mock.0;
@@ -1103,6 +1119,8 @@ async fn sends_native_cards_and_direct_choices_with_honest_delivery_fallbacks() 
             "sendWidget",
             "sendMessage",
             "sendMessage",
+            "sendMessage",
+            "sendWidget",
             "sendMessage"
         ]
     );
