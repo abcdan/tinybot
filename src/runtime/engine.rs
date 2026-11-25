@@ -19,51 +19,64 @@ pub async fn run(app: Arc<App>, channel: Arc<dyn ChannelAdapter>) {
 }
 
 async fn run_tasks(app: Arc<App>, channel: Arc<dyn ChannelAdapter>) {
+    const TASK_WORKERS: usize = 6;
     let mut jobs = tokio::task::JoinSet::new();
     let mut cleanup = tokio::time::interval(Duration::from_secs(12));
     loop {
+        while jobs.len() < TASK_WORKERS {
+            let task = match store::claim(&app.db).await {
+                Ok(Some(task)) => task,
+                Ok(None) => break,
+                Err(_) => {
+                    tracing::warn!("unable to claim task");
+                    break;
+                }
+            };
+            let app = app.clone();
+            let channel = channel.clone();
+            jobs.spawn(async move { run_task(&app, &task, &*channel).await });
+        }
         tokio::select! {
-            _=cleanup.tick()=>{
+            _ = cleanup.tick() => {
                 if store::expire(&app.db).await.is_err() || app.forms.prune(&app.db).await.is_err() {
                     tracing::warn!("expiry cleanup failed");
                 }
             }
-            Some(done)=jobs.join_next(), if !jobs.is_empty()=> {
-                if done.is_err() {tracing::error!("task worker crashed");}
-            }
-            _=tokio::time::sleep(Duration::from_millis(550)), if jobs.len()<6=>{
-                match store::claim(&app.db).await {
-                    Ok(Some(task))=>{
-                        let app=app.clone();
-                        let channel=channel.clone();
-                        jobs.spawn(async move {
-                            let trace = start_audit(&app, &task).await;
-                            let group = store::groups::is_group_task(&app.db, &task.id).await.unwrap_or(true);
-                            let result = audit::scope(trace.clone(), async {
-                                if group {
-                                    return work_task(&app, &task, None).await;
-                                }
-                                let feedback=Feedback::default();
-                                let processing=work_task(&app,&task,Some(&feedback));
-                                tokio::pin!(processing);
-                                tokio::select! {
-                                    biased;
-                                    result=&mut processing=>result,
-                                    ()=feedback.show(&app.db,&task,&*channel)=>processing.await,
-                                }
-                            }).await;
-                            if let Err(error) = &result {
-                                record_failure(&app, &task, trace.clone(), group, error).await;
-                            }
-                            finish_audit(trace, &task, result.is_err()).await;
-                        });
-                    }
-                    Ok(None)=>{},
-                    Err(_)=>tracing::warn!("unable to claim task")
+            Some(done) = jobs.join_next(), if !jobs.is_empty() => {
+                if done.is_err() {
+                    tracing::error!("task worker crashed");
                 }
             }
+            _ = app.task_ready.notified(), if jobs.len() < TASK_WORKERS => {}
+            _ = tokio::time::sleep(Duration::from_millis(550)), if jobs.len() < TASK_WORKERS => {}
         }
     }
+}
+
+async fn run_task(app: &App, task: &Task, channel: &dyn ChannelAdapter) {
+    let trace = start_audit(app, task).await;
+    let group = store::groups::is_group_task(&app.db, &task.id)
+        .await
+        .unwrap_or(true);
+    let result = audit::scope(trace.clone(), async {
+        if group {
+            return work_task(app, task, None).await;
+        }
+        let feedback = Feedback::default();
+        let processing = work_task(app, task, Some(&feedback));
+        tokio::pin!(processing);
+        tokio::select! {
+            biased;
+            result = &mut processing => result,
+            () = feedback.show(&app.db, task, channel) => processing.await,
+        }
+    })
+    .await;
+    if let Err(error) = &result {
+        record_failure(app, task, trace.clone(), group, error).await;
+    }
+    app.delivery_ready.notify_one();
+    finish_audit(trace, task, result.is_err()).await;
 }
 
 async fn run_acknowledgements(app: Arc<App>) {

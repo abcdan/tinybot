@@ -23,6 +23,7 @@ mod calendar;
 mod checkpoints;
 mod completion_chat;
 mod docblock_saves;
+mod latency;
 mod mail_settings;
 mod mail_workflow;
 mod mcp_approvals;
@@ -62,6 +63,8 @@ fn app_with_model(db: &SqlitePool, rust_model: Arc<dyn ModelProvider>) -> App {
     let origin = url::Url::parse("https://tinybot.example").unwrap();
     App {
         db: db.clone(),
+        task_ready: Default::default(),
+        delivery_ready: Default::default(),
         vault: vault.clone(),
         token: "unused".into(),
         operator: "1".into(),

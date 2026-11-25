@@ -280,7 +280,9 @@ async fn telegram_invite_discloses_usage_before_private_account_acceptance() {
             "message":{"message_id":70,"chat":{"id":user,"type":"private"}},"data":callback_data,
         }))
         .unwrap();
-        handle_callback(&db, &telegram, &query).await.unwrap();
+        handle_callback(&db, &telegram, &query, || {})
+            .await
+            .unwrap();
     }
     assert!(!store::invitations::available(&db, "43").await.unwrap());
     assert!(store::invitations::available(&db, "42").await.unwrap());
@@ -567,7 +569,9 @@ async fn mcp_approval_buttons_resume_only_the_owners_waiting_request() {
         let Inbound::Callback(query) = update else {
             panic!("expected a private callback");
         };
-        handle_callback(&db, &telegram, &query).await.unwrap();
+        handle_callback(&db, &telegram, &query, || {})
+            .await
+            .unwrap();
     }
     assert!(!store::can_deliver(&db, &item).await.unwrap());
     let next = store::claim(&db).await.unwrap().unwrap();

@@ -87,6 +87,8 @@ async fn telegram_attachments_preserve_captions_and_skip_duplicate_or_unauthoriz
     let vault = crate::security::Vault::new(&"aa".repeat(32)).unwrap();
     let app = App {
         db: db.clone(),
+        task_ready: Default::default(),
+        delivery_ready: Default::default(),
         vault: vault.clone(),
         token: "test".into(),
         operator: "1".into(),
