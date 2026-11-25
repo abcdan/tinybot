@@ -10,6 +10,10 @@ pub struct Workers {
 }
 
 impl Workers {
+    pub(crate) async fn check(&self) -> (Option<WorkerHealth>, Option<WorkerHealth>) {
+        tokio::join!(health(&self.browser), health(&self.python))
+    }
+
     pub async fn browser(&self, route: &str, body: &Value) -> Result<Value> {
         call(&self.browser, route, body).await
     }
@@ -60,6 +64,42 @@ impl Workers {
     pub async fn python(&self, body: &Value) -> Result<Value> {
         call(&self.python, "run", body).await
     }
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+pub(crate) struct WorkerHealth {
+    pub(crate) ok: bool,
+    pub(crate) release: Option<String>,
+}
+
+async fn health(socket: &str) -> Option<WorkerHealth> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(2));
+    #[cfg(unix)]
+    let client = client.unix_socket(socket);
+    #[cfg(not(unix))]
+    let _ = socket;
+    let response = client
+        .build()
+        .ok()?
+        .get("http://localhost/health")
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?;
+    let mut health: WorkerHealth =
+        serde_json::from_slice(&net::body(response, 4_096).await.ok()?).ok()?;
+    health.release = health.release.filter(|value| valid_release(value));
+    Some(health)
+}
+
+pub(crate) fn valid_release(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 pub(crate) async fn call(socket: &str, route: &str, body: &Value) -> Result<Value> {

@@ -1,6 +1,7 @@
 mod accounts;
 mod agents;
 mod mini;
+mod readiness;
 mod state;
 
 use crate::App;
@@ -21,6 +22,7 @@ pub fn router(app: Arc<App>) -> Router {
     Router::new()
         .route("/", get(mini_page))
         .route("/health", get(health))
+        .route("/ready", get(readiness::ready))
         .route("/mini", get(mini_page))
         .route(
             "/app.css",
