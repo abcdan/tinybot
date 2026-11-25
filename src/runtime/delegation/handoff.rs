@@ -171,7 +171,7 @@ async fn enqueue(db: &SqlitePool, task: &Task, event: i64, worker: &str, text: &
         .bind(event)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("INSERT INTO outbox(user,task,agent,body) VALUES(?,?,?,?)")
+    let outbox = sqlx::query("INSERT INTO outbox(user,task,agent,body) VALUES(?,?,?,?)")
         .bind(&task.user)
         .bind(&task.id)
         .bind(
@@ -181,7 +181,9 @@ async fn enqueue(db: &SqlitePool, task: &Task, event: i64, worker: &str, text: &
         )
         .bind(text)
         .execute(&mut *tx)
-        .await?;
+        .await?
+        .last_insert_rowid();
+    audit::handoff_queued(&mut tx, outbox).await?;
     tx.commit().await?;
     audit::record(
         "message",

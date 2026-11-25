@@ -1429,10 +1429,15 @@ test('audit usage shows provider, model and run totals without treating missing 
     await mockMiniApp(context, ({action, data}) => {
         switch (action) {
             case 'status': return {user: '1', requests: [], tasks: [], time_zone: 'UTC'};
-            case 'audit-sessions': return {sessions: [run], next_before: null, usage: overview};
+            case 'audit-sessions': return {sessions: [run], next_before: null, usage: overview,
+                delivery: {runs: 2, completed_runs: 1, checked_off_tasks: 0, delivered_runs: 1,
+                    average_first_feedback_ms: 500, average_result_delivery_ms: 3100}};
             case 'audit-session':
                 assert.deepEqual(data, {id: 42});
-                return {session: run, next_after: null, usage: runUsage, entries: [
+                return {session: run, next_after: null, usage: runUsage, delivery: {
+                    timing: {result_status: 'delivered', queue_wait_ms: 200, first_feedback_ms: 500,
+                        result_delivery_ms: 3100}, receipts: [{kind: 'reply', state: 'sent'}],
+                }, entries: [
                     {id: 1, at: started, kind: 'model_call', name: modelName, status: 'completed',
                         detail: {usage: {...free, reasoning_tokens: 12}}},
                 ]};
@@ -1446,6 +1451,9 @@ test('audit usage shows provider, model and run totals without treating missing 
         const panel = page.locator('.audit-usage');
         await panel.getByRole('heading', {name: 'Last 7 days'}).waitFor();
         assert.deepEqual(await values(panel), ['$0.001234', '1,299', '4']);
+        const deliverySummary = page.locator('.audit-delivery-summary');
+        await deliverySummary.getByRole('heading', {name: 'Runs and delivery'}).waitFor();
+        assert.deepEqual(await values(deliverySummary), ['1', '0', '1', '500 ms', '3.1 s']);
         await panel.getByText(/Cost reported for 2 of 4 calls.*Tokens reported for 3 of 4 calls.*Earlier calls/).waitFor();
         const breakdown = panel.locator('.audit-breakdown');
         await breakdown.waitFor({state: 'hidden'});
@@ -1465,6 +1473,9 @@ test('audit usage shows provider, model and run totals without treating missing 
         const session = page.locator('.audit-run-usage');
         await session.getByRole('heading', {name: 'Run usage', exact: true}).waitFor();
         assert.deepEqual(await values(session), ['$0.00', '254', '1']);
+        const delivery = page.locator('.audit-delivery-run');
+        await delivery.getByRole('heading', {name: 'Telegram delivery'}).waitFor();
+        assert.deepEqual(await values(delivery), ['Confirmed', '200 ms', '500 ms', '3.1 s']);
         const runBreakdown = session.locator('.audit-breakdown');
         await runBreakdown.waitFor({state: 'hidden'});
         await session.getByText('Usage breakdown', {exact: true}).click();

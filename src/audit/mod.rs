@@ -1,6 +1,8 @@
+mod delivery;
 mod details;
 mod usage;
 
+pub(crate) use delivery::{draft_delivered, handoff_queued};
 pub(crate) use usage::{ModelCall, ingress_model_call, provider_call};
 
 pub(crate) fn request_preview(text: &str) -> String {
@@ -57,7 +59,8 @@ impl Trace {
 
     pub(crate) async fn start(db: &SqlitePool, task: &Task) -> Result<Option<Self>> {
         let scope: Option<(i64, i64)> = sqlx::query_as(
-            "UPDATE audit_sessions SET status='running',finished_at=NULL,attempts=attempts+1
+            "UPDATE audit_sessions SET status='running',finished_at=NULL,attempts=attempts+1,
+                first_attempt_at_ms=coalesce(first_attempt_at_ms,CAST(unixepoch('subsec')*1000 AS INTEGER))
              WHERE started_at>? AND id=(SELECT audit_session_id FROM tasks
                  WHERE id=? AND user=? AND revision=? AND state='running')
              RETURNING id,attempts",
@@ -217,8 +220,9 @@ pub(crate) async fn open(
     .execute(&mut **tx)
     .await?;
     let session: i64 = sqlx::query_scalar(
-        "INSERT INTO audit_sessions(task,message,started_at,status)
-         SELECT id,?,?,CASE WHEN state IN ('setup','uncertain') THEN state ELSE 'queued' END
+        "INSERT INTO audit_sessions(task,message,started_at,status,received_at_ms)
+         SELECT id,?,?,CASE WHEN state IN ('setup','uncertain') THEN state ELSE 'queued' END,
+                CAST(unixepoch('subsec')*1000 AS INTEGER)
          FROM tasks WHERE id=? RETURNING id",
     )
     .bind(details::message_preview(message))
@@ -394,10 +398,11 @@ pub(crate) async fn sessions(db: &SqlitePool, user: &str, before: Option<i64>) -
         .fetch_all(&mut *tx)
         .await?;
     let usage = usage::summary(&mut tx, user, None, cutoff).await?;
+    let delivery = delivery::summary(&mut tx, user, cutoff).await?;
     tx.commit().await?;
     let next = (rows.len() > SESSION_PAGE).then(|| rows[SESSION_PAGE - 1].id);
     rows.truncate(SESSION_PAGE);
-    Ok(json!({"sessions":rows,"next_before":next,"usage":usage}))
+    Ok(json!({"sessions":rows,"next_before":next,"usage":usage,"delivery":delivery}))
 }
 
 #[derive(FromRow)]
@@ -412,17 +417,21 @@ struct Entry {
 }
 
 pub(crate) async fn session(db: &SqlitePool, user: &str, id: i64, after: i64) -> Result<Value> {
-    let (session, mut rows, usage) =
+    let (session, mut rows, usage, delivery) =
         session_snapshot(db, user, id, after, ENTRY_PAGE as i64 + 1).await?;
     let next = (rows.len() > ENTRY_PAGE).then(|| rows[ENTRY_PAGE - 1].id);
     rows.truncate(ENTRY_PAGE);
-    Ok(json!({"session":session,"entries":entry_details(rows),"next_after":next,"usage":usage}))
+    Ok(
+        json!({"session":session,"entries":entry_details(rows),"next_after":next,"usage":usage,"delivery":delivery}),
+    )
 }
 
 pub(crate) async fn export(db: &SqlitePool, user: &str, id: i64) -> Result<Value> {
     // SQLite treats a negative LIMIT as unbounded.
-    let (session, rows, usage) = session_snapshot(db, user, id, 0, -1).await?;
-    Ok(json!({"version":1,"session":session,"entries":entry_details(rows),"usage":usage}))
+    let (session, rows, usage, delivery) = session_snapshot(db, user, id, 0, -1).await?;
+    Ok(
+        json!({"version":1,"session":session,"entries":entry_details(rows),"usage":usage,"delivery":delivery}),
+    )
 }
 
 async fn session_snapshot(
@@ -431,7 +440,7 @@ async fn session_snapshot(
     id: i64,
     after: i64,
     limit: i64,
-) -> Result<(Session, Vec<Entry>, Value)> {
+) -> Result<(Session, Vec<Entry>, Value, Value)> {
     let cutoff = now() - RETENTION;
     let mut tx = db.begin().await?;
     let sql = format!("{SESSION_FIELDS} {VISIBLE_SESSIONS} AND s.id=?");
@@ -452,8 +461,9 @@ async fn session_snapshot(
     .fetch_all(&mut *tx)
     .await?;
     let usage = usage::summary(&mut tx, user, Some(id), cutoff).await?;
+    let delivery = delivery::session(&mut tx, id).await?;
     tx.commit().await?;
-    Ok((session, rows, usage))
+    Ok((session, rows, usage, delivery))
 }
 
 fn entry_details(rows: Vec<Entry>) -> Vec<Value> {

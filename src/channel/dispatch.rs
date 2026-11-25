@@ -9,6 +9,7 @@ enum Dispatch {
     Retry(i64),
     Failed,
     Uncertain,
+    Skipped,
 }
 
 pub async fn listen(
@@ -205,10 +206,16 @@ pub async fn outbox(app: std::sync::Arc<crate::App>, adapter: std::sync::Arc<dyn
             Ok(true) => match send_item(&app, &*adapter, &item).await {
                 Ok(MessageDelivery::Sent(id)) => Dispatch::Sent(id),
                 Ok(MessageDelivery::Retry(delay)) => Dispatch::Retry(now() + delay),
-                Err(error) if error.is::<super::UploadUncertain>() => Dispatch::Uncertain,
+                Ok(MessageDelivery::Skipped) => Dispatch::Skipped,
+                Err(error)
+                    if error.is::<super::UploadUncertain>()
+                        || error.is::<super::DeliveryUncertain>() =>
+                {
+                    Dispatch::Uncertain
+                }
                 Err(_) => Dispatch::Failed,
             },
-            Ok(false) => Dispatch::Failed,
+            Ok(false) => Dispatch::Skipped,
             Err(_) => Dispatch::Retry(now() + 2),
         };
         let (state, retry, message_id) = match dispatch {
@@ -216,6 +223,7 @@ pub async fn outbox(app: std::sync::Arc<crate::App>, adapter: std::sync::Arc<dyn
             Dispatch::Retry(retry) => ("queued", retry, None),
             Dispatch::Failed => ("failed", 0, None),
             Dispatch::Uncertain => ("uncertain", 0, None),
+            Dispatch::Skipped => ("skipped", 0, None),
         };
         // A database error here must only retry saving the outcome, never the send itself.
         loop {
@@ -250,7 +258,7 @@ async fn send_item(
         let Some((mut message, retryable)) =
             store::task_failures::notice(&app.db, item, token).await?
         else {
-            return Ok(MessageDelivery::Sent(None));
+            return Ok(MessageDelivery::Skipped);
         };
         if retryable {
             message.push_str("\n\nTap Retry to try your saved message again.");
@@ -269,7 +277,7 @@ async fn send_item(
         if item.user != app.operator
             || !store::invitations::shareable(&app.db, &item.user, code).await?
         {
-            return Ok(MessageDelivery::Sent(None));
+            return Ok(MessageDelivery::Skipped);
         }
         let body = if let Ok(Ok((_, username))) =
             tokio::time::timeout(Duration::from_secs(3), adapter.bot_identity()).await
@@ -291,14 +299,14 @@ async fn send_item(
     }
     if button == Some(store::outputs::BUTTON) {
         let Some(mut output) = store::outputs::load(&app.db, &app.vault, item).await? else {
-            return Ok(MessageDelivery::Sent(None));
+            return Ok(MessageDelivery::Skipped);
         };
         if output.kind == "voice" && !output.synthesized {
             let text = std::str::from_utf8(&output.bytes)?;
             let audio = app.models.synthesize_reply(&item.user, text).await?;
             store::outputs::save_audio(&app.db, &app.vault, item, &audio).await?;
             let Some(current) = store::outputs::load(&app.db, &app.vault, item).await? else {
-                return Ok(MessageDelivery::Sent(None));
+                return Ok(MessageDelivery::Skipped);
             };
             output = current;
         }
@@ -359,20 +367,20 @@ pub(super) async fn send_outbound(
                 .react(&item.user, message_id, &item.body)
                 .await?
                 .map_or(MessageDelivery::Sent(None), MessageDelivery::Retry)),
-            None => Ok(MessageDelivery::Sent(None)),
+            None => Ok(MessageDelivery::Skipped),
         };
     }
     let button = item.button.as_deref();
     if button.is_some_and(|button| button.starts_with(store::acknowledgements::READY_PREFIX)) {
         if !store::acknowledgements::ready(db, item).await? {
-            return Ok(MessageDelivery::Sent(None));
+            return Ok(MessageDelivery::Skipped);
         }
         return adapter
             .send_plain(&item.user, &item.body, item.reply_to_message_id)
             .await;
     }
     if button.is_some_and(|button| button.starts_with("ta/") || button.starts_with("tq/")) {
-        return Ok(MessageDelivery::Sent(None));
+        return Ok(MessageDelivery::Skipped);
     }
     if let Some(request) = button.and_then(|button| button.strip_prefix("choice/")) {
         let choice = forms::widget_choice(db, &item.user, request).await?;
