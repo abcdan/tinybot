@@ -1,4 +1,4 @@
-use super::{feedback::Feedback, turn::work_task};
+use super::{feedback::Feedback, turn};
 use crate::{
     App, audit,
     channel::ChannelAdapter,
@@ -6,6 +6,13 @@ use crate::{
 };
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
+
+async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> anyhow::Result<()> {
+    if let Some(preview) = crate::schedules::preview_context(&app.db, task).await? {
+        return super::preview::run(app, task, preview).await;
+    }
+    turn::work_task(app, task, feedback).await
+}
 
 pub async fn run(app: Arc<App>, channel: Arc<dyn ChannelAdapter>) {
     tokio::join!(run_tasks(app.clone(), channel), run_acknowledgements(app));

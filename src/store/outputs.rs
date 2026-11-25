@@ -36,6 +36,7 @@ pub(crate) async fn queue_document(
         !body.is_empty() && body.len() <= 32_768,
         "invalid task file"
     );
+    let artifact = super::artifacts::remember_document(&mut tx, vault, task, name, &body).await?;
     let queued = queue(
         &mut tx,
         vault,
@@ -46,6 +47,7 @@ pub(crate) async fn queue_document(
         name,
         &body,
         None,
+        artifact.as_deref(),
     )
     .await?;
     tx.commit().await?;
@@ -91,6 +93,7 @@ pub(crate) async fn queue_voice(
         "reply.mp3",
         body,
         Some(message),
+        None,
     )
     .await?;
     tx.commit().await?;
@@ -107,6 +110,7 @@ async fn queue(
     name: &str,
     content: &str,
     reply: Option<i64>,
+    artifact: Option<&str>,
 ) -> Result<bool> {
     let fingerprint = hash(content);
     let exists: bool = sqlx::query_scalar(
@@ -137,13 +141,14 @@ async fn queue(
     .await?
     .last_insert_rowid();
     let ciphertext = vault.seal(&binding(user, outbox), content.as_bytes())?;
-    sqlx::query("INSERT INTO telegram_outputs(outbox,revision,kind,name,fingerprint,ciphertext) VALUES(?,?,?,?,?,?)")
+    sqlx::query("INSERT INTO telegram_outputs(outbox,revision,kind,name,fingerprint,ciphertext,artifact) VALUES(?,?,?,?,?,?,?)")
         .bind(outbox)
         .bind(revision)
         .bind(kind)
         .bind(name)
         .bind(fingerprint)
         .bind(ciphertext)
+        .bind(artifact)
         .execute(&mut **tx)
         .await?;
     Ok(true)

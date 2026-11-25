@@ -139,6 +139,19 @@ schedule, start a run with **Run now**, and reopen a past run from **Run history
 Recurring schedules use the time zone selected when they were created. After downtime,
 they advance from the current time.
 
+Fixed reminders send the saved text directly. Open **Timing policy** to set quiet
+hours or decide whether a missed recurring schedule should run once or be skipped.
+**Run history** shows delayed and skipped occurrences as well as results. Use **Dry
+run** to preview a routine with sample input in Telegram.
+
+Open **Webhook** on an active or manual routine to run it from a trusted external
+service. The service sends `POST` with a JSON body containing a unique `event_id`.
+Send the current Unix timestamp in seconds as `X-TinyBot-Timestamp` and the hex
+HMAC-SHA256 of `timestamp + "." + raw_body` as `X-TinyBot-Signature`, using the
+shown signing key. Repeating an accepted event acknowledges the same run. A busy
+routine returns `409` so the sender can retry. Changing the routine requires a new
+webhook. Existing approvals still apply to the triggered run.
+
 Ask the Chief to save a repeatable procedure, then review its steps before saving.
 Choose whether each step runs with the Chief or one of your own helpers. A run uses
 the steps saved when it started and asks for approvals through the normal task flow.

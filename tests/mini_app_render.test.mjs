@@ -71,6 +71,12 @@ test('schedules edit instructions, pause and run a saved routine', async () => {
                 schedule.revision++;
                 return {ok: true};
             }
+            if (action === 'preview-routine') {
+                assert.equal(data.revision, 3);
+                assert.equal(data.sample, 'Sample update: release ready.');
+                assert.match(data.request_id, /^[a-f0-9-]{36}$/);
+                return {task: 'fixture-preview'};
+            }
             assert.fail(`Unexpected Mini App action ${action}`);
         });
         await page.goto('https://tinybot.test/');
@@ -92,7 +98,52 @@ test('schedules edit instructions, pause and run a saved routine', async () => {
         await page.getByLabel('Quiet hours end').fill('07:00');
         await page.getByRole('button', {name: 'Save timing policy'}).click();
         await page.getByText('Timing policy saved.').waitFor();
+        await page.getByText('Dry run', {exact: true}).click();
+        await page.getByLabel('Sample input').fill('Sample update: release ready.');
+        await page.getByRole('button', {name: 'Preview in Telegram'}).click();
+        await page.getByText('Dry run queued. The preview will arrive in Telegram.').waitFor();
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
+    } finally {
+        await browser.close();
+    }
+});
+
+test('a routine webhook reveals its signing key only during setup', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 640}});
+        const page = await context.newPage();
+        const schedule = {id:'routine', title:'Inbox watch', revision: 1, state:'manual', kind:'task', time_zone:'UTC'};
+        const endpoint = 'https://tinybot.test/hooks/routine/fixture';
+        let enabled = false;
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return {user:'1', provider:'openrouter', requests:[], tasks:[], schedules:[schedule]};
+            assert.equal(data.id, schedule.id);
+            if (action === 'schedule-webhook') return {webhook: enabled ? {id:'fixture', enabled:true, url:endpoint} : null};
+            if (action === 'enable-schedule-webhook') {
+                assert.equal(data.revision, 1);
+                enabled = true;
+                return {id:'fixture', url:endpoint, secret:'fixture-signing-value'};
+            }
+            if (action === 'revoke-schedule-webhook') {
+                assert.equal(data.hook, 'fixture');
+                enabled = false;
+                return {ok:true};
+            }
+            assert.fail(`Unexpected Mini App action ${action}`);
+        });
+        await page.goto('https://tinybot.test/');
+        await page.getByRole('button', {name:'Schedules'}).click();
+        await page.getByText('Webhook', {exact:true}).click();
+        await page.getByRole('button', {name:'Enable webhook'}).click();
+        await page.getByText('fixture-signing-value', {exact:true}).waitFor();
+        await page.reload();
+        await page.getByRole('button', {name:'Schedules'}).click();
+        await page.getByText('Webhook', {exact:true}).click();
+        await page.getByText(endpoint, {exact:true}).waitFor();
+        assert.equal(await page.getByText('fixture-signing-value', {exact:true}).count(), 0);
+        await page.getByRole('button', {name:'Revoke webhook'}).click();
+        await page.getByText('Webhook revoked.', {exact:true}).waitFor();
     } finally {
         await browser.close();
     }
@@ -248,6 +299,41 @@ test('a task deep link shows the latest result and opens the exact pending revie
         await page.getByRole('button', {name: 'Back to tasks'}).click();
         await page.getByRole('button', {name: 'Needs you', exact: true}).click();
         await page.getByRole('heading', {name: 'Review bookkeeping change'}).waitFor();
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
+    } finally {
+        await browser.close();
+    }
+});
+
+test('the task files shelf downloads the selected retained version with its safe filename', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 640}, acceptDownloads: true});
+        const page = await context.newPage();
+        const task = {id: 'receipt', title: 'Make a receipt', state: 'completed', revision: 3};
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return {user: '1', provider: 'codex', requests: [], tasks: [task]};
+            if (action === 'task-detail') {
+                assert.deepEqual(data, {task: task.id});
+                return {task, requests: [], files: [
+                    {id: 'latest', kind: 'file', name: 'receipt.txt', version: 2, delivery: 'sent'},
+                    {id: 'earlier', kind: 'file', name: 'receipt.txt', version: 1},
+                ]};
+            }
+            if (action === 'download-task-file') {
+                assert.deepEqual(data, {task: task.id, id: 'earlier', kind: 'file'});
+                return {name: '../receipt.txt', content: Buffer.from('Retained version one').toString('base64')};
+            }
+            assert.fail('Unexpected Mini App request ' + action);
+        });
+        await page.goto('https://tinybot.test/mini?task=receipt');
+        await page.getByText('Sent to Telegram').waitFor();
+        const earlier = page.locator('.task-card').filter({hasText: 'Generated file · Version 1'});
+        const [file] = await Promise.all([
+            page.waitForEvent('download'), earlier.getByRole('button', {name: 'Download'}).click(),
+        ]);
+        assert.equal(file.suggestedFilename(), '_receipt.txt');
+        assert.equal(await readFile(await file.path(), 'utf8'), 'Retained version one');
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
     } finally {
         await browser.close();
@@ -1625,6 +1711,8 @@ test('operator invitations and guest shared memory respect the signed account vi
             if (action === 'list-invites') return {pending: [], guests: [{
                 id: '2', display_name: 'Guest Sample', setup_complete: true, suspended: false, accepted_at: 1795526400,
                 active_day: null, runs_started: 1, runs_completed: 1, tokens: null, cost_usd: 0,
+                first_result: true, active_days: 1, delivered_runs: 1, checked_off_tasks: 0,
+                model_calls: 2, token_reported_calls: 0, cost_reported_calls: 1,
             }]};
             if (action === 'create-invite') {
                 assert.deepEqual(data, {});
@@ -1637,10 +1725,13 @@ test('operator invitations and guest shared memory respect the signed account vi
         await owner.getByRole('button', {name: 'Invites', exact: true}).click();
         await owner.getByRole('heading', {name: 'Guest Sample'}).waitFor();
         assert.equal(await owner.getByText('Not reported', {exact: true}).count(), 1);
+        await owner.getByText('Delivered', {exact: true}).waitFor();
+        await owner.getByText('Cost for 1 of 2 calls, tokens for 0 of 2.', {exact: true}).waitFor();
         await owner.getByRole('button', {name: 'Create invitation'}).click();
         await owner.getByText('/start fixture-invite', {exact: true}).waitFor();
 
         let joined = false;
+        let weekly_cents = null;
         const guestContext = await browser.newContext({viewport: {width: 320, height: 640}});
         await mockMiniApp(guestContext, ({action, data}) => {
             if (action === 'status') return {...state, user: '2', operator: false, shared_memory_available: true};
@@ -1654,6 +1745,16 @@ test('operator invitations and guest shared memory respect the signed account vi
                 return {ok: true};
             }
             if (action === 'shared-memory-notes') return {notes: [{id: 'note', body: 'A published reference.', own: false}]};
+            if (action === 'audit-sessions') return {sessions: [], next_before: null, usage: null};
+            if (action === 'my-usage') {
+                assert.deepEqual(data, {});
+                return {guest: {model_connected: true, first_result_at_ms: 1795526400000},
+                    alert: {weekly_cents, spent_microusd: null, model_calls: 1, cost_reported_calls: 0}};
+            }
+            if (action === 'save-usage-alert') {
+                weekly_cents = data.weekly_cents;
+                return {ok: true};
+            }
             throw new Error('Unexpected guest action ' + action);
         });
         const guest = await guestContext.newPage();
@@ -1663,6 +1764,17 @@ test('operator invitations and guest shared memory respect the signed account vi
         await guest.getByRole('button', {name: 'Join shared memory'}).click();
         await guest.getByText('A published reference.', {exact: true}).waitFor();
         assert.equal(await guest.getByRole('button', {name: 'Remove shared note'}).count(), 0);
+        await guest.getByRole('button', {name: 'Audit', exact: true}).click();
+        await guest.getByText('Setup and spend alerts', {exact: true}).click();
+        await guest.getByText('First result delivered', {exact: true}).waitFor();
+        await guest.getByText('Reported this week: Not reported', {exact: true}).waitFor();
+        await guest.getByLabel(/Weekly alert amount/).fill('1,25');
+        await guest.getByRole('button', {name: 'Save spend alert', exact: true}).click();
+        await guest.getByText('Spend alert saved.', {exact: true}).waitFor();
+        assert.equal(weekly_cents, 125);
+        await guest.getByRole('button', {name: 'Turn off spend alert', exact: true}).click();
+        await guest.getByText('Spend alert turned off.', {exact: true}).waitFor();
+        assert.equal(weekly_cents, null);
     } finally {
         await browser.close();
     }

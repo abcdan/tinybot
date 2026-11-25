@@ -1,9 +1,9 @@
 use super::text;
 use crate::{
-    App,
+    App, audit,
     store::{invitations, shared_memory},
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 pub(super) async fn list(app: &App, user: &str) -> Result<Value> {
@@ -12,6 +12,43 @@ pub(super) async fn list(app: &App, user: &str) -> Result<Value> {
         invitations::guests(&app.db, user)
     )?;
     Ok(json!({"pending":pending,"guests":guests}))
+}
+
+pub(super) async fn my_usage(app: &App, user: &str) -> Result<Value> {
+    let mut tx = app.db.begin().await?;
+    let (accepted, version, model_connected, first_result): (
+        Option<i64>,
+        Option<i64>,
+        bool,
+        Option<i64>,
+    ) = sqlx::query_as(
+        "SELECT i.accepted_at,i.insights_version,u.provider IS NOT NULL,u.first_result_at_ms
+             FROM users u LEFT JOIN bot_invitations i ON i.member=u.id
+             WHERE u.id=? AND u.suspended_at IS NULL",
+    )
+    .bind(user)
+    .fetch_one(&mut *tx)
+    .await?;
+    let mut summary = audit::account_usage(&mut tx, user).await?;
+    summary["guest"] = if let Some(accepted) = accepted {
+        json!({"accepted_at":accepted,"insights_version":version,"model_connected":model_connected,
+            "first_result_at_ms":first_result})
+    } else {
+        Value::Null
+    };
+    summary["alert"] = json!(audit::alert_usage(&mut tx, user).await?);
+    tx.commit().await?;
+    Ok(summary)
+}
+
+pub(super) async fn save_usage_alert(app: &App, user: &str, data: &Value) -> Result<()> {
+    let amount = data
+        .get("weekly_cents")
+        .context("weekly alert amount required")?;
+    let cents = (!amount.is_null())
+        .then(|| amount.as_i64().context("invalid weekly alert amount"))
+        .transpose()?;
+    audit::set_alert(&app.db, user, cents).await
 }
 
 pub(super) async fn create(app: &App, user: &str) -> Result<Value> {

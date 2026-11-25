@@ -6,6 +6,7 @@ use super::loop_guard::{self, Progress};
 use super::mcp_approval;
 use super::review::{Verdict, review};
 use super::suggestions::valid_suggestions;
+use super::task_plan;
 use super::{
     Call, ENGINE, Outcome, Risk, Step, ToolContext, connector_context, descriptions,
     tool_definitions,
@@ -18,15 +19,18 @@ use crate::{
     },
     schedules,
     security::{clip, id, now},
-    store::{self, Agent, Task},
+    store::{self, Agent, Task, checkpoints},
 };
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
+use std::time::{Duration, Instant};
 
 mod limits;
 mod quick;
+
+const ACTIVE_TURN_BUDGET: Duration = Duration::from_secs(8 * 60);
 
 pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> Result<()> {
     if store::groups::is_group_task(&app.db, &task.id).await? {
@@ -35,6 +39,7 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
     if !store::current(&app.db, task).await? {
         return store::settle(&app.db, task, "cancelled", None).await;
     }
+    let started = Instant::now();
     let mut quick_failure = match quick::try_reply(app, task, feedback).await? {
         quick::Attempt::Finished => return Ok(()),
         quick::Attempt::Defer => None,
@@ -131,12 +136,18 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
         super::openrouter_tools::available(&ctx).await?
     };
     let personal_settings = super::settings::available(&ctx).await?;
+    let can_plan = !paired
+        && owner
+        && task.agent.is_none()
+        && !automatic_mail
+        && checkpoints::can_plan(&app.db, task).await?;
     let mut tools: Vec<_> = app
         .tools
         .iter()
         .filter(|tool| {
             ctx.allows(tool.name())
                 && (!super::settings::is_settings_tool(tool.name()) || personal_settings)
+                && (!task_plan::is_tool(tool.name()) || can_plan)
                 && (!paired
                     || matches!(tool.name(), "send_reply" | "send_card" | "react_to_message"))
                 && (!tool.name().starts_with("openrouter_") || hosted.contains(&tool.name()))
@@ -202,7 +213,12 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
     let mut summary = task.summary.clone();
     let mut goal = task.goal.clone();
     let mut lookups: BTreeSet<Lookup> = BTreeSet::new();
-    let mut opened_page: Option<Value> = None;
+    let mut reads = if can_plan {
+        checkpoints::read_cache(&app.db, &app.vault, task).await?
+    } else {
+        checkpoints::ReadCache::default()
+    };
+    let mut opened_page = reads.evidence.iter().find_map(lookup::opened_page);
     let mut compacted_history = false;
     let mut consulted_helper = false;
     let mut repeated_lookup = false;
@@ -216,6 +232,12 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
         }
         let stop_reason = match progress {
             Progress::Finish(reason) => Some(reason),
+            _ if started.elapsed() >= ACTIVE_TURN_BUDGET => {
+                Some("This turn reached its active time budget.")
+            }
+            _ if quick_failure.is_none() && !checkpoints::reserve_model(&app.db, task).await? => {
+                Some("This turn reached its model pass budget.")
+            }
             _ => None,
         };
         let mut records = store::history(&app.db, &task.id).await?;
@@ -228,6 +250,7 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
         }
         let has_work = consulted_helper
             || !lookups.is_empty()
+            || !reads.keys.is_empty()
             || records
                 .iter()
                 .rev()
@@ -240,6 +263,7 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
         let size: usize = records.iter().map(|(_, _, text)| text.len()).sum();
         if !compacted_history
             && !has_work
+            && stop_reason.is_none()
             && (size > 32000 || records.len() == 180)
             && records.len() > 6
         {
@@ -310,6 +334,15 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
         }
         if let Some(briefing) = &inbox_briefing {
             input["inbox_briefing"] = serde_json::to_value(briefing)?;
+        }
+        if can_plan {
+            let plan = checkpoints::plan(&app.db, &task.id, task.revision, false).await?;
+            if !plan.is_empty() {
+                input["task_plan"] = serde_json::to_value(plan)?;
+            }
+        }
+        if !reads.evidence.is_empty() {
+            input["verified_reads"] = json!(reads.evidence);
         }
         if finish_lookup || stop_reason.is_some() {
             if let Some(page) = &opened_page {
@@ -462,6 +495,7 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                     && tools.iter().any(|tool| tool.name() == "browse")
                     && tools.iter().any(|tool| tool.name() == name)
                     && !lookups.iter().any(|lookup| lookup.reads_page(&url))
+                    && !reads.keys.contains(&Lookup::browse_key(&url))
                 {
                     audit::record("tool", "browse", "selected", json!({"source":"user_link"}))
                         .await;
@@ -505,15 +539,31 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                 } else {
                     None
                 };
+                let saved_read = match lookup.as_ref().and_then(Lookup::cache_key) {
+                    Some(key) if reads.keys.contains(&key) => {
+                        checkpoints::cached_read(&app.db, &app.vault, task, &key).await?
+                    }
+                    _ => None,
+                };
+                if let Some(evidence) = &saved_read {
+                    if let Some(page) = lookup::opened_page(evidence) {
+                        opened_page = Some(page);
+                    }
+                    if !reads.evidence.contains(evidence) {
+                        reads.evidence.insert(0, evidence.clone());
+                        reads.evidence.truncate(3);
+                    }
+                }
                 if lookup
                     .as_ref()
                     .is_some_and(|lookup| lookups.contains(lookup))
+                    || saved_read.is_some()
                 {
                     audit::record(
                         "tool",
                         tool.name(),
                         "skipped",
-                        json!({"category":"duplicate_lookup"}),
+                        json!({"category":"duplicate_lookup","verified_checkpoint":saved_read.is_some()}),
                     )
                     .await;
                     if repeated_lookup {
@@ -662,18 +712,20 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                     return Ok(());
                 }
                 // These operations manage their own durable task state.
-                if matches!(
-                    name.as_str(),
-                    "request_form"
-                        | "request_input"
-                        | "configure_settings"
-                        | "complete_task"
-                        | "propose_agent"
-                        | "delegate"
-                        | "connect_mcp"
-                        | "send_reply"
-                        | "send_card"
-                ) {
+                if task_plan::is_tool(&name)
+                    || matches!(
+                        name.as_str(),
+                        "request_form"
+                            | "request_input"
+                            | "configure_settings"
+                            | "complete_task"
+                            | "propose_agent"
+                            | "delegate"
+                            | "connect_mcp"
+                            | "send_reply"
+                            | "send_card"
+                    )
+                {
                     audit::tool_started(tool.name(), &args).await;
                     let result = tool.execute(&ctx, args).await;
                     audit::tool_finished(tool.name(), &result).await;
@@ -718,8 +770,20 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                     if let Some(page) = lookup::opened_page(&observation) {
                         opened_page = Some(page);
                     }
-                    store::finish_action(&app.db, task, &action, &observation.to_string(), false)
-                        .await?;
+                    let saved = can_plan
+                        .then(|| lookup.verified_snapshot(&observation))
+                        .flatten();
+                    checkpoints::finish_read(
+                        &app.db,
+                        &app.vault,
+                        task,
+                        &action,
+                        &observation.to_string(),
+                        saved
+                            .as_ref()
+                            .map(|(key, evidence)| (key.as_str(), evidence.as_str())),
+                    )
+                    .await?;
                     lookups.insert(lookup);
                 } else {
                     finish(&ctx, &action, result, false).await?;
@@ -752,11 +816,21 @@ async fn finish_from_context(
             if let Some(limit) = limits::Limit::from_error(&error) {
                 let mut context = input.clone();
                 context["tool_stop_reason"] = json!(stop_reason);
-                return limit
+                match limit
                     .finish(app, task, feedback, model, &context, error)
-                    .await;
+                    .await
+                {
+                    Ok(()) => return Ok(()),
+                    Err(error)
+                        if provider_failure(&error).is_none() || input["task_plan"].is_null() =>
+                    {
+                        return Err(error);
+                    }
+                    Err(_) => {}
+                }
             }
-            lookup::UNVERIFIED_REPLY.into()
+            task_plan::partial_reply(input, stop_reason)
+                .unwrap_or_else(|| lookup::UNVERIFIED_REPLY.into())
         }
     };
     let _delivery = match feedback {
@@ -766,7 +840,11 @@ async fn finish_from_context(
     if !store::current(&app.db, task).await? {
         return store::settle(&app.db, task, "idle", None).await;
     }
-    store::settle_reply(&app.db, task, &text, &[]).await
+    if task_plan::unfinished(input) && stop_reason.is_some() {
+        store::settle(&app.db, task, "blocked", Some(&text)).await
+    } else {
+        store::settle_reply(&app.db, task, &text, &[]).await
+    }
 }
 
 async fn bind_shared_delegation(db: &sqlx::SqlitePool, task: &Task, args: &Value) -> Result<bool> {

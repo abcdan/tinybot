@@ -1,5 +1,10 @@
 use super::{app_with_model, fixture, message, pending_id};
-use crate::{model::ModelProvider, runtime, schedules, security::now, store};
+use crate::{
+    model::{ModelProvider, TextDelta, ToolDefinition},
+    runtime, schedules,
+    security::now,
+    store,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -85,4 +90,196 @@ async fn a_chat_routine_requires_approval_and_keeps_chief_and_helper_steps_in_or
             .await
             .unwrap();
     assert_eq!(reply, "The routine finished.");
+}
+
+struct PreviewModel;
+
+#[async_trait]
+impl ModelProvider for PreviewModel {
+    async fn complete(&self, _: &str, _: &str) -> Result<String> {
+        unreachable!()
+    }
+
+    async fn complete_turn(
+        &self,
+        instructions: &str,
+        input: &str,
+        tools: &[ToolDefinition],
+        _: Option<&mut TextDelta<'_>>,
+    ) -> Result<String> {
+        assert!(tools.is_empty());
+        assert!(instructions.contains("Never claim any tool"));
+        let input: Value = serde_json::from_str(input)?;
+        assert_eq!(
+            input,
+            json!({"instructions":"Review meeting notes.",
+            "sample":"Sample decision: ship on Friday.","steps":["Draft a private note."]})
+        );
+        Ok(json!({"text":"I would draft a note with the Friday decision."}).to_string())
+    }
+}
+
+#[tokio::test]
+async fn a_routine_dry_run_simulates_saved_steps_without_running_tools() {
+    let db = fixture().await;
+    let app = app_with_model(&db, Arc::new(PreviewModel));
+    let time = now();
+    let schedule = schedules::save_routine(
+        &db,
+        "1",
+        schedules::RoutineRequest {
+            title: "Meeting notes".into(),
+            input: "Review meeting notes.".into(),
+            at: None,
+            cron: None,
+            steps: vec![schedules::RoutineStep {
+                instruction: "Draft a private note.".into(),
+                agent: None,
+            }],
+        },
+        None,
+        time,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        schedules::queue_preview(&db, "2", &schedule.id, 0, "foreign", "sample", time)
+            .await
+            .is_err()
+    );
+    let sample = "Sample decision: ship on Friday.";
+    let preview = schedules::queue_preview(&db, "1", &schedule.id, 0, "fixture", sample, time)
+        .await
+        .unwrap();
+    assert_eq!(
+        schedules::queue_preview(&db, "1", &schedule.id, 0, "fixture", sample, time)
+            .await
+            .unwrap(),
+        preview
+    );
+    let task = store::claim(&db).await.unwrap().unwrap();
+    assert_eq!(task.id, preview);
+    let live = schedules::run_now(&db, "1", &schedule.id, 0, "live", time, None)
+        .await
+        .unwrap();
+    assert_ne!(live, preview);
+    runtime::work(&app, &task).await.unwrap();
+    assert_eq!(
+        store::claim_outbox(&db).await.unwrap().unwrap().body,
+        "Dry run\n\nI would draft a note with the Friday decision."
+    );
+    let attempts: i64 = sqlx::query_scalar("SELECT count(*) FROM task_tool_attempts WHERE task=?")
+        .bind(&preview)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(attempts, 0);
+    assert!(
+        store::list_tasks(&db, "1")
+            .await
+            .unwrap()
+            .iter()
+            .all(|item| item.id != preview)
+    );
+}
+
+#[tokio::test]
+async fn a_signed_webhook_queues_one_run_and_cannot_replay_after_revision_change() {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    use tower_service::Service;
+
+    let db = fixture().await;
+    let app = Arc::new(app_with_model(&db, Arc::new(PreviewModel)));
+    let time = now();
+    let routine = schedules::save_routine(
+        &db,
+        "1",
+        schedules::RoutineRequest {
+            title: "Inbound briefing".into(),
+            input: "Draft a briefing.".into(),
+            at: None,
+            cron: Some("0 9 * * *".into()),
+            steps: vec![schedules::RoutineStep {
+                instruction: "Read the latest status.".into(),
+                agent: None,
+            }],
+        },
+        None,
+        time,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        schedules::webhooks::install(&db, &app.vault, "2", &routine.id, 0, time)
+            .await
+            .is_err()
+    );
+    let hook = schedules::webhooks::install(&db, &app.vault, "1", &routine.id, 0, time)
+        .await
+        .unwrap();
+    let body = r#"{"event_id":"fixture-first"}"#;
+    let request = |body: &str, at: i64, signed: bool| {
+        let timestamp = at.to_string();
+        let mut mac = Hmac::<Sha256>::new_from_slice(hook.secret.as_bytes()).unwrap();
+        mac.update(timestamp.as_bytes());
+        mac.update(b".");
+        mac.update(body.as_bytes());
+        let signature = if signed {
+            hex::encode(mac.finalize().into_bytes())
+        } else {
+            "0".repeat(64)
+        };
+        Request::builder()
+            .method("POST")
+            .uri(format!("/hooks/routine/{}", hook.id))
+            .header("x-tinybot-timestamp", timestamp)
+            .header("x-tinybot-signature", signature)
+            .body(Body::from(body.to_owned()))
+            .unwrap()
+    };
+    let mut router = crate::web::router(app);
+    for (event, at, signed, expected) in [
+        (body, time, false, StatusCode::UNAUTHORIZED),
+        (body, time - 301, true, StatusCode::UNAUTHORIZED),
+        (body, time, true, StatusCode::ACCEPTED),
+        (body, time, true, StatusCode::ACCEPTED),
+        (
+            r#"{"event_id":"fixture-second"}"#,
+            time,
+            true,
+            StatusCode::CONFLICT,
+        ),
+    ] {
+        assert_eq!(
+            router
+                .clone()
+                .call(request(event, at, signed))
+                .await
+                .unwrap()
+                .status(),
+            expected
+        );
+    }
+    let runs =
+        serde_json::to_value(schedules::history(&db, "1", &routine.id).await.unwrap()).unwrap();
+    assert_eq!(runs.as_array().unwrap().len(), 1);
+    assert_eq!(runs[0]["trigger"], "webhook");
+    schedules::set_paused(&db, "1", &routine.id, 0, true, time)
+        .await
+        .unwrap();
+    assert_eq!(
+        router
+            .call(request(body, time, true))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
 }

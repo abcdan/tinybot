@@ -1,4 +1,5 @@
 import { button, card, node, row } from './mini-ui.js';
+import { accountInsights } from './mini-invites.js';
 import { api, content, show } from './mini.js';
 
 const numbers = new Intl.NumberFormat();
@@ -62,7 +63,7 @@ export function audit(state) {
         }
     }
 
-    page.append(node('h2', 'Audit log', 'audit-page-title'), usage.section, delivery,
+    page.append(node('h2', 'Audit log', 'audit-page-title'), usage.section, delivery, accountInsights(),
         node('h3', 'Recent messages', 'audit-section-title'), sessions, status, more);
     content.append(page);
     void load();

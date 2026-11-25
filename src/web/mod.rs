@@ -2,6 +2,7 @@ mod accounts;
 mod agents;
 mod mini;
 mod readiness;
+mod routine_webhook;
 mod state;
 
 use crate::App;
@@ -52,6 +53,15 @@ pub fn router(app: Arc<App>) -> Router {
                 asset(
                     "application/javascript; charset=utf-8",
                     include_str!("../../web/mini-tasks.js"),
+                )
+            }),
+        )
+        .route(
+            "/mini-artifacts.js",
+            get(|| async {
+                asset(
+                    "application/javascript; charset=utf-8",
+                    include_str!("../../web/mini-artifacts.js"),
                 )
             }),
         )
@@ -128,6 +138,7 @@ pub fn router(app: Arc<App>) -> Router {
             }),
         )
         .route("/api/mini", post(mini))
+        .route("/hooks/routine/{id}", post(routine_webhook::receive))
         .route("/api/codex/import", post(import_codex))
         .route("/oauth/mcp", get(oauth))
         .route("/oauth/mcp-client.json", get(mcp_client_metadata))

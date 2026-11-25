@@ -95,22 +95,73 @@ pub(super) async fn pause_schedule(app: &App, user: &str, data: &Value, pause: b
 }
 
 pub(super) async fn run_schedule(app: &App, user: &str, data: &Value) -> Result<Value> {
-    let request = text(data, "request_id", 36)?;
-    ensure!(
-        uuid::Uuid::parse_str(request).is_ok(),
-        "invalid run request"
-    );
     let task = schedules::run_now(
         &app.db,
         user,
         text(data, "id", 64)?,
         revision(data)?,
-        request,
+        run_request(data)?,
         now(),
         None,
     )
     .await?;
     Ok(json!({"task":task}))
+}
+
+pub(super) async fn preview_routine(app: &App, user: &str, data: &Value) -> Result<Value> {
+    let task = schedules::queue_preview(
+        &app.db,
+        user,
+        text(data, "id", 64)?,
+        revision(data)?,
+        run_request(data)?,
+        text(data, "sample", 2_000)?,
+        now(),
+    )
+    .await?;
+    Ok(json!({"task":task}))
+}
+
+pub(super) async fn schedule_webhook(app: &App, user: &str, data: &Value) -> Result<Value> {
+    let hook = schedules::webhooks::status(&app.db, user, text(data, "id", 64)?).await?;
+    Ok(
+        json!({"webhook":hook.map(|hook| json!({"id":hook.id,"enabled":hook.enabled,
+        "url":format!("{}/hooks/routine/{}",app.origin,hook.id)}))}),
+    )
+}
+
+pub(super) async fn enable_schedule_webhook(app: &App, user: &str, data: &Value) -> Result<Value> {
+    let hook = schedules::webhooks::install(
+        &app.db,
+        &app.vault,
+        user,
+        text(data, "id", 64)?,
+        revision(data)?,
+        now(),
+    )
+    .await?;
+    Ok(
+        json!({"id":hook.id,"url":format!("{}/hooks/routine/{}",app.origin, hook.id),"secret":hook.secret}),
+    )
+}
+
+pub(super) async fn revoke_schedule_webhook(app: &App, user: &str, data: &Value) -> Result<()> {
+    schedules::webhooks::revoke(
+        &app.db,
+        user,
+        text(data, "id", 64)?,
+        text(data, "hook", 36)?,
+    )
+    .await
+}
+
+fn run_request(data: &Value) -> Result<&str> {
+    let request = text(data, "request_id", 36)?;
+    ensure!(
+        uuid::Uuid::parse_str(request).is_ok(),
+        "invalid run request"
+    );
+    Ok(request)
 }
 
 pub(super) async fn schedule_history(app: &App, user: &str, data: &Value) -> Result<Value> {

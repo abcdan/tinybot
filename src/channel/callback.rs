@@ -9,6 +9,7 @@ pub(super) const MCP_APPROVAL_ONCE_PREFIX: &str = "mcp-approval-once/";
 pub(super) const MAIL_READ_PREFIX: &str = "mail-read/";
 pub(super) const MAIL_SEND_PREFIX: &str = "mail-send/";
 pub(super) const INVITE_ACCEPT_PREFIX: &str = "invite-accept/";
+pub(super) const INVITE_INSIGHTS_SEGMENT: &str = "insights/";
 
 #[derive(Deserialize)]
 pub struct Query {
@@ -48,7 +49,7 @@ impl Query {
 
 enum Selection<'a> {
     RetryTurn(&'a str),
-    AcceptInvite(&'a str),
+    AcceptInvite(&'a str, bool),
     ContinueTask(&'a str, Option<i64>),
     StopTask(&'a str, i64),
     CompleteTask(&'a str, i64),
@@ -85,8 +86,8 @@ fn selection(data: &str) -> Option<Selection<'_>> {
             Some(Selection::RetryTurn(remainder))
         }
         "invite-accept" => {
-            uuid::Uuid::parse_str(remainder).ok()?;
-            Some(Selection::AcceptInvite(remainder))
+            let (id, expanded) = invite_consent(remainder)?;
+            Some(Selection::AcceptInvite(id, expanded))
         }
         "tc" => {
             let (task, revision) = match remainder.split_once('/') {
@@ -132,6 +133,13 @@ fn selection(data: &str) -> Option<Selection<'_>> {
     }
 }
 
+pub(super) fn invite_consent(data: &str) -> Option<(&str, bool)> {
+    let expanded = data.strip_prefix(INVITE_INSIGHTS_SEGMENT);
+    let id = expanded.unwrap_or(data);
+    uuid::Uuid::parse_str(id).ok()?;
+    Some((id, expanded.is_some()))
+}
+
 pub(super) struct Answer {
     pub text: &'static str,
     pub clear_keyboard: Option<(i64, i64)>,
@@ -153,12 +161,12 @@ pub(super) async fn answer(db: &SqlitePool, query: &Query) -> Result<Answer> {
         .and_then(|message| message.message_id)
         .filter(|id| *id > 0);
     let selected = query.data.as_deref().and_then(selection);
-    if let Some(Selection::AcceptInvite(invitation)) = selected {
+    if let Some(Selection::AcceptInvite(invitation, expanded)) = selected {
         let Some(message_id) = message_id else {
             return Ok(UNAVAILABLE);
         };
         return Ok(
-            if store::invitations::accept(db, &user, invitation).await? {
+            if store::invitations::accept(db, &user, invitation, expanded).await? {
                 Answer {
                     text: "Invitation accepted.",
                     clear_keyboard: Some((query.from.id, message_id)),
@@ -181,7 +189,7 @@ pub(super) async fn answer(db: &SqlitePool, query: &Query) -> Result<Answer> {
                 clear_keyboard: message_id.map(|id| (query.from.id, id)),
             });
         }
-        Some(Selection::AcceptInvite(_)) => unreachable!(),
+        Some(Selection::AcceptInvite(..)) => unreachable!(),
         Some(Selection::ContinueTask(task, revision)) => {
             let selected = match revision {
                 Some(revision) => store::task_views::select_at(db, &user, task, revision).await?,

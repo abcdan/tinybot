@@ -171,6 +171,12 @@ pub(crate) async fn provider_call<T>(
     };
     if stored.is_err() {
         tracing::warn!("unable to record model call audit entry");
+    } else if call.usage.cost_usd.is_some_and(|cost| cost > 0.0)
+        && super::budget::record_cost(&trace.db, trace.session)
+            .await
+            .is_err()
+    {
+        tracing::warn!("unable to evaluate model spend alert");
     }
     output
 }
@@ -196,6 +202,11 @@ pub(crate) async fn ingress_model_call(
     .bind(at - super::RETENTION)
     .execute(&mut **tx)
     .await?;
+    if usage.usage.cost_usd.is_some_and(|cost| cost > 0.0)
+        && super::budget::record_ingress_cost(tx, task).await.is_err()
+    {
+        tracing::warn!("unable to evaluate ingress spend alert");
+    }
     Ok(())
 }
 

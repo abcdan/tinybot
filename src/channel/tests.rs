@@ -266,6 +266,12 @@ async fn telegram_invite_discloses_usage_before_private_account_acceptance() {
         assert!(!sent["text"].as_str().unwrap().contains(&invite.command));
         let button = &sent["reply_markup"]["inline_keyboard"][0][0];
         assert_eq!(button["text"], "Accept invitation");
+        assert!(
+            button["callback_data"]
+                .as_str()
+                .unwrap()
+                .starts_with("invite-accept/insights/")
+        );
         button["callback_data"].clone()
     };
     for user in [43, 42] {
@@ -278,6 +284,12 @@ async fn telegram_invite_discloses_usage_before_private_account_acceptance() {
     }
     assert!(!store::invitations::available(&db, "43").await.unwrap());
     assert!(store::invitations::available(&db, "42").await.unwrap());
+    let consent: i64 =
+        sqlx::query_scalar("SELECT insights_version FROM bot_invitations WHERE member='42'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(consent, 2);
     assert!(
         show_invitation(&db, &telegram, "1", 1, "42", &invite.command)
             .await
