@@ -72,6 +72,112 @@ async fn split_delivery_retries_recording_an_outcome_without_resending() {
     assert!(saved_first);
 }
 
+#[tokio::test]
+async fn a_slow_and_rate_limited_chat_does_not_hold_other_chats() {
+    use crate::channel::{ChannelAdapter, Inbound, MessageDelivery};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct DelayedChannel {
+        attempts: tokio::sync::mpsc::UnboundedSender<String>,
+        first: AtomicBool,
+        release: Notify,
+    }
+
+    #[async_trait]
+    impl ChannelAdapter for DelayedChannel {
+        fn name(&self) -> &'static str {
+            "telegram"
+        }
+
+        async fn receive(&self, _: i64) -> Result<(Vec<Inbound>, i64)> {
+            unreachable!()
+        }
+
+        async fn send(
+            &self,
+            _: &str,
+            body: &str,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> Result<MessageDelivery> {
+            self.attempts.send(body.to_owned())?;
+            if body == "First" && !self.first.swap(true, Ordering::SeqCst) {
+                self.release.notified().await;
+                return Ok(MessageDelivery::Retry(30));
+            }
+            Ok(MessageDelivery::Sent(None))
+        }
+    }
+
+    let db = fixture().await;
+    let app = Arc::new(app_with_model(&db, Arc::new(GroupChief)));
+    store::notify(&db, "1", "First", None).await.unwrap();
+    store::notify(&db, "1", "Second", None).await.unwrap();
+    store::notify(&db, "2", "Other chat", None).await.unwrap();
+    let (send, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let channel = Arc::new(DelayedChannel {
+        attempts: send,
+        first: AtomicBool::new(false),
+        release: Notify::new(),
+    });
+    let worker = tokio::spawn(crate::channel::outbox(app, channel.clone()));
+    tokio::time::timeout(Duration::from_secs(4), async {
+        let mut started = [received.recv().await.unwrap(), received.recv().await.unwrap()];
+        started.sort();
+        assert_eq!(started, ["First", "Other chat"]);
+        channel.release.notify_one();
+        while !sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM outbox WHERE body='First' AND state='queued' AND retry_at>0)",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        store::notify(&db, "2", "Other chat again", None).await.unwrap();
+        assert_eq!(received.recv().await.unwrap(), "Other chat again");
+        sqlx::query("UPDATE outbox SET retry_at=0 WHERE body='First'")
+            .execute(&db)
+            .await
+            .unwrap();
+        assert_eq!(received.recv().await.unwrap(), "First");
+        assert_eq!(received.recv().await.unwrap(), "Second");
+    })
+    .await
+    .unwrap();
+    worker.abort();
+}
+
+#[tokio::test]
+async fn different_group_topics_share_the_group_lane_and_keep_private_delivery_separate() {
+    let db = fixture().await;
+    sqlx::raw_sql(
+        "INSERT INTO telegram_groups(chat,requested_by,requested_at,enabled) VALUES(-99,'1',0,1);
+         INSERT INTO tasks(id,user,title,updated,chief_chat) VALUES
+            ('topic-a','1','Topic A',0,0),('topic-b','2','Topic B',0,0);
+         INSERT INTO telegram_group_tasks(task,chat,topic) VALUES
+            ('topic-a',-99,10),('topic-b',-99,20);
+         INSERT INTO outbox(user,task,body) VALUES
+            ('1','topic-a','Topic A'),('2','topic-b','Topic B'),('2',NULL,'Private chat');",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    let first = store::claim_delivery(&db).await.unwrap().unwrap();
+    assert_eq!(first.body, "Topic A");
+    let private = store::claim_delivery(&db).await.unwrap().unwrap();
+    assert_eq!(private.body, "Private chat");
+    assert!(store::claim_delivery(&db).await.unwrap().is_none());
+    sqlx::query("UPDATE outbox SET state='sent' WHERE id=?")
+        .bind(first.id)
+        .execute(&db)
+        .await
+        .unwrap();
+    let second = store::claim_delivery(&db).await.unwrap().unwrap();
+    assert_eq!(second.body, "Topic B");
+}
+
 struct GroupChief;
 
 #[async_trait]
