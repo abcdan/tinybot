@@ -10,6 +10,7 @@ mod mcp_approvals;
 pub mod memory;
 pub(crate) mod model_backup;
 pub(crate) mod outputs;
+pub(crate) mod projects;
 mod queue;
 mod reactions;
 mod replies;
