@@ -145,7 +145,12 @@ pub(super) async fn show_invitation(
     let (body, button) = match invitations::review(db, operator, user, code.trim()).await? {
         Review::Available(invitation) => (
             invitations::REVIEW,
-            Some(format!("{}{}", callback::INVITE_ACCEPT_PREFIX, invitation)),
+            Some(format!(
+                "{}{}{}",
+                callback::INVITE_ACCEPT_PREFIX,
+                callback::INVITE_INSIGHTS_SEGMENT,
+                invitation,
+            )),
         ),
         Review::Unavailable => (
             "This invitation is unavailable or has already been accepted.",

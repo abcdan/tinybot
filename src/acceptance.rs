@@ -29,6 +29,7 @@ mod routines;
 mod self_settings;
 mod telegram_workflows;
 mod tool_budget;
+mod usage_insights;
 
 async fn fixture() -> SqlitePool {
     let db = SqlitePoolOptions::new()

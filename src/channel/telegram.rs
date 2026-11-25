@@ -184,7 +184,8 @@ impl ChannelAdapter for Telegram {
                 ], [{"text":"Review in Settings","web_app":{"url":format!("{}/mini",self.origin)}}]]});
             }
             Some(button) if button.starts_with(callback::INVITE_ACCEPT_PREFIX) => {
-                uuid::Uuid::parse_str(&button[callback::INVITE_ACCEPT_PREFIX.len()..])?;
+                callback::invite_consent(&button[callback::INVITE_ACCEPT_PREFIX.len()..])
+                    .context("invalid invite callback")?;
                 data["reply_markup"] = json!({"inline_keyboard":[[{
                     "text":"Accept invitation","callback_data":button
                 }]]});

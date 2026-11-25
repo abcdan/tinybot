@@ -5,7 +5,7 @@ use sqlx::{FromRow, Sqlite, SqlitePool, Transaction};
 
 const LIFETIME: i64 = 24 * 60 * 60;
 pub(crate) const BUTTON: &str = "bot-invitation";
-pub(crate) const REVIEW: &str = "You’re invited to TinyBot. You’ll set up your own model account. Your conversations and memories stay private unless you explicitly publish a note to a shared space. The bot operator can see your account name and setup status, last active day, and run counts, tokens, and reported costs from the past seven days. Tap Accept invitation to continue.";
+pub(crate) const REVIEW: &str = "You’re invited to TinyBot. You’ll set up your own model account. Your conversations and memories stay private unless you explicitly publish a note to a shared space. The bot operator can see your account name, when you accept, whether your model is connected and whether you’ve received a first result. The operator also sees active days, counts for runs, delivered results and checked-off tasks, and provider-reported tokens and costs with coverage for the past seven days. Tap Accept invitation to continue.";
 
 #[derive(Serialize)]
 pub struct Invitation {
@@ -82,7 +82,12 @@ pub async fn shareable(db: &SqlitePool, issuer: &str, code: &str) -> Result<bool
     .await?)
 }
 
-pub async fn accept(db: &SqlitePool, user: &str, invitation: &str) -> Result<bool> {
+pub async fn accept(
+    db: &SqlitePool,
+    user: &str,
+    invitation: &str,
+    expanded_insights: bool,
+) -> Result<bool> {
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     let time = now();
     let created = sqlx::query(
@@ -102,9 +107,10 @@ pub async fn accept(db: &SqlitePool, user: &str, invitation: &str) -> Result<boo
     if created == 0 {
         return Ok(false);
     }
-    sqlx::query("UPDATE bot_invitations SET member=?,accepted_at=? WHERE id=?")
+    sqlx::query("UPDATE bot_invitations SET member=?,accepted_at=?,insights_version=? WHERE id=?")
         .bind(user)
         .bind(time)
+        .bind(if expanded_insights { 2 } else { 1 })
         .bind(invitation)
         .execute(&mut *tx)
         .await?;
@@ -212,6 +218,13 @@ pub struct Guest {
     runs_completed: i64,
     tokens: Option<i64>,
     cost_usd: Option<f64>,
+    model_calls: i64,
+    token_reported_calls: i64,
+    cost_reported_calls: i64,
+    active_days: Option<i64>,
+    checked_off_tasks: Option<i64>,
+    delivered_runs: Option<i64>,
+    first_result: Option<bool>,
 }
 
 pub async fn pending(db: &SqlitePool, operator: &str) -> Result<Vec<PendingInvite>> {
@@ -228,16 +241,27 @@ pub async fn pending(db: &SqlitePool, operator: &str) -> Result<Vec<PendingInvit
 pub async fn guests(db: &SqlitePool, operator: &str) -> Result<Vec<Guest>> {
     Ok(sqlx::query_as(
         "WITH recent AS (
-             SELECT s.id, t.user, s.started_at, s.attempts, s.status FROM audit_sessions s
+             SELECT s.id,t.id AS task,t.user,s.started_at,s.attempts,s.status FROM audit_sessions s
              JOIN tasks t ON t.id=s.task
              JOIN bot_invitations i ON i.member=t.user AND s.started_at>=i.accepted_at
              WHERE s.started_at>? AND i.issuer=?
          ), runs AS (
-             SELECT user, max(started_at / 86400) * 86400 AS active_day,
+             SELECT user,max(started_at / 86400) * 86400 AS active_day,
+                    count(DISTINCT started_at / 86400) AS active_days,
                     sum(attempts>0) AS runs_started, sum(status='completed') AS runs_completed
              FROM recent GROUP BY user
+         ), results AS (
+             SELECT r.user,COUNT(*) FILTER (WHERE delivered.session IS NOT NULL) AS delivered_runs,
+                    COUNT(DISTINCT r.task) FILTER (WHERE EXISTS(SELECT 1 FROM audit_entries e
+                        WHERE e.session=r.id AND e.kind='task' AND e.name='marked_complete'
+                          AND e.status='completed')) AS checked_off_tasks
+             FROM recent r LEFT JOIN account_delivered_runs delivered ON delivered.session=r.id
+             GROUP BY r.user
          ), usage AS (
-             SELECT r.user,
+             SELECT r.user,count(*) AS model_calls,
+               count(coalesce(json_extract(e.detail,'$.usage.total_tokens'),
+                              json_extract(e.detail,'$.usage.input_tokens') + json_extract(e.detail,'$.usage.output_tokens'))) AS token_reported_calls,
+               count(json_extract(e.detail,'$.usage.cost_usd')) AS cost_reported_calls,
                sum(coalesce(json_extract(e.detail,'$.usage.total_tokens'),
                             json_extract(e.detail,'$.usage.input_tokens') + json_extract(e.detail,'$.usage.output_tokens'))) AS tokens,
                sum(CAST(json_extract(e.detail,'$.usage.cost_usd') AS REAL)) AS cost_usd
@@ -246,13 +270,20 @@ pub async fn guests(db: &SqlitePool, operator: &str) -> Result<Vec<Guest>> {
          SELECT u.id,u.display_name,i.accepted_at,u.provider IS NOT NULL AS setup_complete,
                 u.suspended_at IS NOT NULL AS suspended,r.active_day,
                 coalesce(r.runs_started,0) AS runs_started,coalesce(r.runs_completed,0) AS runs_completed,
-                usage.tokens,usage.cost_usd
-         FROM users u LEFT JOIN bot_invitations i ON i.member=u.id
+                usage.tokens,usage.cost_usd,
+                coalesce(usage.model_calls,0) AS model_calls,
+                coalesce(usage.token_reported_calls,0) AS token_reported_calls,
+                coalesce(usage.cost_reported_calls,0) AS cost_reported_calls,
+                CASE WHEN i.insights_version=2 THEN coalesce(r.active_days,0) END AS active_days,
+                CASE WHEN i.insights_version=2 THEN coalesce(results.checked_off_tasks,0) END AS checked_off_tasks,
+                CASE WHEN i.insights_version=2 THEN coalesce(results.delivered_runs,0) END AS delivered_runs,
+                CASE WHEN i.insights_version=2 THEN u.first_result_at_ms IS NOT NULL END AS first_result
+         FROM users u LEFT JOIN bot_invitations i ON i.member=u.id AND i.issuer=?2
          LEFT JOIN runs r ON r.user=u.id LEFT JOIN usage ON usage.user=u.id
-         WHERE u.id<>? ORDER BY i.accepted_at DESC NULLS LAST,u.id LIMIT 200",
+         LEFT JOIN results ON results.user=u.id
+         WHERE u.id<>?2 ORDER BY i.accepted_at DESC NULLS LAST,u.id LIMIT 200",
     )
     .bind(now() - crate::audit::RETENTION)
-    .bind(operator)
     .bind(operator)
     .fetch_all(db)
     .await?)
@@ -293,13 +324,13 @@ mod tests {
             panic!("expected invitation review");
         };
         assert!(!available(&db, "2").await.unwrap());
-        assert!(!accept(&db, "3", &invitation).await.unwrap());
+        assert!(!accept(&db, "3", &invitation, false).await.unwrap());
         assert!(matches!(
             review(&db, "1", "3", &code).await.unwrap(),
             Review::Available(_)
         ));
-        assert!(accept(&db, "2", &invitation).await.unwrap());
-        assert!(!accept(&db, "3", &invitation).await.unwrap());
+        assert!(accept(&db, "2", &invitation, false).await.unwrap());
+        assert!(!accept(&db, "3", &invitation, false).await.unwrap());
         assert!(available(&db, "2").await.unwrap());
         assert!(!available(&db, "3").await.unwrap());
         assert!(pending(&db, "1").await.unwrap().is_empty());
@@ -319,7 +350,7 @@ mod tests {
             panic!("expected invitation review");
         };
         revoke(&db, "1", &revoked).await.unwrap();
-        assert!(!accept(&db, "4", &revoked).await.unwrap());
+        assert!(!accept(&db, "4", &revoked, false).await.unwrap());
         assert!(matches!(
             review(&db, "1", "4", &code).await.unwrap(),
             Review::Unavailable
@@ -333,7 +364,7 @@ mod tests {
         let Review::Available(invite) = review(&db, "1", "2", &code).await.unwrap() else {
             panic!("expected invitation review");
         };
-        assert!(accept(&db, "2", &invite).await.unwrap());
+        assert!(accept(&db, "2", &invite, false).await.unwrap());
         sqlx::query("UPDATE users SET provider='codex' WHERE id='2'")
             .execute(&db)
             .await

@@ -1,7 +1,9 @@
+mod budget;
 mod delivery;
 mod details;
 mod usage;
 
+pub(crate) use budget::{alert_usage, set_alert};
 pub(crate) use delivery::{draft_delivered, handoff_queued};
 pub(crate) use usage::{ModelCall, ingress_model_call, provider_call};
 
@@ -403,6 +405,16 @@ pub(crate) async fn sessions(db: &SqlitePool, user: &str, before: Option<i64>) -
     let next = (rows.len() > SESSION_PAGE).then(|| rows[SESSION_PAGE - 1].id);
     rows.truncate(SESSION_PAGE);
     Ok(json!({"sessions":rows,"next_before":next,"usage":usage,"delivery":delivery}))
+}
+
+pub(crate) async fn account_usage(
+    connection: &mut sqlx::SqliteConnection,
+    user: &str,
+) -> Result<Value> {
+    let cutoff = now() - RETENTION;
+    let usage = usage::summary(connection, user, None, cutoff).await?;
+    let delivery = delivery::summary(connection, user, cutoff).await?;
+    Ok(json!({"usage":usage["total"],"delivery":delivery}))
 }
 
 #[derive(FromRow)]
