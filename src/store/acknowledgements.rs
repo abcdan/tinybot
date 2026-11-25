@@ -5,7 +5,7 @@ use sqlx::{FromRow, Sqlite, SqlitePool, Transaction};
 
 pub(crate) const WAIT_PREFIX: &str = "ack-generate/";
 pub(crate) const READY_PREFIX: &str = "ack-progress/";
-const DELAY: i64 = 2;
+const DELAY: i64 = 5;
 const LEASE: i64 = 30;
 const FOLLOWUP_DELAY: i64 = 10;
 const EVIDENCE_RECHECK: i64 = 3;
@@ -61,36 +61,39 @@ pub(super) async fn schedule(
         return Ok(());
     };
     let button = format!("{WAIT_PREFIX}{revision}");
+    // The queue clock has whole-second precision. Round up so the wait never ends early.
+    let due = now() + DELAY + 1;
     if already_working {
         // Retarget an unsent notice to the latest input, leaving delivered notices alone.
-        sqlx::query(
-            "UPDATE outbox SET state='queued',body='',button=?,reply_to_message_id=?,
-             retry_at=CASE WHEN state='queued' AND button LIKE 'ack-generate/%'
-                           AND button NOT LIKE '%/followup' THEN retry_at ELSE ? END
+        let retargeted = sqlx::query(
+            "UPDATE outbox SET state='queued',body='',button=?,reply_to_message_id=?,retry_at=?
              WHERE id=(SELECT id FROM outbox WHERE task=? AND user=?
                AND state IN ('queued','generating')
                AND (button LIKE 'ack-generate/%' OR button LIKE 'ack-progress/%')
                ORDER BY id DESC LIMIT 1)",
         )
-        .bind(button)
+        .bind(&button)
         .bind(message)
-        .bind(now())
+        .bind(due)
         .bind(task)
         .bind(user)
         .execute(&mut **tx)
-        .await?;
-    } else {
-        sqlx::query(
-            "INSERT INTO outbox(user,task,body,button,reply_to_message_id,retry_at) VALUES(?,?,'',?,?,?)",
-        )
-        .bind(user)
-        .bind(task)
-        .bind(button)
-        .bind(message)
-        .bind(now() + DELAY)
-        .execute(&mut **tx)
-        .await?;
+        .await?
+        .rows_affected();
+        if retargeted != 0 {
+            return Ok(());
+        }
     }
+    sqlx::query(
+        "INSERT INTO outbox(user,task,body,button,reply_to_message_id,retry_at) VALUES(?,?,'',?,?,?)",
+    )
+    .bind(user)
+    .bind(task)
+    .bind(button)
+    .bind(message)
+    .bind(due)
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }
 
@@ -365,6 +368,8 @@ mod tests {
             .await
             .unwrap();
         assert!(store::claim_outbox(&db).await.unwrap().is_none());
+        assert!(claim(&db).await.unwrap().is_none());
+        make_due(&db).await;
         let current = claim(&db).await.unwrap().unwrap();
         assert_eq!(current.id, old.id);
         assert_eq!(current.revision, old.revision + 1);
@@ -377,6 +382,32 @@ mod tests {
         assert!(ready(&db, &item).await.unwrap());
         message(&db, 22, "Include the shipping fee too.").await;
         assert!(!ready(&db, &item).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_new_message_gets_a_fresh_notice_even_after_the_previous_one_finished() {
+        let db = fixture().await;
+        message(&db, 20, "Compare the options.").await;
+        let task = store::claim(&db).await.unwrap().unwrap();
+        make_due(&db).await;
+        let first = claim(&db).await.unwrap().unwrap();
+        finish(&db, &first, Some("I’ll compare the saved options."), false)
+            .await
+            .unwrap();
+        let item = store::claim_delivery(&db).await.unwrap().unwrap();
+        sqlx::query("UPDATE outbox SET state='sent' WHERE id=?")
+            .bind(item.id)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        message(&db, 21, "Include a cheaper option.").await;
+        assert!(claim(&db).await.unwrap().is_none());
+        make_due(&db).await;
+        let next = claim(&db).await.unwrap().unwrap();
+        assert_ne!(next.id, first.id);
+        assert_eq!(next.revision, task.revision + 1);
+        assert_eq!(next.request, "Include a cheaper option.");
     }
 
     #[tokio::test]
