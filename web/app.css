@@ -148,14 +148,13 @@ legend { font-size: .83rem; font-weight: 650; }
 pre { background: var(--background); border-radius: 8px; padding: 10px; font-size: .83rem; white-space: pre-wrap; overflow-wrap: anywhere; }
 details { margin-block: 12px; }
 summary { cursor: pointer; font-size: .87rem; font-weight: 650; }
-.task-card h3 { overflow-wrap: anywhere; }
-.task-history > summary {
-  min-height: 44px;
-  padding: 11px 14px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--surface);
-}
+.task-card h3, .task-detail h3 { overflow-wrap: anywhere; }
+.task-views { margin: 0 0 12px; }
+.task-count { opacity: .8; }
+.task-review-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+.task-review-meta button { max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
+.task-reply { white-space: pre-wrap; overflow-wrap: anywhere; }
+.task-detail { margin-top: 10px; }
 .connection-tools { font-size: .88rem; overflow-wrap: anywhere; }
 .connection-tools dt { font-weight: 650; margin-top: 10px; }
 .connection-tools dd { color: var(--secondary); margin: 2px 0 0; }

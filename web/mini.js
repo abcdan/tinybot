@@ -7,6 +7,7 @@ import { mail } from './mini-mail.js';
 import { memories } from './mini-memory.js';
 import { onboarding } from './mini-onboarding.js';
 import { browser, schedules, model } from './mini-settings.js';
+import { tasks } from './mini-tasks.js';
 
 export const telegram = window.Telegram?.WebApp;
 export const content = document.querySelector('#view');
@@ -27,7 +28,6 @@ let tab = params.get('connect') === 'docblock' ? 'connectors' : 'home';
 let generation = 0;
 let opened = false;
 let disposeOnboarding;
-let completedTasksOpen = false;
 
 export function show(text, error = false) {
     notice.textContent = text;
@@ -178,171 +178,75 @@ function home() {
         setup.append(button('Set up model', () => setTab('model')));
         content.append(setup);
     }
-    const requestsHeading = node('h2', 'Requests');
-    requestsHeading.id = 'task-requests';
-    content.append(requestsHeading);
-    if (!state.requests.length) content.append(card(null, 'You’re all caught up.'));
-    for (const request of state.requests) {
-        if (request.kind === 'settings-form') {
-            content.append(settingsForm(request));
-            continue;
+    tasks(state, requestCard, () => setTab('model'));
+}
+
+function requestCard(request) {
+    if (request.kind === 'settings-form') return settingsForm(request);
+    if (request.kind === 'settings-approve') return settingsReview(request);
+    const details = request.content;
+    const title = { 'agent-spec': 'Configure a helper', form: 'Enter form details', 'form-submit': 'Submit website form', elicitation: 'Answer a few questions' }[request.kind];
+    const item = card(details.operation || title, details.destination);
+    if (request.kind === 'agent-spec') {
+        item.append(agentForm(null, details, request.id));
+        item.append(row(action('Decline', 'deny', {id: request.id}, 'Request declined.', true)));
+    } else if (request.kind === 'form' || request.kind === 'elicitation') {
+        if (request.kind === 'elicitation') item.append(node('p', 'Your answers go to your Chief.'));
+        item.append(generatedForm(request), row(action('Decline', 'deny', {id: request.id}, 'Request declined.', true)));
+    } else if (request.kind === 'email-send') {
+        const data = {id: request.id};
+        item.append(node('pre', details.explanation), row(
+            action('Approve once', 'approve', data, 'Send approved.'),
+            action('Deny', 'deny', data, 'Send denied.', true)
+        ));
+        if (details.draft) {
+            const draft = details.draft;
+            const edit = node('details');
+            edit.append(node('summary', 'Edit email draft'), form('Save for review', [
+                field('to', 'Recipients, separated by commas', {value: draft.to.join(', '), max: 1024}),
+                field('subject', 'Subject', {value: draft.subject, max: 180}),
+                field('body', 'Message', {value: draft.body, type: 'textarea', max: 2400})
+            ], async values => {
+                await api('edit-email-draft', {id: request.id, draft: {
+                    to: values.to.split(',').map(address => address.trim()).filter(Boolean),
+                    subject: values.subject, body: values.body
+                }});
+                await refresh();
+                show('Draft updated. Review it before sending.');
+            }));
+            item.append(edit);
         }
-        if (request.kind === 'settings-approve') {
-            content.append(settingsReview(request));
-            continue;
-        }
-        const details = request.content;
-        const title = { 'agent-spec': 'Configure a helper', form: 'Enter form details', 'form-submit': 'Submit website form', elicitation: 'Answer a few questions' }[request.kind];
-        const item = card(details.operation || title, details.destination);
-        if (request.kind === 'agent-spec') {
-            item.append(agentForm(null, details, request.id));
-            item.append(row(action('Decline', 'deny', {id: request.id}, 'Request declined.', true)));
-        } else if (request.kind === 'form' || request.kind === 'elicitation') {
-            if (request.kind === 'elicitation') item.append(node('p', 'Your answers go to your Chief.'));
-            item.append(generatedForm(request), row(action('Decline', 'deny', {id: request.id}, 'Request declined.', true)));
-        } else if (request.kind === 'email-send') {
-            const data = {id: request.id};
-            item.append(node('pre', details.explanation), row(
-                action('Approve once', 'approve', data, 'Send approved.'),
-                action('Deny', 'deny', data, 'Send denied.', true)
-            ));
-            if (details.draft) {
-                const draft = details.draft;
-                const edit = node('details');
-                edit.append(node('summary', 'Edit email draft'), form('Save for review', [
-                    field('to', 'Recipients, separated by commas', {value: draft.to.join(', '), max: 1024}),
-                    field('subject', 'Subject', {value: draft.subject, max: 180}),
-                    field('body', 'Message', {value: draft.body, type: 'textarea', max: 2400})
-                ], async values => {
-                    await api('edit-email-draft', {id: request.id, draft: {
-                        to: values.to.split(',').map(address => address.trim()).filter(Boolean),
-                        subject: values.subject, body: values.body
-                    }});
-                    await refresh();
-                    show('Draft updated. Review it before sending.');
-                }));
-                item.append(edit);
-            }
-        } else if (details.docblock) {
-            const preview = details.docblock;
-            const data = {id: request.id};
-            const deny = action('Deny', 'deny', data, 'Request denied.', true);
-            item.append(node('p', `Workspace: ${preview.workspace}`), node('p', `Note: ${preview.target}`), node('pre', preview.change));
-            if (preview.expires_in_days != null) {
-                const expires = field('expires_in_days', 'Expires after (days)', {type: 'number', value: preview.expires_in_days});
-                const days = expires.querySelector('input');
-                days.min = '1';
-                days.max = '365';
-                item.append(form('Approve once', [expires], async values => {
-                    await api('approve-docblock-share', {...data, expires_in_days: Number(values.expires_in_days)});
-                    await refresh();
-                    show('Publication approved.');
-                }), deny);
-            } else {
-                item.append(row(action('Approve once', 'approve', data, 'Change approved.'), deny));
-            }
-        } else if (details.mcp) {
-            const data = {id: request.id};
-            const choices = [action('Approve once', 'approve', data, 'Approved for this call.')];
-            if (details.rememberable) {
-                choices.push(action('Always approve', 'always-approve-mcp', data, 'Approval saved for this tool.', true));
-            }
-            choices.push(action('Deny', 'deny', data, 'Request denied.', true));
-            item.append(node('p', details.explanation), row(...choices));
+    } else if (details.docblock) {
+        const preview = details.docblock;
+        const data = {id: request.id};
+        const deny = action('Deny', 'deny', data, 'Request denied.', true);
+        item.append(node('p', `Workspace: ${preview.workspace}`), node('p', `Note: ${preview.target}`), node('pre', preview.change));
+        if (preview.expires_in_days != null) {
+            const expires = field('expires_in_days', 'Expires after (days)', {type: 'number', value: preview.expires_in_days});
+            const days = expires.querySelector('input');
+            days.min = '1';
+            days.max = '365';
+            item.append(form('Approve once', [expires], async values => {
+                await api('approve-docblock-share', {...data, expires_in_days: Number(values.expires_in_days)});
+                await refresh();
+                show('Publication approved.');
+            }), deny);
         } else {
-            if (details.preview || details.details) item.append(node('pre', details.preview || details.details));
-            item.append(row(action('Approve', 'approve', {id: request.id}, 'Approved. TinyBot will continue.'),
-                action('Decline', 'deny', {id: request.id}, 'Request declined.', true)));
+            item.append(row(action('Approve once', 'approve', data, 'Change approved.'), deny));
         }
-        content.append(item);
-    }
-    tasks();
-}
-
-function tasks() {
-    content.append(node('h2', 'Tasks'));
-    const results = node('div');
-    let searchGeneration = 0;
-    async function search(query, offset = 0) {
-        const sequence = ++searchGeneration;
-        const page = await api('search-tasks', {query, offset});
-        if (sequence !== searchGeneration || !results.isConnected) return;
-        if (!offset) results.replaceChildren();
-        taskPage(results, page, next => search(query, next), !offset && 'No matching tasks.');
-    }
-    const finder = form('Search tasks', [field('query', 'Search retained messages and tasks', {
-        max: 200, required: false, type: 'search'
-    })], ({query}) => search(query.trim()));
-    const open = state.tasks.filter(task => task.state !== 'completed');
-    if (!open.length) results.append(card(null, state.tasks.length ? 'No open tasks.' :
-        'Send a message to your Chief in Telegram to start a task.'));
-    results.append(...open.map(taskCard));
-    if (state.tasks.length) results.append(completedTaskHistory());
-    content.append(finder, results);
-}
-
-function taskPage(results, page, load, empty) {
-    if (!page.items.length && empty) results.append(card(null, empty));
-    results.append(...page.items.map(taskCard));
-    if (page.next_offset != null) {
-        const more = button('Load more tasks', async () => {
-            await load(page.next_offset);
-            more.remove();
-        }, true);
-        results.append(more);
-    }
-}
-
-function completedTaskHistory() {
-    const history = node('details', undefined, 'task-history');
-    const results = node('div');
-    let loaded = false;
-    history.append(node('summary', 'Completed tasks'), results);
-    history.open = completedTasksOpen;
-    async function load(offset = 0) {
-        const page = await api('search-tasks', {query: '', offset, completed_only: true});
-        if (!history.isConnected) return;
-        if (!offset) results.replaceChildren();
-        taskPage(results, page, load, !offset && 'No completed tasks yet.');
-    }
-    history.addEventListener('toggle', async () => {
-        if (!history.isConnected) return;
-        completedTasksOpen = history.open;
-        if (!history.open || loaded) return;
-        loaded = true;
-        results.replaceChildren(card(null, 'Loading completed tasks…'));
-        try {
-            await load();
-        } catch (error) {
-            loaded = false;
-            results.replaceChildren(card(null, error.message));
+    } else if (details.mcp) {
+        const data = {id: request.id};
+        const choices = [action('Approve once', 'approve', data, 'Approved for this call.')];
+        if (details.rememberable) {
+            choices.push(action('Always approve', 'always-approve-mcp', data, 'Approval saved for this tool.', true));
         }
-    });
-    return history;
-}
-
-function taskCard(task) {
-    const labels = {
-        idle: 'Ready for a follow-up', running: 'Working', waiting: 'Waiting for your response',
-        setup: 'Waiting for model setup', cancelled: 'Stopped', blocked: 'Stopped with an error',
-        uncertain: 'Check the destination before continuing', queued: 'Queued', completed: 'Completed'
-    };
-    const item = card(task.title, labels[task.state] || task.state);
-    item.classList.add('task-card');
-    const controls = [];
-    if (task.state === 'completed') {
-        controls.push(action('Reopen', 'select-task', {task: task.id}, 'Task reopened. Send your next message in Telegram.', true));
-    } else if (task.id !== state.active_task && task.state !== 'cancelled') {
-        controls.push(action('Continue', 'select-task', {task: task.id}, 'Send your next message in Telegram.', true));
-    } else if (task.id === state.active_task) item.append(node('span', 'Current Chief task', 'meta'));
-    if (['idle', 'blocked', 'queued', 'running', 'waiting', 'setup'].includes(task.state) && Number.isSafeInteger(task.revision)) {
-        controls.push(action('Mark complete', 'complete-task', {task: task.id, revision: task.revision}, 'Task marked complete.', true));
+        choices.push(action('Deny', 'deny', data, 'Request denied.', true));
+        item.append(node('p', details.explanation), row(...choices));
+    } else {
+        if (details.preview || details.details) item.append(node('pre', details.preview || details.details));
+        item.append(row(action('Approve', 'approve', {id: request.id}, 'Approved. TinyBot will continue.'),
+            action('Decline', 'deny', {id: request.id}, 'Request declined.', true)));
     }
-    if (['queued', 'running', 'waiting', 'setup'].includes(task.state)) {
-        controls.push(action('Stop', 'stop-task', {task: task.id, revision: task.revision}, 'Task stopped.', true));
-    }
-    if (task.state === 'waiting') controls.push(button('Review requests', () => document.querySelector('#task-requests')?.scrollIntoView(), true));
-    if (controls.length) item.append(row(...controls));
     return item;
 }
 
