@@ -81,7 +81,7 @@ async fn run_task(app: &App, task: &Task, channel: &dyn ChannelAdapter) {
 
 async fn run_acknowledgements(app: Arc<App>) {
     let mut jobs = tokio::task::JoinSet::new();
-    let mut poll = tokio::time::interval(Duration::from_secs(1));
+    let mut poll = tokio::time::interval(Duration::from_millis(300));
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
@@ -98,20 +98,27 @@ async fn run_acknowledgements(app: Arc<App>) {
                             let trace = audit::Trace::for_progress(
                                 &app.db, &ready.task, &ready.user, ready.revision
                             ).await.ok().flatten();
-                            let confirmed_steps = match (&trace, ready.queued) {
-                                (Some(trace), false) => trace.confirmed_progress_steps().await.unwrap_or(0),
-                                _ => 0,
+                            let progress = match (&trace, ready.queued) {
+                                (Some(trace), false) => trace.confirmed_progress().await.unwrap_or_default(),
+                                _ => Default::default(),
                             };
-                            if !ready.queued && confirmed_steps == 0
-                                && store::acknowledgements::retry_for_evidence(&app.db, &ready).await.unwrap_or(false)
-                            {
-                                return;
+                            let confirmed_steps = progress.completed_steps;
+                            if ready.followup && confirmed_steps == 0 {
+                                if store::acknowledgements::retry_for_evidence(&app.db, &ready).await.unwrap_or(false) {
+                                    return;
+                                }
                             }
-                            let reply = audit::scope(trace, super::acknowledgement::generate(
-                                &app, &ready.user, &ready.request, ready.queued, confirmed_steps,
-                            )).await.ok().flatten();
-                            if store::acknowledgements::finish(&app.db, &ready, reply.as_deref()).await.is_err() {
+                            let reply = if !ready.followup || confirmed_steps > 0 {
+                                audit::scope(trace, super::acknowledgement::generate(
+                                    &app, &ready.user, &ready.request, ready.queued, &progress,
+                                )).await.ok().flatten()
+                            } else {
+                                None
+                            };
+                            if store::acknowledgements::finish(&app.db, &ready, reply.as_deref(), confirmed_steps == 0).await.is_err() {
                                 tracing::debug!("progress update could not enter delivery");
+                            } else if reply.is_some() {
+                                app.delivery_ready.notify_one();
                             }
                         });
                     }

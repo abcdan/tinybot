@@ -150,6 +150,96 @@ async fn a_slow_and_rate_limited_chat_does_not_hold_other_chats() {
 }
 
 #[tokio::test]
+async fn optional_progress_releases_its_chat_lane_on_rate_limit_and_timeout() {
+    use crate::channel::{ChannelAdapter, Inbound, MessageDelivery};
+
+    struct ProgressChannel {
+        attempts: tokio::sync::mpsc::UnboundedSender<String>,
+        release: Notify,
+        hangs: bool,
+    }
+
+    #[async_trait]
+    impl ChannelAdapter for ProgressChannel {
+        fn name(&self) -> &'static str {
+            "telegram"
+        }
+
+        async fn receive(&self, _: i64) -> Result<(Vec<Inbound>, i64)> {
+            unreachable!()
+        }
+
+        async fn send(
+            &self,
+            _: &str,
+            body: &str,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> Result<MessageDelivery> {
+            self.attempts.send(body.into())?;
+            if body == "I am checking the opening hours." {
+                if self.hangs {
+                    return std::future::pending().await;
+                }
+                self.release.notified().await;
+                return Ok(MessageDelivery::Retry(30));
+            }
+            Ok(MessageDelivery::Sent(None))
+        }
+    }
+
+    for expected in ["skipped", "uncertain"] {
+        let db = fixture().await;
+        let app = Arc::new(app_with_model(&db, Arc::new(GroupChief)));
+        store::ingest_telegram(&db, "1", 1, "1", "Find the opening hours.", 20)
+            .await
+            .unwrap();
+        let task = store::claim(&db).await.unwrap().unwrap();
+        sqlx::query("UPDATE outbox SET retry_at=0 WHERE button LIKE 'ack-generate/%'")
+            .execute(&db)
+            .await
+            .unwrap();
+        let progress = store::acknowledgements::claim(&db).await.unwrap().unwrap();
+        store::acknowledgements::finish(
+            &db,
+            &progress,
+            Some("I am checking the opening hours."),
+            false,
+        )
+        .await
+        .unwrap();
+        let (attempts, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let adapter = Arc::new(ProgressChannel {
+            attempts,
+            release: Notify::new(),
+            hangs: expected == "uncertain",
+        });
+        let worker = tokio::spawn(channel::outbox(app, adapter.clone()));
+        let completed = tokio::time::timeout(Duration::from_secs(5), async {
+            assert_eq!(
+                received.recv().await.unwrap(),
+                "I am checking the opening hours."
+            );
+            store::settle_reply(&db, &task, "It opens at 9 am.", &[])
+                .await
+                .unwrap();
+            adapter.release.notify_one();
+            assert_eq!(received.recv().await.unwrap(), "It opens at 9 am.");
+            let receipt: (String, String, i64) =
+                sqlx::query_as("SELECT kind,state,deferrals FROM audit_deliveries WHERE outbox=?")
+                    .bind(progress.id)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            assert_eq!(receipt, ("progress".into(), expected.into(), 0));
+        })
+        .await;
+        worker.abort();
+        completed.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn different_group_topics_share_the_group_lane_and_keep_private_delivery_separate() {
     let db = fixture().await;
     sqlx::raw_sql(

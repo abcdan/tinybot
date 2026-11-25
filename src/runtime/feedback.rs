@@ -21,6 +21,7 @@ const MAX_ENVELOPE_BYTES: usize = 24_000;
 pub(super) struct Feedback {
     source: Mutex<String>,
     stale: Notify,
+    first_draft: Notify,
     pub(super) delivery: tokio::sync::Mutex<()>,
 }
 
@@ -38,11 +39,16 @@ impl Feedback {
     ) -> Result<Option<Step>> {
         self.source.lock().expect("draft buffer").clear();
         let input = input.to_string();
+        let mut preview_started = false;
         let mut append = |text: &str| {
             let mut source = self.source.lock().expect("draft buffer");
             let remaining = MAX_ENVELOPE_BYTES - source.len();
             if remaining >= 4 {
                 source.push_str(clip(text, remaining));
+            }
+            if !preview_started && reply_preview(&source).is_some() {
+                preview_started = true;
+                self.first_draft.notify_one();
             }
         };
         let streamed = tokio::select! {
@@ -82,7 +88,7 @@ impl Feedback {
     }
 
     pub(super) async fn show(&self, db: &SqlitePool, task: &Task, channel: &dyn ChannelAdapter) {
-        let start = Instant::now() + Duration::from_millis(400);
+        let start = Instant::now() + Duration::from_millis(250);
         let mut interval = interval_at(start, Duration::from_secs(1));
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut next_typing = start;
@@ -91,7 +97,10 @@ impl Feedback {
         let draft_id = (rand::random::<i32>() & i32::MAX).max(1);
         let mut draft_supported = true;
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = interval.tick() => {},
+                _ = self.first_draft.notified(), if draft_supported && last_draft.is_empty() => {},
+            }
             let _delivery = self.delivery.lock().await;
             match store::current(db, task).await {
                 Ok(true) => {}

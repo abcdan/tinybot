@@ -4,6 +4,8 @@ use anyhow::Result;
 use sqlx::SqlitePool;
 use std::{sync::Arc, time::Duration};
 
+const PROGRESS_SEND_TIMEOUT: Duration = Duration::from_secs(3);
+
 enum Dispatch {
     Sent(Option<i64>),
     Retry(i64),
@@ -234,6 +236,10 @@ pub async fn outbox(app: Arc<crate::App>, adapter: Arc<dyn ChannelAdapter>) {
 
 async fn deliver(app: &crate::App, adapter: &dyn ChannelAdapter, item: &store::Outbound) {
     let db = &app.db;
+    let progress = item
+        .button
+        .as_deref()
+        .is_some_and(|button| button.starts_with(store::acknowledgements::READY_PREFIX));
     let dispatch = match store::can_deliver(db, item).await {
         Ok(true) => match send_item(app, adapter, item).await {
             Ok(MessageDelivery::Sent(id)) => Dispatch::Sent(id),
@@ -252,20 +258,17 @@ async fn deliver(app: &crate::App, adapter: &dyn ChannelAdapter, item: &store::O
     };
     let (state, retry, message_id) = match dispatch {
         Dispatch::Sent(message_id) => ("sent", 0, message_id),
+        Dispatch::Retry(_) if progress => ("skipped", 0, None),
         Dispatch::Retry(retry) => ("queued", retry, None),
         Dispatch::Failed => ("failed", 0, None),
         Dispatch::Uncertain => ("uncertain", 0, None),
         Dispatch::Skipped => ("skipped", 0, None),
     };
-    let progress = item
-        .button
-        .as_deref()
-        .is_some_and(|button| button.starts_with(store::acknowledgements::READY_PREFIX));
     // On database failure, retry saving the outcome while holding the chat's
     // claim. The adapter send must never be repeated to recover this write.
     loop {
         let saved = sqlx::query(
-            "UPDATE outbox SET state=CASE WHEN ?1='queued' AND ?5 AND button IS NULL THEN 'skipped' ELSE ?1 END,
+            "UPDATE outbox SET state=?1,
                 retry_at=?2,body=CASE WHEN ?1='queued' THEN body ELSE '' END,
                 button=CASE WHEN ?1='queued' THEN button ELSE NULL END,
                 widget=CASE WHEN ?1='queued' THEN widget ELSE NULL END,
@@ -277,7 +280,6 @@ async fn deliver(app: &crate::App, adapter: &dyn ChannelAdapter, item: &store::O
         .bind(retry)
         .bind(message_id)
         .bind(item.id)
-        .bind(progress)
         .execute(db)
         .await;
         if saved.is_ok() {
@@ -430,9 +432,12 @@ pub(super) async fn send_outbound(
         if !store::acknowledgements::ready(db, item).await? {
             return Ok(MessageDelivery::Skipped);
         }
-        return adapter
-            .send_plain(&item.user, &item.body, item.reply_to_message_id)
-            .await;
+        return tokio::time::timeout(
+            PROGRESS_SEND_TIMEOUT,
+            adapter.send_plain(&item.user, &item.body, item.reply_to_message_id),
+        )
+        .await
+        .map_err(|_| super::DeliveryUncertain)?;
     }
     if button.is_some_and(|button| button.starts_with("ta/") || button.starts_with("tq/")) {
         return Ok(MessageDelivery::Skipped);

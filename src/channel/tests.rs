@@ -140,7 +140,7 @@ async fn accepted_telegram_input_only_schedules_delayed_progress() {
     assert!(
         pending
             .iter()
-            .all(|(_, retry_at, body)| *retry_at >= arrived_at + 5 && body.is_empty())
+            .all(|(_, retry_at, body)| *retry_at >= arrived_at + 2 && body.is_empty())
     );
     sqlx::query("UPDATE outbox SET retry_at=0 WHERE button LIKE 'ack-generate/%'")
         .execute(&db)
@@ -172,7 +172,7 @@ async fn generated_progress_replies_to_the_request_without_controls() {
         .unwrap();
     let progress = store::acknowledgements::claim(&db).await.unwrap().unwrap();
     let text = "Ik zoek de openingstijden op.";
-    store::acknowledgements::finish(&db, &progress, Some(text))
+    store::acknowledgements::finish(&db, &progress, Some(text), false)
         .await
         .unwrap();
     let item = store::claim_outbox(&db).await.unwrap().unwrap();
