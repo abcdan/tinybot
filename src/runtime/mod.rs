@@ -18,6 +18,7 @@ mod openrouter_tools;
 mod output;
 mod preview;
 mod review;
+mod routine_reply;
 mod settings;
 mod suggestions;
 mod task_plan;

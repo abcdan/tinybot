@@ -13,6 +13,8 @@ pub(crate) struct Policy {
     catch_up: String,
     quiet_start: Option<i64>,
     quiet_end: Option<i64>,
+    #[serde(default)]
+    notify_changes: bool,
 }
 
 pub(crate) async fn set_policy(
@@ -35,12 +37,14 @@ pub(crate) async fn set_policy(
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     active_owner(&mut tx, user, None).await?;
     let changed = sqlx::query(
-        "UPDATE schedules SET catch_up=?,quiet_start=?,quiet_end=?,held_until=NULL,revision=revision+1
+        "UPDATE schedules SET catch_up=?,quiet_start=?,quiet_end=?,notify_changes=CASE WHEN kind='task' THEN ? ELSE 0 END,
+           held_until=NULL,revision=revision+1
          WHERE id=? AND owner=? AND revision=? AND state IN ('active','paused','manual')",
     )
     .bind(policy.catch_up)
     .bind(policy.quiet_start)
     .bind(policy.quiet_end)
+    .bind(policy.notify_changes)
     .bind(id)
     .bind(user)
     .bind(revision)
@@ -91,6 +95,7 @@ pub(crate) struct Occurrence {
     delayed_until: Option<i64>,
     task: Option<String>,
     task_state: Option<String>,
+    notification_state: Option<String>,
     delivery: Option<String>,
 }
 
@@ -99,12 +104,13 @@ pub(crate) async fn occurrences(db: &SqlitePool, user: &str, id: &str) -> Result
     Ok(sqlx::query_as(
         "SELECT o.due_at,o.checked_at,
            CASE WHEN o.outcome='deferred' AND o.revision<>s.revision THEN 'superseded' ELSE o.outcome END AS outcome,
-           o.delayed_until,t.id AS task,t.state AS task_state,
+           o.delayed_until,t.id AS task,t.state AS task_state,r.notification_state,
            (SELECT b.state FROM outbox b WHERE b.task=t.id AND b.user=t.user
               AND b.assistant_event_id IS NOT NULL ORDER BY b.id DESC LIMIT 1) AS delivery
          FROM schedule_occurrences o JOIN schedules s ON s.id=o.schedule
          JOIN users u ON u.id=s.owner AND u.suspended_at IS NULL
          LEFT JOIN tasks t ON t.id=o.task AND t.user=s.owner AND t.state<>'revoked' AND t.agent IS NULL
+         LEFT JOIN schedule_runs r ON r.task=t.id
          WHERE o.schedule=? AND s.owner=? ORDER BY o.due_at DESC,o.revision DESC LIMIT 30",
     )
     .bind(id)
@@ -310,6 +316,7 @@ mod tests {
                 catch_up: "coalesce".into(),
                 quiet_start: Some(22 * 60),
                 quiet_end: Some(7 * 60),
+                notify_changes: false,
             },
         )
         .await
@@ -362,6 +369,7 @@ mod tests {
                 catch_up: "skip".into(),
                 quiet_start: None,
                 quiet_end: None,
+                notify_changes: false,
             },
         )
         .await

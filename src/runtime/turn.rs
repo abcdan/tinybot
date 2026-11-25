@@ -483,12 +483,7 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                     }
                     return store::settle(&app.db, task, "idle", None).await;
                 }
-                // Wait for any in-flight draft before queuing the durable reply.
-                let _delivery = match feedback {
-                    Some(feedback) => Some(feedback.delivery.lock().await),
-                    None => None,
-                };
-                return store::settle_reply(&app.db, task, &text, &suggestions).await;
+                return super::routine_reply::send(app, task, &text, &suggestions, feedback).await;
             }
             Step::Tool { mut name, mut args } => {
                 if let Some(url) = lookup::supplied_url_query(&name, &args, request)
@@ -842,6 +837,9 @@ async fn finish_from_context(
     }
     if task_plan::unfinished(input) && stop_reason.is_some() {
         store::settle(&app.db, task, "blocked", Some(&text)).await
+    } else if stop_reason.is_none() {
+        drop(_delivery);
+        super::routine_reply::send(app, task, &text, &[], feedback).await
     } else {
         store::settle_reply(&app.db, task, &text, &[]).await
     }

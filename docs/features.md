@@ -156,6 +156,8 @@ Fixed reminders send the saved text directly. Open **Timing policy** to set quie
 hours or decide whether a missed recurring schedule should run once or be skipped.
 **Run history** shows delayed and skipped occurrences as well as results. Use **Dry
 run** to preview a routine with sample input in Telegram.
+For recurring digests, choose **Only when the result changes** under **Timing policy**
+to skip notifications when the facts and next actions match the last delivered result.
 
 Open **Webhook** on an active or manual routine to run it from a trusted external
 service. The service sends `POST` with a JSON body containing a unique `event_id`.
