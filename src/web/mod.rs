@@ -54,6 +54,15 @@ pub fn router(app: Arc<App>) -> Router {
             }),
         )
         .route(
+            "/mini-artifacts.js",
+            get(|| async {
+                asset(
+                    "application/javascript; charset=utf-8",
+                    include_str!("../../web/mini-artifacts.js"),
+                )
+            }),
+        )
+        .route(
             "/mini-onboarding.js",
             get(|| async {
                 asset(

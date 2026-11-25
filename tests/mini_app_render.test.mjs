@@ -240,6 +240,41 @@ test('a task deep link shows the latest result and opens the exact pending revie
     }
 });
 
+test('the task files shelf downloads the selected retained version with its safe filename', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 640}, acceptDownloads: true});
+        const page = await context.newPage();
+        const task = {id: 'receipt', title: 'Make a receipt', state: 'completed', revision: 3};
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return {user: '1', provider: 'codex', requests: [], tasks: [task]};
+            if (action === 'task-detail') {
+                assert.deepEqual(data, {task: task.id});
+                return {task, requests: [], files: [
+                    {id: 'latest', kind: 'file', name: 'receipt.txt', version: 2, delivery: 'sent'},
+                    {id: 'earlier', kind: 'file', name: 'receipt.txt', version: 1},
+                ]};
+            }
+            if (action === 'download-task-file') {
+                assert.deepEqual(data, {task: task.id, id: 'earlier', kind: 'file'});
+                return {name: '../receipt.txt', content: Buffer.from('Retained version one').toString('base64')};
+            }
+            assert.fail('Unexpected Mini App request ' + action);
+        });
+        await page.goto('https://tinybot.test/mini?task=receipt');
+        await page.getByText('Sent to Telegram').waitFor();
+        const earlier = page.locator('.task-card').filter({hasText: 'Generated file · Version 1'});
+        const [file] = await Promise.all([
+            page.waitForEvent('download'), earlier.getByRole('button', {name: 'Download'}).click(),
+        ]);
+        assert.equal(file.suggestedFilename(), '_receipt.txt');
+        assert.equal(await readFile(await file.path(), 'utf8'), 'Retained version one');
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
+    } finally {
+        await browser.close();
+    }
+});
+
 test('first-run setup checks one key, searches tool models and opens the named Chief', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
     try {
