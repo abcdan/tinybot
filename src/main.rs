@@ -152,6 +152,7 @@ async fn main() -> Result<()> {
     let review_key = secret("TINYBOT_REVIEW_OPENROUTER_KEY")
         .ok()
         .filter(|m| !m.is_empty());
+    let inception_key = secret("TINYBOT_INCEPTION_API_KEY").ok();
     let app = Arc::new(App {
         db: db.clone(),
         task_ready: Notify::new(),
@@ -167,7 +168,8 @@ async fn main() -> Result<()> {
             env::var("TINYBOT_CODEX_BIN").unwrap_or_else(|_| "codex".into()),
             review_model,
             review_key,
-        ),
+        )
+        .with_progress_mercury_key(inception_key),
         mcp: mcp::Mcp::new(db.clone(), vault, origin),
         forms: forms::Forms::default(),
         workers: workers::Workers {

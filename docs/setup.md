@@ -182,6 +182,17 @@ OpenRouter. `TINYBOT_REVIEW_OPENROUTER_KEY` is an optional deployment fallback
 for action review and Mercury. Personal OpenRouter credentials take
 precedence.
 
+### Telegram progress notices
+
+When a private Telegram request is still open after five seconds, TinyBot can
+generate a short update using the topic and any confirmed work. Set
+`TINYBOT_INCEPTION_API_KEY` to use Mercury 3 directly for these notices. If the
+key is absent or the Mercury call fails, TinyBot generates the notice with the
+user's configured task model. Inception plans to retire this API after
+December 28, 2026. [Inception API wind-down](https://docs.inceptionlabs.ai/support/wind-down).
+
+### MCP read policy
+
 Remote MCP servers can use Streamable HTTP or legacy HTTP+SSE. Depending on
 the server, authorization can use OAuth client metadata discovery, dynamic
 registration, a supplied OAuth client, or an API token with a configurable

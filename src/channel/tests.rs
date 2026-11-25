@@ -140,7 +140,7 @@ async fn accepted_telegram_input_only_schedules_delayed_progress() {
     assert!(
         pending
             .iter()
-            .all(|(_, retry_at, body)| *retry_at >= arrived_at + 2 && body.is_empty())
+            .all(|(_, retry_at, body)| *retry_at >= arrived_at + 6 && body.is_empty())
     );
     sqlx::query("UPDATE outbox SET retry_at=0 WHERE button LIKE 'ack-generate/%'")
         .execute(&db)
