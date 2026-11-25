@@ -6,8 +6,8 @@ mod settings;
 #[cfg(test)]
 mod tests;
 
-use super::Models;
-use crate::siwc::Profile;
+use super::{Models, ProviderFailure, provider_failure};
+use crate::{security::now, siwc::Profile};
 use anyhow::{Context, Result, ensure};
 pub(crate) use backup::BackupModel;
 pub use catalog::OpenRouterModel;
@@ -216,6 +216,65 @@ impl Models {
         queue_setup_tasks(&mut tx, user).await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    pub(super) async fn codex_profile(&self, user: &str, credential: &str) -> Result<Profile> {
+        let binding = format!("model:{user}");
+        let profile = self.open_codex_profile(&binding, credential)?;
+        if profile.expires > now() + 90 {
+            return Ok(profile);
+        }
+
+        let _refresh = self.refresh.lock().await;
+        // A concurrent refresh or new sign-in may have replaced the saved profile.
+        let credential = self.codex_credential(user).await?;
+        let mut profile = self.open_codex_profile(&binding, &credential)?;
+        if profile.expires > now() + 90 {
+            return Ok(profile);
+        }
+        profile
+            .refresh()
+            .await
+            .map_err(|error| provider_failure(&error).unwrap_or(ProviderFailure::CodexSignIn))?;
+        let encrypted = self.vault.seal(&binding, &serde_json::to_vec(&profile)?)?;
+        let changed = sqlx::query(
+            "UPDATE users SET codex_credential=?, codex_model=COALESCE(codex_model,model), credential=NULL
+             WHERE id=? AND suspended_at IS NULL AND
+                (codex_credential=? OR (codex_credential IS NULL AND provider='codex' AND credential=?))",
+        )
+        .bind(encrypted)
+        .bind(user)
+        .bind(&credential)
+        .bind(&credential)
+        .execute(&self.db)
+        .await?
+        .rows_affected();
+        if changed == 0 {
+            let current = self.codex_credential(user).await?;
+            profile = self.open_codex_profile(&binding, &current)?;
+            ensure!(profile.expires > now(), ProviderFailure::CodexSignIn);
+        }
+        Ok(profile)
+    }
+
+    fn open_codex_profile(&self, binding: &str, credential: &str) -> Result<Profile> {
+        let secret = self
+            .vault
+            .open(binding, credential)
+            .context(ProviderFailure::CodexSignIn)?;
+        serde_json::from_slice(&secret).context(ProviderFailure::CodexSignIn)
+    }
+
+    async fn codex_credential(&self, user: &str) -> Result<String> {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT COALESCE(codex_credential,CASE WHEN provider='codex' THEN credential END)
+             FROM users WHERE id=? AND suspended_at IS NULL",
+        )
+        .bind(user)
+        .fetch_optional(&self.db)
+        .await?
+        .flatten()
+        .context(ProviderFailure::CodexSignIn)
     }
 
     pub async fn select_codex(&self, user: &str) -> Result<()> {

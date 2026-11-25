@@ -18,10 +18,7 @@ pub(crate) use server_tools::{ServerTool, ServerToolInput};
 pub(crate) use transcription::MAX_VOICE_BYTES;
 
 use self::{codex::Codex, openrouter::OpenRouter};
-use crate::{
-    security::{Vault, now},
-    siwc::Profile,
-};
+use crate::security::Vault;
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
@@ -221,7 +218,6 @@ impl Models {
         review: bool,
         backup: Option<&BackupModel>,
     ) -> Result<Arc<dyn ModelProvider>> {
-        let _refresh = self.refresh.lock().await;
         let (kind, model, credential): (Option<String>, Option<String>, Option<String>) =
             sqlx::query_as(
                 "SELECT provider,model,COALESCE(codex_credential,CASE WHEN provider='codex' THEN credential END) FROM users WHERE id=?",
@@ -250,30 +246,14 @@ impl Models {
         }
         ensure!(kind == "codex", ProviderFailure::Setup);
         crate::audit::model_selected("codex", &model, review).await;
-        let binding = format!("model:{user}");
-        let credential = credential.context(ProviderFailure::CodexSignIn)?;
-        let secret = self
-            .vault
-            .open(&binding, &credential)
-            .context(ProviderFailure::CodexSignIn)?;
-        let mut profile: Profile =
-            serde_json::from_slice(&secret).context(ProviderFailure::CodexSignIn)?;
-        if profile.expires <= now() + 90 {
-            profile.refresh().await.map_err(|error| {
-                provider_failure(&error).unwrap_or(ProviderFailure::CodexSignIn)
-            })?;
-            let enc = self.vault.seal(&binding, &serde_json::to_vec(&profile)?)?;
-            sqlx::query(
-                "UPDATE users SET codex_credential=?, codex_model=COALESCE(codex_model,model), credential=NULL
-                 WHERE id=? AND (codex_credential=? OR (codex_credential IS NULL AND provider='codex' AND credential=?))",
+        let profile = self
+            .codex_profile(
+                user,
+                credential
+                    .as_deref()
+                    .context(ProviderFailure::CodexSignIn)?,
             )
-            .bind(enc)
-            .bind(user)
-            .bind(&credential)
-            .bind(&credential)
-            .execute(&self.db)
             .await?;
-        }
         Ok(Arc::new(Codex {
             access: profile.access_token,
             model,
@@ -305,6 +285,7 @@ pub fn parse_json_reply<T: DeserializeOwned>(response: &str) -> Result<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::security::now;
     use serde_json::json;
 
     #[tokio::test]

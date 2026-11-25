@@ -22,6 +22,57 @@ fn profile() -> Profile {
     .unwrap()
 }
 
+#[tokio::test]
+async fn ready_credentials_do_not_wait_on_codex_refresh() {
+    use std::{pin::pin, time::Duration};
+    use tokio::time::timeout;
+
+    let db = database().await;
+    sqlx::migrate!().run(&db).await.unwrap();
+    for user in ["1", "2", "3"] {
+        store::seed(&db, user).await.unwrap();
+    }
+    let vault = Vault::new(&"fa".repeat(32)).unwrap();
+    let models = Models::new(db.clone(), vault.clone(), "codex".into(), None, None);
+    let fresh = profile();
+    models
+        .connect_codex("1", "codex-fixture", &fresh)
+        .await
+        .unwrap();
+    let mut expired = profile();
+    expired.expires = now() - 60;
+    models
+        .connect_codex("3", "codex-fixture", &expired)
+        .await
+        .unwrap();
+    let expired = models.codex_credential("3").await.unwrap();
+    let key = vault.seal("openrouter:2", b"sk-or-fixture").unwrap();
+    sqlx::query(
+        "UPDATE users SET provider='openrouter',model='provider/tool',openrouter_key=? WHERE id='2'",
+    )
+    .bind(key)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    let in_progress = models.refresh.lock().await;
+    let mut waiting = pin!(models.codex_profile("3", &expired));
+    assert!(timeout(Duration::ZERO, waiting.as_mut()).await.is_err());
+    timeout(Duration::from_secs(2), async {
+        assert!(models.provider("1", false).await.is_ok());
+        assert!(models.provider("2", false).await.is_ok());
+    })
+    .await
+    .unwrap();
+
+    models
+        .connect_codex("3", "codex-fixture", &fresh)
+        .await
+        .unwrap();
+    drop(in_progress);
+    assert_eq!(waiting.await.unwrap().expires, fresh.expires);
+}
+
 async fn active(db: &SqlitePool) -> (Option<String>, Option<String>) {
     sqlx::query_as("SELECT provider,model FROM users WHERE id='1'")
         .fetch_one(db)
