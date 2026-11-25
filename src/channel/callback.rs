@@ -49,7 +49,7 @@ impl Query {
 enum Selection<'a> {
     RetryTurn(&'a str),
     AcceptInvite(&'a str),
-    ContinueTask(&'a str),
+    ContinueTask(&'a str, Option<i64>),
     StopTask(&'a str, i64),
     CompleteTask(&'a str, i64),
     Reply(&'a str),
@@ -89,8 +89,12 @@ fn selection(data: &str) -> Option<Selection<'_>> {
             Some(Selection::AcceptInvite(remainder))
         }
         "tc" => {
-            uuid::Uuid::parse_str(remainder).ok()?;
-            Some(Selection::ContinueTask(remainder))
+            let (task, revision) = match remainder.split_once('/') {
+                Some((task, revision)) => (task, Some(revision.parse::<i64>().ok()?)),
+                None => (remainder, None),
+            };
+            uuid::Uuid::parse_str(task).ok()?;
+            Some(Selection::ContinueTask(task, revision))
         }
         "ts" => {
             let (task, revision) = remainder.split_once('/')?;
@@ -178,8 +182,12 @@ pub(super) async fn answer(db: &SqlitePool, query: &Query) -> Result<Answer> {
             });
         }
         Some(Selection::AcceptInvite(_)) => unreachable!(),
-        Some(Selection::ContinueTask(task)) => {
-            if !store::select_task(db, &user, task).await? {
+        Some(Selection::ContinueTask(task, revision)) => {
+            let selected = match revision {
+                Some(revision) => store::task_views::select_at(db, &user, task, revision).await?,
+                None => store::select_task(db, &user, task).await?,
+            };
+            if !selected {
                 return Ok(UNAVAILABLE);
             }
             return Ok(Answer {
