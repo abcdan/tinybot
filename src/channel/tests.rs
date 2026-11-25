@@ -633,6 +633,22 @@ async fn polling_extracts_private_quotes_and_only_new_user_emoji() {
             "old_reaction":[{"type":"emoji","emoji":"👍"}],"new_reaction":[],"date":1}},
         {"update_id":5,"message_reaction":{"chat":{"id":42,"type":"group"},"message_id":29,"user":user,
             "old_reaction":[],"new_reaction":[{"type":"emoji","emoji":"👍"}],"date":1}},
+        {"update_id":6,"message_reaction":{"chat":chat,"message_id":29,"user":user,
+            "old_reaction":[{"type":"emoji","emoji":"👍"}],
+            "new_reaction":[{"type":"emoji","emoji":"👍"},{"type":"emoji","emoji":"🙉"}],"date":1}},
+        {"update_id":7,"message_reaction":{"chat":chat,"message_id":29,"user":user,
+            "old_reaction":[{"type":"emoji","emoji":"👍"},{"type":"emoji","emoji":"🙉"}],
+            "new_reaction":[{"type":"emoji","emoji":"🙉"},{"type":"emoji","emoji":"👍"}],"date":1}},
+        {"update_id":8,"message_reaction":{"chat":chat,"message_id":29,"user":user,
+            "old_reaction":[{"type":"emoji","emoji":"🙉"}],"new_reaction":[],"date":1}},
+        {"update_id":9,"message_reaction":{"chat":chat,"message_id":29,"user":{"id":43,"is_bot":false},
+            "old_reaction":[],"new_reaction":[{"type":"emoji","emoji":"🙉"}],"date":1}},
+        {"update_id":10,"message_reaction":{"chat":chat,"message_id":29,"user":{"id":42,"is_bot":true},
+            "old_reaction":[],"new_reaction":[{"type":"emoji","emoji":"🙉"}],"date":1}},
+        {"update_id":11,"message_reaction":{"chat":chat,"message_id":29,"actor_chat":{"id":42,"type":"private"},
+            "old_reaction":[],"new_reaction":[{"type":"emoji","emoji":"🙉"}],"date":1}},
+        {"update_id":12,"message_reaction":{"chat":chat,"message_id":29,"user":user,
+            "old_reaction":[],"new_reaction":[{"type":"custom_emoji","custom_emoji_id":"123"}],"date":1}},
     ]});
     let mock: Mock = Arc::new(Mutex::new((Vec::new(), VecDeque::from([updates]))));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -647,7 +663,7 @@ async fn polling_extracts_private_quotes_and_only_new_user_emoji() {
         .with_state(mock.clone());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let (updates, offset) = telegram.receive(0).await.unwrap();
-    assert_eq!(offset, 6);
+    assert_eq!(offset, 13);
     let [
         Inbound::Message {
             text,
@@ -661,9 +677,15 @@ async fn polling_extracts_private_quotes_and_only_new_user_emoji() {
             emoji,
             ..
         },
+        Inbound::Reaction {
+            external_id: 6,
+            user: audio_actor,
+            message_id: 29,
+            emoji: audio_emoji,
+        },
     ] = updates.as_slice()
     else {
-        panic!("expected private replies and one new reaction")
+        panic!("expected private replies and one event per newly added ordinary reaction")
     };
     assert_eq!(text, "👍");
     assert_eq!(quote.message_id, 29);
@@ -671,6 +693,8 @@ async fn polling_extracts_private_quotes_and_only_new_user_emoji() {
     assert!(quote.from_bot);
     assert_eq!(user, "42");
     assert_eq!(emoji, "👍");
+    assert_eq!(audio_actor, "42");
+    assert_eq!(audio_emoji, "🙉");
     assert!(
         mock.lock().await.0[0].1["allowed_updates"]
             .as_array()
@@ -917,6 +941,88 @@ async fn sends_formatted_replies_and_keeps_original_reply_buttons_on_rejection()
     assert_eq!(calls[4].1["entities"], with_suggestions["entities"]);
     assert_eq!(calls[4].1["reply_markup"], suggested_keyboard(&replies));
     server.abort();
+}
+
+#[tokio::test]
+async fn replies_to_a_voice_enabled_chat_keep_their_receipt_without_a_listen_button() {
+    let db = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&db).await.unwrap();
+    store::seed(&db, "42").await.unwrap();
+    sqlx::query("UPDATE users SET provider='openrouter',openrouter_key='fixture' WHERE id='42'")
+        .execute(&db)
+        .await
+        .unwrap();
+    store::ingest_telegram(&db, "42", 1, "42", "Wat staat er nog open?", 20)
+        .await
+        .unwrap();
+    let task = store::claim(&db).await.unwrap().unwrap();
+    store::settle_reply(&db, &task, "Er staan geen taken open.", &[])
+        .await
+        .unwrap();
+
+    let mock: Mock = Arc::new(Mutex::new((
+        Vec::new(),
+        VecDeque::from([json!({"ok":true,"result":{"message_id":201}})]),
+    )));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = url::Url::parse("https://tinybot.example").unwrap();
+    let telegram = Telegram {
+        client: reqwest::Client::new(),
+        api: format!("http://{}/botTEST", listener.local_addr().unwrap()),
+        origin: origin.origin().ascii_serialization(),
+        identity: Default::default(),
+    };
+    let router = Router::new()
+        .route("/botTEST/{method}", post(record))
+        .with_state(mock.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let vault = crate::security::Vault::new(&"f0".repeat(32)).unwrap();
+    let app = crate::App {
+        db: db.clone(),
+        task_ready: Default::default(),
+        delivery_ready: Default::default(),
+        models: crate::model::Models::new(db.clone(), vault.clone(), "unused".into(), None, None),
+        mcp: crate::mcp::Mcp::new(db.clone(), vault.clone(), origin),
+        vault,
+        token: "unused".into(),
+        operator: "42".into(),
+        origin: "https://tinybot.example".into(),
+        anything_mcp_origin: None,
+        forms: crate::forms::Forms::default(),
+        workers: crate::workers::Workers {
+            browser: "unused".into(),
+            python: "unused".into(),
+        },
+        tools: vec![],
+    };
+    let worker = tokio::spawn(crate::channel::outbox(Arc::new(app), Arc::new(telegram)));
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while !sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM outbox WHERE user='42' AND telegram_message_id=201
+                           AND assistant_event_id IS NOT NULL AND state='sent')",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    worker.abort();
+    server.abort();
+
+    let mock = mock.lock().await;
+    assert_eq!(mock.0.len(), 1);
+    let (method, request) = &mock.0[0];
+    assert_eq!(method, "sendMessage");
+    assert_eq!(request["text"], "Er staan geen taken open.");
+    assert!(request.get("reply_markup").is_none());
 }
 
 #[tokio::test]

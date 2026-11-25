@@ -417,22 +417,6 @@ async fn send_item(
             .send(&item.user, &preview, button, item.reply_to_message_id)
             .await;
     }
-    if button.is_none() && item.agent.is_none() && item.task.is_some()
-        && sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM outbox o JOIN users u ON u.id=o.user JOIN tasks t ON t.id=o.task
-                           WHERE o.id=? AND o.assistant_event_id IS NOT NULL AND u.openrouter_key IS NOT NULL
-                             AND u.suspended_at IS NULL AND t.shared_memory_pair IS NULL
-                             AND NOT EXISTS(SELECT 1 FROM outbox later
-                                WHERE later.assistant_event_id=o.assistant_event_id AND later.id>o.id))",
-        )
-        .bind(item.id)
-        .fetch_one(&app.db)
-        .await?
-    {
-        let replies = store::suggested_replies(&app.db, item.id).await?;
-        let card = item.widget.as_deref().map(serde_json::from_str::<Card>).transpose()?;
-        return adapter.send_listenable(&item.user, &item.body, card.as_ref(), &replies, item.reply_to_message_id, item.id).await;
-    }
     send_outbound(&app.db, adapter, item).await
 }
 

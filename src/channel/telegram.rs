@@ -330,28 +330,6 @@ impl ChannelAdapter for Telegram {
         .await
     }
 
-    async fn send_listenable(
-        &self,
-        user: &str,
-        body: &str,
-        card: Option<&Card>,
-        replies: &[store::SuggestedReply],
-        reply_to: Option<i64>,
-        receipt: i64,
-    ) -> Result<MessageDelivery> {
-        let chat = user.parse()?;
-        let mut keyboard = suggested_keyboard(replies);
-        if let Some(rows) = keyboard["inline_keyboard"].as_array_mut() {
-            rows.push(json!([{"text":"Listen","callback_data":format!("listen/{receipt}")}]));
-        }
-        if let Some(card) = card {
-            self.send_task_card(chat, card, Some(keyboard), reply_to)
-                .await
-        } else {
-            self.send_reply(chat, body, Some(keyboard), reply_to).await
-        }
-    }
-
     async fn send_choice(&self, user: &str, choice: &WidgetChoice) -> Result<MessageDelivery> {
         let user_id = user.parse::<i64>().context("invalid Telegram recipient")?;
         let data = json!({
