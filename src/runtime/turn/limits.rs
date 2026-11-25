@@ -110,7 +110,12 @@ impl Limit {
             }
             Ok(Some(Step::Reply { text, .. })) => {
                 if input["routine"]["current"].is_null() && !task_plan::unfinished(input) {
-                    store::settle_reply(&app.db, task, &text, &[]).await
+                    if input["tool_stop_reason"].is_null() {
+                        drop(_delivery);
+                        super::super::routine_reply::send(app, task, &text, &[], feedback).await
+                    } else {
+                        store::settle_reply(&app.db, task, &text, &[]).await
+                    }
                 } else {
                     store::settle(&app.db, task, "blocked", Some(&text)).await
                 }

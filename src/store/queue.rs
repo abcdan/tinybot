@@ -260,6 +260,10 @@ async fn settle_task(
                     .execute(&mut *tx)
                     .await?
                     .last_insert_rowid();
+            if state == "idle" && widget.is_none() {
+                crate::schedules::notifications::record_result(&mut tx, task, assistant_event)
+                    .await?;
+            }
             let parts = if widget.is_some() {
                 vec![message.into()]
             } else {
