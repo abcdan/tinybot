@@ -108,6 +108,47 @@ test('schedules edit instructions, pause and run a saved routine', async () => {
     }
 });
 
+test('a routine webhook reveals its signing key only during setup', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 640}});
+        const page = await context.newPage();
+        const schedule = {id:'routine', title:'Inbox watch', revision: 1, state:'manual', kind:'task', time_zone:'UTC'};
+        const endpoint = 'https://tinybot.test/hooks/routine/fixture';
+        let enabled = false;
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return {user:'1', provider:'openrouter', requests:[], tasks:[], schedules:[schedule]};
+            assert.equal(data.id, schedule.id);
+            if (action === 'schedule-webhook') return {webhook: enabled ? {id:'fixture', enabled:true, url:endpoint} : null};
+            if (action === 'enable-schedule-webhook') {
+                assert.equal(data.revision, 1);
+                enabled = true;
+                return {id:'fixture', url:endpoint, secret:'fixture-signing-value'};
+            }
+            if (action === 'revoke-schedule-webhook') {
+                assert.equal(data.hook, 'fixture');
+                enabled = false;
+                return {ok:true};
+            }
+            assert.fail(`Unexpected Mini App action ${action}`);
+        });
+        await page.goto('https://tinybot.test/');
+        await page.getByRole('button', {name:'Schedules'}).click();
+        await page.getByText('Webhook', {exact:true}).click();
+        await page.getByRole('button', {name:'Enable webhook'}).click();
+        await page.getByText('fixture-signing-value', {exact:true}).waitFor();
+        await page.reload();
+        await page.getByRole('button', {name:'Schedules'}).click();
+        await page.getByText('Webhook', {exact:true}).click();
+        await page.getByText(endpoint, {exact:true}).waitFor();
+        assert.equal(await page.getByText('fixture-signing-value', {exact:true}).count(), 0);
+        await page.getByRole('button', {name:'Revoke webhook'}).click();
+        await page.getByText('Webhook revoked.', {exact:true}).waitFor();
+    } finally {
+        await browser.close();
+    }
+});
+
 test('task search stops the specific returned revision', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
     try {

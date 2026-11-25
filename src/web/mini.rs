@@ -205,6 +205,9 @@ async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<
         }
         "run-schedule" => return tasks::run_schedule(app, user, data).await,
         "preview-routine" => return tasks::preview_routine(app, user, data).await,
+        "schedule-webhook" => return tasks::schedule_webhook(app, user, data).await,
+        "enable-schedule-webhook" => return tasks::enable_schedule_webhook(app, user, data).await,
+        "revoke-schedule-webhook" => tasks::revoke_schedule_webhook(app, user, data).await?,
         "schedule-history" => return tasks::schedule_history(app, user, data).await,
         "approve" | "deny" => tasks::respond(app, user, data, action == "approve").await?,
         "always-approve-mcp" => tasks::always_approve_mcp(app, user, data).await?,
