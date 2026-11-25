@@ -18,6 +18,7 @@ mod audit_log;
 mod browser_settings;
 #[cfg(unix)]
 mod browsing;
+mod checkpoints;
 mod completion_chat;
 mod mail_settings;
 mod mail_workflow;
