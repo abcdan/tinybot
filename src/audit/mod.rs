@@ -32,6 +32,7 @@ pub(crate) struct Trace {
     db: SqlitePool,
     session: i64,
     attempt: i64,
+    revision: i64,
 }
 
 impl Trace {
@@ -42,7 +43,7 @@ impl Trace {
         revision: i64,
     ) -> Result<Option<Self>> {
         let scope: Option<(i64, i64)> = sqlx::query_as(
-            "SELECT s.id,s.attempts FROM audit_sessions s JOIN tasks t ON t.audit_session_id=s.id
+            "SELECT s.id,s.attempts FROM audit_sessions s JOIN tasks t ON t.id=s.task AND t.audit_session_id=s.id
              WHERE t.id=? AND t.user=? AND t.revision=? AND t.state IN ('queued','running')
                AND s.started_at>?",
         )
@@ -56,7 +57,39 @@ impl Trace {
             db: db.clone(),
             session,
             attempt,
+            revision,
         }))
+    }
+
+    pub(crate) async fn confirmed_progress_steps(&self) -> Result<usize> {
+        let entries: Vec<(String, String)> = sqlx::query_as(
+            "SELECT e.name,e.detail FROM audit_sessions s
+             JOIN tasks t ON t.id=s.task AND t.audit_session_id=s.id
+             JOIN audit_entries e ON e.session=s.id AND e.attempt=s.attempts
+             WHERE s.id=?1 AND s.attempts=?2 AND t.revision=?3
+               AND t.state='running' AND s.status='running'
+               AND e.kind='tool' AND e.status='completed'
+               AND e.name IN ('browse','search_web','delegate','send_email','form_submission','send_task_file')
+               AND e.id>(SELECT MAX(start.id) FROM audit_entries start
+                   WHERE start.session=s.id AND start.attempt=s.attempts AND start.kind='session'
+                     AND start.name='agent' AND start.status='running'
+                     AND CASE WHEN json_valid(start.detail) THEN json_extract(start.detail,'$.revision') END=?3)
+             ORDER BY e.id DESC LIMIT 32",
+        )
+        .bind(self.session)
+        .bind(self.attempt)
+        .bind(self.revision)
+        .fetch_all(&self.db)
+        .await?;
+        Ok(entries
+            .iter()
+            .filter(|(name, raw)| {
+                serde_json::from_str(raw)
+                    .ok()
+                    .and_then(|detail| crate::runtime::confirmed_step(name, &detail))
+                    .is_some()
+            })
+            .count())
     }
 
     pub(crate) async fn start(db: &SqlitePool, task: &Task) -> Result<Option<Self>> {
@@ -77,6 +110,7 @@ impl Trace {
             db: db.clone(),
             session,
             attempt,
+            revision: task.revision,
         }))
     }
 

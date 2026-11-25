@@ -7,6 +7,8 @@ pub(crate) const WAIT_PREFIX: &str = "ack-generate/";
 pub(crate) const READY_PREFIX: &str = "ack-progress/";
 const DELAY: i64 = 5;
 const LEASE: i64 = 30;
+const EVIDENCE_RECHECK: i64 = 3;
+const EVIDENCE_WINDOW: i64 = 20;
 
 // A progress notice only follows a Telegram message in the user's personal Chief chat.
 const CHAT_SCOPE: &str = "t.chief_chat=1 AND t.agent IS NULL AND t.shared_memory_pair IS NULL
@@ -127,6 +129,30 @@ pub(crate) async fn claim(db: &SqlitePool) -> Result<Option<Generation>> {
     }
     tx.commit().await?;
     Ok(generation)
+}
+
+pub(crate) async fn retry_for_evidence(db: &SqlitePool, generation: &Generation) -> Result<bool> {
+    let retry_at = now() + EVIDENCE_RECHECK;
+    let changed = sqlx::query(&format!(
+        "UPDATE outbox SET state='queued',retry_at=?
+         WHERE id=? AND user=? AND task=? AND state='generating' AND retry_at=?
+           AND EXISTS(SELECT 1 {CANDIDATE_JOIN}
+             JOIN audit_sessions s ON s.id=t.audit_session_id AND s.task=t.id
+             WHERE o.id=outbox.id AND {CHAT_SCOPE} AND {CANDIDATE_SCOPE}
+               AND t.state='running' AND t.revision=? AND o.button='ack-generate/' || t.revision
+               AND e.id=? AND e.acknowledged=0 AND s.started_at>=?)"
+    ))
+    .bind(retry_at)
+    .bind(generation.id)
+    .bind(&generation.user)
+    .bind(&generation.task)
+    .bind(generation.lease)
+    .bind(generation.revision)
+    .bind(generation.event)
+    .bind(retry_at - EVIDENCE_WINDOW)
+    .execute(db)
+    .await?;
+    Ok(changed.rows_affected() == 1)
 }
 
 pub(crate) async fn finish(
