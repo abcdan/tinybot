@@ -289,6 +289,16 @@ async fn send_item(
             .send_group(route, &item.body, item.reply_to_message_id)
             .await;
     }
+    if let Some(button) = button
+        && let Some(allowed) = store::projects::notice_allowed(&app.db, &item.user, button).await?
+    {
+        if !allowed {
+            return Ok(MessageDelivery::Skipped);
+        }
+        return adapter
+            .send(&item.user, &item.body, Some("mini"), None)
+            .await;
+    }
     if let Some(token) = button.and_then(|button| button.strip_prefix(store::task_failures::RETRY))
     {
         let Some((mut message, retryable)) =
