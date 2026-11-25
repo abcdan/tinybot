@@ -1,16 +1,21 @@
 import { InputError, requireInput, publicUrl, describe, populate } from './forms.mjs';
-import { chmod, unlink } from 'node:fs/promises';
+import { captureTypes, captureViewport, encodeRecording, recordingOptions, recordPage, screenshot } from './capture.mjs';
+import { chmod, mkdtemp, rm, unlink } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { chromium, errors } from 'playwright';
 
 const LIMIT = 96_000;
 const socketPath = '/browser/browser.sock';
 const readResources = new Set(['document', 'script', 'stylesheet', 'fetch', 'xhr']);
+const visualResources = new Set(['image', 'font', 'media']);
 
-export function allowsRead(method, resource, render) {
+export function allowsRead(method, resource, render, capture = false) {
     return (method === 'GET' || method === 'HEAD') &&
-        (resource === 'document' || (render && readResources.has(resource)));
+        (resource === 'document' || (render && readResources.has(resource)) ||
+            (capture && visualResources.has(resource)));
 }
 
 export function readableUrl(value) {
@@ -123,76 +128,106 @@ export async function search(page, query) {
         'The search providers did not return public results.');
 }
 
-async function operate(browser, route, data) {
-    const render = route === '/browse';
-    const context = await browser.newContext({javaScriptEnabled: render, serviceWorkers: 'block', acceptDownloads: false});
-    context.setDefaultTimeout(8000);
-    context.setDefaultNavigationTimeout(12000);
+export async function operate(browser, route, data, signal) {
+    signal?.throwIfAborted();
+    const recording = route === '/record' ? recordingOptions(data) : null;
+    const capture = captureTypes.has(route) ? {url: readableUrl(data?.url), recording} : null;
+    const directory = recording ? await mkdtemp(join(tmpdir(), 'tinybot-recording-')) : null;
+    try {
+        const context = await browser.newContext({
+            javaScriptEnabled: route === '/browse' || capture !== null,
+            serviceWorkers: 'block', acceptDownloads: false,
+            ...(capture ? {viewport: captureViewport, deviceScaleFactor: 1} : {}),
+            ...(directory ? {recordVideo: {dir: directory, size: captureViewport}} : {}),
+        });
+        const closeOnAbort = () => void context.close().catch(() => {});
+        signal?.addEventListener('abort', closeOnAbort, {once: true});
+        let result;
+        try {
+            signal?.throwIfAborted();
+            context.setDefaultTimeout(8000);
+            context.setDefaultNavigationTimeout(12000);
+            result = await operatePage(context, route, data, capture, signal);
+        } finally {
+            signal?.removeEventListener('abort', closeOnAbort);
+            await context.close();
+        }
+        return directory ? await encodeRecording(result, directory, recording, signal) : result;
+    } finally {
+        if (directory) await rm(directory, {recursive: true, force: true});
+    }
+}
+
+async function operatePage(context, route, data, capture, signal) {
+    const render = route === '/browse' || capture !== null;
     let permit;
     let posted = false;
     let postStatus;
-    try {
-        const page = await context.newPage();
-        await context.routeWebSocket('**/*', socket => socket.close());
-        await context.route('**/*', async intercepted => {
-            const request = intercepted.request();
-            let url;
-            try { url = render ? readableUrl(request.url()) : publicUrl(request.url()); }
-            catch { await intercepted.abort(); return; }
-            if (permit) {
-                if (!posted && request.method() === 'POST' && request.isNavigationRequest() && url.href === permit) {
-                    posted = true;
-                    try {
-                        const response = await intercepted.fetch({maxRedirects: 0, timeout: 8000});
-                        postStatus = response.status();
-                        await response.dispose();
-                        await intercepted.fulfill({status: 204});
-                    } catch { await intercepted.abort(); }
-                } else await intercepted.abort();
-                return;
-            }
-            if (allowsRead(request.method(), request.resourceType(), render)) {
-                await intercepted.continue();
+    const page = await context.newPage();
+    if (capture) context.on('page', popup => void popup.close().catch(() => {}));
+    await context.routeWebSocket('**/*', socket => socket.close());
+    await context.route('**/*', async intercepted => {
+        const request = intercepted.request();
+        let url;
+        try { url = render ? readableUrl(request.url()) : publicUrl(request.url()); }
+        catch { await intercepted.abort(); return; }
+        if (permit) {
+            if (!posted && request.method() === 'POST' && request.isNavigationRequest() && url.href === permit) {
+                posted = true;
+                try {
+                    const response = await intercepted.fetch({maxRedirects: 0, timeout: 8000});
+                    postStatus = response.status();
+                    await response.dispose();
+                    await intercepted.fulfill({status: 204});
+                } catch { await intercepted.abort(); }
             } else await intercepted.abort();
-        });
-        if (route === '/search') return await search(page, data.query);
-        if (route === '/browse') {
-            await visit(page, readableUrl(data.url), {waitUntil: 'commit', validate: readableUrl});
-            await page.waitForLoadState('domcontentloaded');
-            try { await page.waitForLoadState('load', {timeout: 3000}); }
-            catch (error) { if (!(error instanceof errors.TimeoutError)) throw error; }
-            const content = await page.locator('body').evaluate(body => ({
-                title: document.title.slice(0, 200),
-                text: body.innerText.slice(0, 6900),
-                links: [...body.querySelectorAll('a[href]')].slice(0, 60)
-                    .filter(anchor => typeof anchor.href === 'string')
-                    .map(anchor => ({text: anchor.textContent.trim().slice(0, 90), url: anchor.href.slice(0, 500)}))
-                    .filter(anchor => anchor.text && anchor.url.startsWith('https://')).slice(0, 16),
-            }));
-            return {url: readableUrl(page.url()).href, ...content};
+            return;
         }
-        if (route === '/inspect') {
-            const index = data.index ?? 0;
-            requireInput(Number.isInteger(index) && index >= 0 && index <= 40, 'Choose a valid form position.');
-            await visit(page, publicUrl(data.url));
-            return describe(page, index);
+        if (allowsRead(request.method(), request.resourceType(), render, capture)) {
+            await intercepted.continue();
+        } else await intercepted.abort();
+    });
+    if (route === '/search') return await search(page, data.query);
+    if (render) {
+        await visit(page, capture?.url ?? readableUrl(data.url), {waitUntil: 'commit', validate: readableUrl});
+        await page.waitForLoadState('domcontentloaded');
+        try { await page.waitForLoadState('load', {timeout: 3000}); }
+        catch (error) { if (!(error instanceof errors.TimeoutError)) throw error; }
+        if (capture) {
+            readableUrl(page.url());
+            const result = capture.recording ? await recordPage(page, capture.recording, signal) : await screenshot(page);
+            readableUrl(page.url());
+            return result;
         }
-        requireInput(route === '/submit' && data.form, 'Invalid browser operation.');
-        const confirmed = data.form;
-        await visit(page, publicUrl(confirmed.page));
-        const observed = await populate(page, confirmed, data.values);
-        requireInput(page.url() === observed.page, 'The site navigated away from the confirmed form.');
-        permit = observed.destination;
-        const response = page.waitForResponse(r => r.request().method() === 'POST' && r.url() === permit);
-        // Keep the internal promise observed even if a failed navigation detaches the evaluator.
-        const submit = page.evaluate(index => HTMLFormElement.prototype.submit.call(document.forms[index]), observed.index);
-        await Promise.all([response, submit.catch(() => undefined)]);
-        requireInput(posted && postStatus >= 200 && postStatus < 400,
-            'The site did not confirm the submission request.');
-        return {submitted: true, http_status: postStatus};
-    } finally {
-        await context.close();
+        const content = await page.locator('body').evaluate(body => ({
+            title: document.title.slice(0, 200),
+            text: body.innerText.slice(0, 6900),
+            links: [...body.querySelectorAll('a[href]')].slice(0, 60)
+                .filter(anchor => typeof anchor.href === 'string')
+                .map(anchor => ({text: anchor.textContent.trim().slice(0, 90), url: anchor.href.slice(0, 500)}))
+                .filter(anchor => anchor.text && anchor.url.startsWith('https://')).slice(0, 16),
+        }));
+        return {url: readableUrl(page.url()).href, ...content};
     }
+    if (route === '/inspect') {
+        const index = data.index ?? 0;
+        requireInput(Number.isInteger(index) && index >= 0 && index <= 40, 'Choose a valid form position.');
+        await visit(page, publicUrl(data.url));
+        return describe(page, index);
+    }
+    requireInput(route === '/submit' && data.form, 'Invalid browser operation.');
+    const confirmed = data.form;
+    await visit(page, publicUrl(confirmed.page));
+    const observed = await populate(page, confirmed, data.values);
+    requireInput(page.url() === observed.page, 'The site navigated away from the confirmed form.');
+    permit = observed.destination;
+    const response = page.waitForResponse(r => r.request().method() === 'POST' && r.url() === permit);
+    // Keep the internal promise observed even if a failed navigation detaches the evaluator.
+    const submit = page.evaluate(index => HTMLFormElement.prototype.submit.call(document.forms[index]), observed.index);
+    await Promise.all([response, submit.catch(() => undefined)]);
+    requireInput(posted && postStatus >= 200 && postStatus < 400,
+        'The site did not confirm the submission request.');
+    return {submitted: true, http_status: postStatus};
 }
 
 async function readJson(request) {
@@ -224,16 +259,29 @@ async function serve() {
             const release = process.env.TINYBOT_RELEASE_SHA;
             return json(200, {ok: true, release: /^[0-9a-f]{40}$/.test(release ?? '') ? release : null});
         }
-        if (request.method !== 'POST' || !['/browse', '/inspect', '/submit', '/search'].includes(request.url)) {
+        const contentType = captureTypes.get(request.url);
+        if (request.method !== 'POST' || (!contentType && !['/browse', '/inspect', '/submit', '/search'].includes(request.url))) {
             return json(404, {error: 'Unknown browser operation.'});
         }
         if (active >= 4) return json(503, {error: 'Browser worker is busy.'});
         active += 1;
+        const disconnected = new AbortController();
+        response.once('close', () => disconnected.abort());
         try {
-            json(200, await operate(browser, request.url, await readJson(request)));
+            const signal = contentType ? AbortSignal.any([disconnected.signal, AbortSignal.timeout(35000)]) : undefined;
+            const result = await operate(browser, request.url, await readJson(request), signal);
+            if (response.destroyed) return;
+            if (contentType) {
+                response.writeHead(200, {'Content-Type': contentType, 'Cache-Control': 'no-store', 'Content-Length': result.length});
+                response.end(result);
+            } else {
+                json(200, result);
+            }
         } catch (error) {
             // Playwright errors may include request metadata. Keep them inside the worker.
-            json(422, {error: error instanceof InputError ? error.message : 'Browser operation did not finish.'});
+            if (!response.destroyed && !response.headersSent) {
+                json(422, {error: error instanceof InputError ? error.message : 'Browser operation did not finish.'});
+            }
         } finally {
             active -= 1;
         }

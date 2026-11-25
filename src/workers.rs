@@ -3,6 +3,8 @@ use anyhow::{Context, Result, anyhow, ensure};
 use serde_json::{Value, json};
 use std::time::Duration;
 
+const MAX_BROWSER_MEDIA_BYTES: usize = 5 * 1024 * 1024;
+
 #[derive(Clone)]
 pub struct Workers {
     pub browser: String,
@@ -16,6 +18,31 @@ impl Workers {
 
     pub async fn browser(&self, route: &str, body: &Value) -> Result<Value> {
         call(&self.browser, route, body).await
+    }
+
+    pub(crate) async fn browser_capture(
+        &self,
+        route: &str,
+        mime: &str,
+        body: &Value,
+    ) -> Result<Vec<u8>> {
+        let response = request(&self.browser, route, body).await?;
+        if !response.status().is_success() {
+            let error: Value = serde_json::from_slice(&net::body(response, 4096).await?)?;
+            return Err(anyhow!(
+                "{}",
+                error["error"].as_str().unwrap_or("browser capture failed")
+            ));
+        }
+        ensure!(
+            response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                == Some(mime),
+            "browser did not return the requested capture format"
+        );
+        net::body(response, MAX_BROWSER_MEDIA_BYTES).await
     }
 
     pub async fn web_search(&self, query: &str) -> Result<Vec<Value>> {
@@ -103,8 +130,21 @@ pub(crate) fn valid_release(value: &str) -> bool {
 }
 
 pub(crate) async fn call(socket: &str, route: &str, body: &Value) -> Result<Value> {
+    let response = request(socket, route, body).await?;
+    let status = response.status();
+    let result: Value = serde_json::from_slice(&net::body(response, 900_000).await?)?;
+    ensure!(
+        status.is_success(),
+        "{}",
+        result["error"].as_str().unwrap_or("worker request failed")
+    );
+    Ok(result)
+}
+
+async fn request(socket: &str, route: &str, body: &Value) -> Result<reqwest::Response> {
     let client = reqwest::Client::builder()
         .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(40));
     #[cfg(unix)]
     let client = client.unix_socket(socket);
@@ -112,7 +152,7 @@ pub(crate) async fn call(socket: &str, route: &str, body: &Value) -> Result<Valu
     let _ = socket;
     #[cfg(not(unix))]
     let client = client;
-    let response = client
+    client
         .build()?
         .post(format!("http://localhost/{route}"))
         .json(body)
@@ -124,13 +164,5 @@ pub(crate) async fn call(socket: &str, route: &str, body: &Value) -> Result<Valu
             } else {
                 anyhow!("worker unavailable")
             }
-        })?;
-    let status = response.status();
-    let result: Value = serde_json::from_slice(&crate::net::body(response, 900_000).await?)?;
-    ensure!(
-        status.is_success(),
-        "{}",
-        result["error"].as_str().unwrap_or("worker request failed")
-    );
-    Ok(result)
+        })
 }
