@@ -288,7 +288,7 @@ impl ModelProvider for ResearchFinal {
             );
         }
         assert!(input.contains("Solitaire"));
-        Ok("invalid model response".into())
+        Ok(r#"{"text":"Incomplete reply"#.into())
     }
 }
 
@@ -350,8 +350,9 @@ struct SharedPageRecovery(AtomicUsize);
 
 #[async_trait]
 impl ModelProvider for SharedPageRecovery {
-    async fn complete(&self, _: &str, _: &str) -> Result<String> {
-        panic!("finishing an opened page should not trigger a context summary");
+    async fn complete(&self, instructions: &str, _: &str) -> Result<String> {
+        assert!(instructions.starts_with("Summarize only durable task context"));
+        Ok(json!({"summary":"The user asked to inspect the shared cart."}).to_string())
     }
 
     async fn complete_turn(

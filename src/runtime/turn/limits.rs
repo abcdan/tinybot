@@ -178,40 +178,8 @@ impl Limit {
 }
 
 fn finish_step(response: &str, reaction_queued: bool) -> Result<Step> {
-    let text = match parse_json_reply::<Step>(response) {
-        Ok(Step::Reply { text, .. }) => text,
-        Ok(_) => return Err(ProviderFailure::Incomplete.into()),
-        Err(_) => match parse_json_reply::<lookup::FinalReply>(response) {
-            Ok(reply) => reply.text,
-            Err(_) => {
-                let text = response.trim();
-                // A broken tool or reply envelope is not a user-facing answer.
-                let link_led = text
-                    .strip_prefix('[')
-                    .and_then(|rest| rest.split_once("]("))
-                    .and_then(|(_, target)| target.split_once(')'))
-                    .is_some_and(|(url, _)| {
-                        url.starts_with("https://") && crate::net::website(url).is_ok()
-                    });
-                ensure!(
-                    !text.starts_with(['{', '"', '<'])
-                        && (!text.starts_with('[') || link_led)
-                        && !text.starts_with("```")
-                        && !matches!(text, "null" | "true" | "false")
-                        && text.chars().any(char::is_alphanumeric)
-                        && text.len() <= 8_000,
-                    ProviderFailure::Incomplete
-                );
-                text.to_owned()
-            }
-        },
-    };
-    ensure!(
-        !text.trim().is_empty() || reaction_queued,
-        ProviderFailure::Incomplete
-    );
     Ok(Step::Reply {
-        text,
+        text: lookup::reply_text(response, reaction_queued)?,
         suggested_replies: Value::Null,
     })
 }

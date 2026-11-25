@@ -17,8 +17,10 @@ impl ModelProvider for QuickFixture {
     }
 
     async fn complete_brief_reply(&self, instructions: &str, input: &str) -> Result<String> {
-        assert_eq!(serde_json::from_str::<Value>(input)?["request"], QUESTION);
-        assert!(!input.contains("Earlier unrelated detail"));
+        assert_eq!(
+            serde_json::from_str::<Value>(input)?,
+            json!({"request":QUESTION})
+        );
         self.calls
             .lock()
             .unwrap()
@@ -75,6 +77,12 @@ async fn a_private_standalone_question_uses_one_smaller_call_for_the_same_answer
     let mut bytes = Vec::new();
     for telegram in [false, true] {
         let db = fixture().await;
+        sqlx::query(
+            "UPDATE users SET display_name='Private User',chief_name='Private Chief' WHERE id='1'",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
         let fixture = model(r#"{"kind":"reply","text":"Yeat is een Amerikaanse rapper."}"#);
         let app = app_with_model(&db, fixture.clone());
         previous_conversation(&db).await;
@@ -199,4 +207,43 @@ async fn a_compact_provider_timeout_uses_the_configured_backup_without_retrying_
     assert!(primary_calls[0].0);
     assert_eq!(backup_calls.len(), 1);
     assert!(!backup_calls[0].0);
+}
+
+#[tokio::test]
+async fn an_explicit_dutch_task_overview_needs_zero_model_calls_in_an_existing_chat() {
+    let db = fixture().await;
+    let model = model("unexpected brief call");
+    let app = app_with_model(&db, model.clone());
+    previous_conversation(&db).await;
+    sqlx::query(
+        "INSERT INTO tasks(id,user,title,state,updated) VALUES
+        ('one','1','Prepare fixture slides','waiting',10),
+        ('done','1','Completed fixture report','completed',11),
+        ('private','2','Another account’s private task','idle',12)",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    store::ingest_telegram(
+        &db,
+        "1",
+        2,
+        "1",
+        "Thanks, daarnaast, welke taken staan er nog open?",
+        27,
+    )
+    .await
+    .unwrap();
+    let task = store::claim(&db).await.unwrap().unwrap();
+    runtime::work(&app, &task).await.unwrap();
+    let reply = store::claim_outbox(&db).await.unwrap().unwrap();
+    assert!(reply.body.starts_with("Openstaande taken"));
+    assert!(
+        reply
+            .body
+            .contains("Prepare fixture slides · Heeft je aandacht nodig")
+    );
+    assert!(!reply.body.contains("Completed fixture report"));
+    assert!(!reply.body.contains("Another account"));
+    assert!(model.calls.lock().unwrap().is_empty());
 }

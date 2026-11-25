@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 
 mod limits;
 mod quick;
+mod task_list;
 
 const ACTIVE_TURN_BUDGET: Duration = Duration::from_secs(8 * 60);
 
