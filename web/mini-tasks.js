@@ -169,6 +169,21 @@ export function tasks(state, requestCard, openModel) {
         return buttons;
     }
 
+    function checklist(steps) {
+        const item = card('Task plan');
+        const list = node('ol');
+        for (const step of steps) {
+            const entry = node('li');
+            const completed = step.completed_at != null;
+            entry.append(node('strong', step.title), document.createTextNode(' · '),
+                node('span', completed ? 'Verified' : 'Planned', 'meta'));
+            if (step.checkpoint) entry.append(node('p', step.checkpoint));
+            list.append(entry);
+        }
+        item.append(list);
+        return item;
+    }
+
     async function detail(id) {
         const loading = node('p', 'Loading task…', 'meta');
         loading.setAttribute('role', 'status');
@@ -200,6 +215,7 @@ export function tasks(state, requestCard, openModel) {
             if (buttons.length) status.append(row(...buttons));
             body.replaceChildren(status);
             if (requests.length) body.append(node('h2', 'Needs you'), ...requests.map(request => review(request)));
+            if (data.plan?.length) body.append(checklist(data.plan));
             if (data.last_confirmed) body.append(card('Last confirmed step', data.last_confirmed));
             if (reply) {
                 const latest = card('Latest reply');
