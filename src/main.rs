@@ -21,9 +21,12 @@ mod workers;
 use anyhow::{Context, Result, ensure};
 use sqlx::SqlitePool;
 use std::{env, net::SocketAddr, path::Path, sync::Arc, time::Duration};
+use tokio::sync::Notify;
 
 pub struct App {
     db: SqlitePool,
+    task_ready: Notify,
+    delivery_ready: Notify,
     vault: security::Vault,
     token: String,
     origin: String,
@@ -34,6 +37,13 @@ pub struct App {
     forms: forms::Forms,
     workers: workers::Workers,
     tools: Vec<Box<dyn runtime::Tool>>,
+}
+
+impl App {
+    fn wake_queues(&self) {
+        self.task_ready.notify_one();
+        self.delivery_ready.notify_one();
+    }
 }
 
 fn secret(name: &str) -> Result<String> {
@@ -144,6 +154,8 @@ async fn main() -> Result<()> {
         .filter(|m| !m.is_empty());
     let app = Arc::new(App {
         db: db.clone(),
+        task_ready: Notify::new(),
+        delivery_ready: Notify::new(),
         vault: vault.clone(),
         token: token.clone(),
         origin: origin_string.clone(),

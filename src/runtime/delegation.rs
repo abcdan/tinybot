@@ -327,6 +327,8 @@ mod tests {
         let origin = url::Url::parse("https://tinybot.example").unwrap();
         let app = App {
             db: db.clone(),
+            task_ready: Default::default(),
+            delivery_ready: Default::default(),
             vault: vault.clone(),
             token: "unused".into(),
             operator: "1".into(),

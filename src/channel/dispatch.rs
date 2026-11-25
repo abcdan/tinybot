@@ -66,6 +66,7 @@ pub async fn listen(
                         if adapter.answer_widget(&query.id, &data).await.is_err() {
                             tracing::debug!("widget answer expired or could not be delivered");
                         }
+                        continue;
                     }
                     Inbound::Callback(query) => {
                         if let Some((user, outbox, message)) = query.listen() {
@@ -75,6 +76,9 @@ pub async fn listen(
                                     db, &app.vault, &user, outbox, message,
                                 )
                                 .await?;
+                            if queued {
+                                app.delivery_ready.notify_one();
+                            }
                             let label = if queued {
                                 "Preparing your voice reply."
                             } else if available {
@@ -84,8 +88,9 @@ pub async fn listen(
                             };
                             let _ = adapter.answer_callback(&query.id, label).await;
                         } else {
-                            handle_callback(db, &*adapter, &query).await?;
+                            handle_callback(db, &*adapter, &query, || app.wake_queues()).await?;
                         }
+                        continue;
                     }
                     Inbound::Reaction {
                         external_id,
@@ -104,6 +109,7 @@ pub async fn listen(
                         .await?;
                     }
                 }
+                app.wake_queues();
             }
             Ok::<_, anyhow::Error>(next)
         }
@@ -180,8 +186,10 @@ pub(super) async fn handle_callback(
     db: &SqlitePool,
     adapter: &dyn ChannelAdapter,
     query: &callback::Query,
+    wake_queues: impl FnOnce(),
 ) -> Result<()> {
     let answer = callback::answer(db, query).await?;
+    wake_queues();
     if adapter
         .answer_callback(&query.id, answer.text)
         .await
@@ -218,6 +226,7 @@ pub async fn outbox(app: Arc<crate::App>, adapter: Arc<dyn ChannelAdapter>) {
                     tracing::warn!("an outbound delivery worker stopped unexpectedly");
                 }
             },
+            _ = app.delivery_ready.notified(), if jobs.len() < DELIVERY_WORKERS => {},
             _ = tokio::time::sleep(Duration::from_millis(500)), if jobs.len() < DELIVERY_WORKERS => {},
         }
     }
