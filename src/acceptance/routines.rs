@@ -9,6 +9,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct RoutineChief;
 
@@ -282,4 +283,92 @@ async fn a_signed_webhook_queues_one_run_and_cannot_replay_after_revision_change
             .status(),
         StatusCode::UNAUTHORIZED
     );
+}
+
+struct ChangeModel(AtomicUsize);
+
+#[async_trait]
+impl ModelProvider for ChangeModel {
+    async fn complete(&self, instructions: &str, input: &str) -> Result<String> {
+        let data: Value = serde_json::from_str(input)?;
+        if instructions.starts_with("Compare these two results") {
+            assert_eq!(data["previous"], "The release is Friday.");
+            let changed = data["current"].as_str().unwrap().contains("Monday");
+            return Ok(json!({"changed":changed}).to_string());
+        }
+        if data["routine"]["current"].is_object() {
+            return Ok(json!({"kind":"tool","name":"record_routine_step","args":{"index":0,"result":"Confirmed source"}}).to_string());
+        }
+        let replies = [
+            "The release is Friday.",
+            "Friday is the release date.",
+            "The release is Monday.",
+        ];
+        let text = replies[self.0.fetch_add(1, Ordering::SeqCst)];
+        Ok(json!({"kind":"reply","text":text}).to_string())
+    }
+}
+
+#[tokio::test]
+async fn a_change_only_routine_compares_against_the_last_delivered_result() {
+    let db = fixture().await;
+    let app = app_with_model(&db, Arc::new(ChangeModel(AtomicUsize::new(0))));
+    let time = now();
+    let schedule = schedules::save_routine(
+        &db,
+        "1",
+        schedules::RoutineRequest {
+            title: "Release watch".into(),
+            input: "Report the release date.".into(),
+            at: None,
+            cron: Some("*/5 * * * *".into()),
+            steps: vec![schedules::RoutineStep {
+                instruction: "Review the source.".into(),
+                agent: None,
+            }],
+        },
+        None,
+        time,
+        None,
+    )
+    .await
+    .unwrap();
+    let policy: schedules::Policy = serde_json::from_value(json!({
+        "catch_up":"coalesce","notify_changes":true,
+    }))
+    .unwrap();
+    schedules::set_policy(&db, "1", &schedule.id, 0, policy)
+        .await
+        .unwrap();
+
+    for (index, expected) in [
+        Some("The release is Friday."),
+        None,
+        Some("The release is Monday."),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let due = schedule.next_run.unwrap() + i64::try_from(index).unwrap() * 300;
+        schedules::dispatch(&db, due).await.unwrap();
+        let task = store::claim(&db).await.unwrap().unwrap();
+        runtime::work(&app, &task).await.unwrap();
+        let sent = store::claim_outbox(&db).await.unwrap();
+        assert_eq!(sent.as_ref().map(|item| item.body.as_str()), expected);
+        if let Some(item) = sent {
+            sqlx::query("UPDATE outbox SET state='sent',body='' WHERE id=?")
+                .bind(item.id)
+                .execute(&db)
+                .await
+                .unwrap();
+        } else {
+            let state: String =
+                sqlx::query_scalar("SELECT notification_state FROM schedule_runs WHERE task=?")
+                    .bind(task.id)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            assert_eq!(state, "unchanged");
+        }
+    }
 }

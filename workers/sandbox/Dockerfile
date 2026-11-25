@@ -28,12 +28,13 @@ RUN python /opt/tinybot/wasm_runtime.py /bundle/python.wasm /bundle/python.cwasm
 
 FROM python:3.14-slim-bookworm
 ARG WASMTIME_VERSION
+ARG TINYBOT_RELEASE_SHA
 RUN pip install --no-cache-dir "wasmtime==${WASMTIME_VERSION}" \
     && mkdir -p /sandbox /work \
     && chown 1000:1000 /sandbox /work
 COPY --from=build /bundle /opt/python-wasi
 COPY server.py wasm_runtime.py /opt/tinybot/
-ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONDONTWRITEBYTECODE=1 TINYBOT_RELEASE_SHA=${TINYBOT_RELEASE_SHA}
 USER 1000:1000
 RUN python /opt/tinybot/server.py --self-test
 CMD ["python", "/opt/tinybot/server.py"]

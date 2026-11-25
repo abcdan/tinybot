@@ -220,7 +220,10 @@ async function serve() {
             response.writeHead(status, {'Content-Type': 'application/json', 'Cache-Control': 'no-store'});
             response.end(JSON.stringify(data));
         };
-        if (request.method === 'GET' && request.url === '/health') return json(200, {ok: true});
+        if (request.method === 'GET' && request.url === '/health') {
+            const release = process.env.TINYBOT_RELEASE_SHA;
+            return json(200, {ok: true, release: /^[0-9a-f]{40}$/.test(release ?? '') ? release : null});
+        }
         if (request.method !== 'POST' || !['/browse', '/inspect', '/submit', '/search'].includes(request.url)) {
             return json(404, {error: 'Unknown browser operation.'});
         }

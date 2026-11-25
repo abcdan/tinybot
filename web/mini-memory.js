@@ -1,5 +1,6 @@
 import { action, button, card, field, form, node, row } from './mini-ui.js';
 import { api, content, show, telegram } from './mini.js';
+import { projectSpaces } from './mini-projects.js';
 
 let selectedScope = 'private';
 
@@ -26,7 +27,7 @@ export function memories(state) {
     const panel = node('div');
     const settings = card('Memory');
     settings.append(picker, panel);
-    content.append(settings);
+    content.append(settings, projectSpaces(state));
     if (state.shared_memory_available) {
         const shared = node('div');
         content.append(shared);

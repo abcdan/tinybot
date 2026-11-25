@@ -1,7 +1,7 @@
 use super::{state, text};
 use crate::{
     App,
-    store::{self, task_views},
+    store::{self, docblock_saves, task_views},
 };
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -43,7 +43,53 @@ pub(super) async fn detail(app: &App, user: &str, data: &Value) -> Result<Value>
     let mut view = serde_json::to_value(detail)?;
     view["requests"] = json!(requests);
     view["files"] = json!(store::artifacts::list(&app.db, user, task_id).await?);
+    if docblock_saves::available(&app.db, user, task_id).await? && !view["reply"].is_null() {
+        view["docblock_saves"] = json!(docblock_saves::list(&app.db, user, task_id).await?);
+    }
     Ok(view)
+}
+
+pub(super) async fn save_result(app: &App, user: &str, data: &Value) -> Result<Value> {
+    let (task, revision) = task_revision(data)?;
+    let event = data["event"]
+        .as_i64()
+        .filter(|id| *id > 0)
+        .context("invalid task result")?;
+    let source = docblock_saves::Source {
+        task,
+        revision,
+        event,
+    };
+    ensure!(
+        docblock_saves::available(&app.db, user, task).await?,
+        "task unavailable"
+    );
+    let connector = app.mcp.owned(user, text(data, "id", 64)?).await?;
+    let workspace = text(data, "workspace", 36)?;
+    uuid::Uuid::parse_str(workspace)?;
+    let title = text(data, "title", 160)?.trim();
+    ensure!(
+        !title.is_empty() && !title.chars().any(char::is_control),
+        "provide a note title"
+    );
+    let folder = data["folder"]
+        .as_str()
+        .filter(|path| path.len() <= 240)
+        .context("invalid Docblock folder")?;
+    let folders = app.mcp.docblock_folders(&connector, workspace).await?;
+    ensure!(
+        folder.is_empty() || folders.iter().any(|name| name == folder),
+        "The selected Docblock folder is unavailable."
+    );
+    let destination = docblock_saves::Destination {
+        connector: &connector,
+        workspace,
+        folder,
+        title,
+    };
+    Ok(serde_json::to_value(
+        docblock_saves::create(&app.db, user, &source, &destination).await?,
+    )?)
 }
 
 pub(super) async fn download(app: &App, user: &str, data: &Value) -> Result<Value> {

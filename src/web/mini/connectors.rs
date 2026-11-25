@@ -46,6 +46,13 @@ pub(super) async fn docblock_workspaces(app: &App, user: &str, data: &Value) -> 
     app.mcp.docblock_workspaces(&connector).await
 }
 
+pub(super) async fn docblock_folders(app: &App, user: &str, data: &Value) -> Result<Value> {
+    let connector = app.mcp.owned(user, text(data, "id", 64)?).await?;
+    let workspace = text(data, "workspace", 36)?;
+    uuid::Uuid::parse_str(workspace)?;
+    Ok(json!({"folders":app.mcp.docblock_folders(&connector, workspace).await?}))
+}
+
 pub(super) async fn docblock_shares(app: &App, user: &str, data: &Value) -> Result<Value> {
     let connector = app.mcp.owned(user, text(data, "id", 64)?).await?;
     let workspace = text(data, "workspace", 36)?;

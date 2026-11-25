@@ -7,10 +7,19 @@ use serde_json::{Value, json};
 /// Runs a pending approval, if present, and reports whether the turn can continue.
 pub(super) async fn resume_approval(ctx: &ToolContext<'_>) -> Result<bool> {
     let app = ctx.app;
+    let docblock_save = store::docblock_saves::dedicated(&app.db, ctx.task).await?;
     let Some(pending) = store::claim_approval(&app.db, ctx.task).await? else {
+        if docblock_save {
+            store::docblock_saves::dismiss(&app.db, ctx.task).await?;
+            return Ok(false);
+        }
         return Ok(true);
     };
     let payload: Value = serde_json::from_str(&pending.payload)?;
+    if docblock_save {
+        super::docblock_save::resume(ctx, &pending, &payload).await?;
+        return Ok(false);
+    }
     let (result, announce) = match pending.kind.as_str() {
         "approve" if payload["calendar_event"] == true => {
             super::calendar::resume(ctx, &pending, &payload).await?;
@@ -65,7 +74,7 @@ pub(super) async fn resume_approval(ctx: &ToolContext<'_>) -> Result<bool> {
     store::current(&app.db, ctx.task).await
 }
 
-async fn execute_approved(ctx: &ToolContext<'_>, payload: Call) -> Result<Outcome> {
+pub(super) async fn execute_approved(ctx: &ToolContext<'_>, payload: Call) -> Result<Outcome> {
     ensure!(
         ctx.owner && ctx.still_allows(&payload.name).await?,
         "approval access changed"
