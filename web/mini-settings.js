@@ -68,6 +68,14 @@ export function schedules(state) {
                 {instruction: 'Write a short digest with source links, dates, and why each item matters.'},
             ],
         }), true),
+        button('Meeting decisions', () => choose({
+            title: 'Meeting decisions',
+            instructions: 'Use the meeting notes I provide. Ask for them if they are missing.',
+            steps: [
+                {instruction: 'Extract decisions, owners, and due dates stated in the notes.'},
+                {instruction: 'Draft a Markdown note with decisions and action items.'},
+            ],
+        }), true),
     ), editor);
     content.append(zone, templates, node('h2', 'Reminders, scheduled tasks, and routines'));
     if (!state.schedules.length) content.append(card(null, 'No schedules yet.'));
@@ -125,7 +133,8 @@ function scheduleCard(state, schedule) {
             const labels = {deferred: 'Deferred', skipped_overlap: 'Skipped · previous run still open',
                 skipped_missed: 'Skipped · missed occurrence', invalid: 'Invalid schedule', superseded: 'Schedule changed'};
             const delivery = {sent: 'Delivered', queued: 'Delivery queued', sending: 'Sending', failed: 'Delivery failed', uncertain: 'Delivery unconfirmed'};
-            const result = labels[occurrence.outcome] ?? delivery[occurrence.delivery]
+            const result = occurrence.notification_state === 'unchanged' ? 'Unchanged · no message sent'
+                : labels[occurrence.outcome] ?? delivery[occurrence.delivery]
                 ?? status[occurrence.task_state] ?? occurrence.task_state ?? 'Run queued';
             const entry = card(scheduleTime(occurrence.due_at, schedule.time_zone), result);
             if (occurrence.delayed_until) {
@@ -141,7 +150,7 @@ function scheduleCard(state, schedule) {
             const details = [
                 scheduleTime(run.started_at ?? run.updated, schedule.time_zone),
                 run.preview ? 'Dry run' : type[run.trigger],
-                status[run.state] ?? run.state,
+                run.notification_state === 'unchanged' ? 'Unchanged · no message sent' : status[run.state] ?? run.state,
             ].filter(Boolean).join(' · ');
             const entry = card(run.title, details);
             if (!run.preview && run.state !== 'cancelled') entry.append(action('Continue in chat', 'select-task', {task: run.task}, 'Send your next message in Telegram.', true));
@@ -191,13 +200,19 @@ function schedulePolicy(schedule) {
         const [hour, minute] = value.split(':').map(Number);
         return hour * 60 + minute;
     };
-    return form('Save timing policy', [
+    const fields = [
         field('catch_up', 'After downtime', {choices: [['coalesce', 'Run once'], ['skip', 'Skip missed recurring runs']], value: schedule.catch_up ?? 'coalesce'}),
         field('quiet_start', 'Quiet hours start', {type: 'time', required: false, value: localTime(schedule.quiet_start), hint: schedule.time_zone}),
         field('quiet_end', 'Quiet hours end', {type: 'time', required: false, value: localTime(schedule.quiet_end)}),
-    ], async data => {
+    ];
+    if (schedule.kind !== 'reminder') fields.push(field('notify_changes', 'Automation notifications', {
+        choices: [['0', 'Every finished run'], ['1', 'Only when the result changes']],
+        value: schedule.notify_changes ? '1' : '0',
+    }));
+    return form('Save timing policy', fields, async data => {
         await api('schedule-policy', {id: schedule.id, revision: schedule.revision,
-            policy: {catch_up: data.catch_up, quiet_start: minutes(data.quiet_start), quiet_end: minutes(data.quiet_end)}});
+            policy: {catch_up: data.catch_up, quiet_start: minutes(data.quiet_start), quiet_end: minutes(data.quiet_end),
+                notify_changes: data.notify_changes === '1'}});
         await refresh();
         show('Timing policy saved.');
     });

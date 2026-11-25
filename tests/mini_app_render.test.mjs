@@ -67,7 +67,7 @@ test('schedules edit instructions, pause and run a saved routine', async () => {
             }
             if (action === 'schedule-policy') {
                 assert.equal(data.revision, 2);
-                assert.deepEqual(data.policy, {catch_up: 'skip', quiet_start: 1320, quiet_end: 420});
+                assert.deepEqual(data.policy, {catch_up: 'skip', quiet_start: 1320, quiet_end: 420, notify_changes: true});
                 schedule.revision++;
                 return {ok: true};
             }
@@ -96,6 +96,7 @@ test('schedules edit instructions, pause and run a saved routine', async () => {
         await page.getByLabel('After downtime').selectOption('skip');
         await page.getByLabel('Quiet hours start').fill('22:00');
         await page.getByLabel('Quiet hours end').fill('07:00');
+        await page.getByLabel('Automation notifications').selectOption('1');
         await page.getByRole('button', {name: 'Save timing policy'}).click();
         await page.getByText('Timing policy saved.').waitFor();
         await page.getByText('Dry run', {exact: true}).click();
