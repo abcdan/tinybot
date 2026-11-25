@@ -25,6 +25,7 @@ mod mcp_approvals;
 mod model_backup;
 mod model_settings;
 mod output_limits;
+mod quick_chat;
 mod routines;
 mod self_settings;
 mod telegram_workflows;
