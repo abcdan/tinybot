@@ -1,5 +1,6 @@
 mod acknowledgement;
 mod builtins;
+pub(crate) mod calendar;
 mod completion;
 mod delegation;
 mod effects;
@@ -51,6 +52,7 @@ pub fn tools() -> Vec<Box<dyn Tool>> {
     tools.push(Box::new(settings::ConfigureSettings));
     tools.push(Box::new(completion::CompleteTask));
     tools.extend(task_plan::tools());
+    tools.extend(calendar::definitions());
     tools
 }
 
@@ -170,7 +172,10 @@ fn tool_definitions(tools: &[&Box<dyn Tool>]) -> Vec<ToolDefinition> {
 
 impl ToolContext<'_> {
     fn allows(&self, name: &str) -> bool {
-        if name == "complete_task" || task_plan::is_tool(name) {
+        if name == "complete_task"
+            || task_plan::is_tool(name)
+            || matches!(name, calendar::CALENDAR_READ | calendar::CALENDAR_DRAFT)
+        {
             return self.owner
                 && self.parent_task.is_none()
                 && self.task.agent.is_none()
