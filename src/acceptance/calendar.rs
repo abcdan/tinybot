@@ -40,8 +40,18 @@ impl ModelProvider for CalendarChief {
                 .iter()
                 .any(|tool| tool.name == "calendar_availability")
         );
+        assert_eq!(input["calendar"]["account"], "work");
+        assert_eq!(input["calendar"]["calendar_id"], "team@example.test");
         let last = input["history"].as_array().unwrap().last().unwrap();
         let step = if last["role"] == "user" {
+            json!({"kind":"tool","name":"call_mcp","args":{
+                "connector":"Team calendar","tool":"create-event","arguments":{"summary":TITLE}
+            }})
+        } else if last["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("Use draft_calendar_event")
+        {
             json!({"kind":"tool","name":"calendar_availability","args":{"start":START,"end":END}})
         } else if last["text"].as_str().unwrap().contains("\"verified\":true") {
             assert!(last["text"].as_str().unwrap().contains("\"busy\":[]"));

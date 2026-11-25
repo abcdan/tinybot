@@ -136,8 +136,11 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
         super::openrouter_tools::available(&ctx).await?
     };
     let personal_settings = super::settings::available(&ctx).await?;
-    let calendar_enabled =
-        personal_settings && super::calendar::configured(app, &task.user).await?;
+    let calendar = if personal_settings {
+        super::calendar::model_context(app, &task.user).await?
+    } else {
+        None
+    };
     let can_plan = !paired
         && owner
         && task.agent.is_none()
@@ -152,7 +155,7 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                 && (!matches!(
                     tool.name(),
                     super::calendar::CALENDAR_READ | super::calendar::CALENDAR_DRAFT
-                ) || calendar_enabled)
+                ) || calendar.is_some())
                 && (!task_plan::is_tool(tool.name()) || can_plan)
                 && (!paired
                     || matches!(tool.name(), "send_reply" | "send_card" | "react_to_message"))
@@ -338,10 +341,8 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
         if let Some(progress) = &routine_progress {
             input["routine"] = serde_json::to_value(progress)?;
         }
-        if calendar_enabled {
-            input["calendar"] = json!(
-                "Use calendar_availability and draft_calendar_event for the selected calendar. Resolve relative dates using local_time and time_zone. A draft needs approval. Once the calendar confirms an event was added, do not create it again."
-            );
+        if let Some(calendar) = &calendar {
+            input["calendar"] = calendar.clone();
         }
         if let Some(briefing) = &inbox_briefing {
             input["inbox_briefing"] = serde_json::to_value(briefing)?;

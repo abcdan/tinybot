@@ -324,6 +324,7 @@ impl Tool for Builtin {
                         args["arguments"].is_object(),
                         "MCP arguments must be an object"
                     );
+                    super::calendar::require_review_path(ctx, connector, tool).await?;
                     detail = format!("MCP tool {tool}");
                     if mcp::docblock::is_endpoint(&connector.endpoint)
                         && mcp::docblock::reviewed_write(tool)

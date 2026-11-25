@@ -131,8 +131,37 @@ pub(crate) async fn remove(app: &App, user: &str, connector: &str) -> Result<()>
     Ok(())
 }
 
-pub(super) async fn configured(app: &App, user: &str) -> Result<bool> {
-    Ok(selection(app, user).await?.is_some())
+pub(super) async fn model_context(app: &App, user: &str) -> Result<Option<Value>> {
+    Ok(selection(app, user).await?.map(|profile| {
+        json!({
+            "account":profile.account,
+            "calendar_id":profile.calendar,
+            "workflow":concat!(
+                "Use calendar_availability and draft_calendar_event for this calendar. ",
+                "If the user asked for a different calendar, explain which calendar is selected. ",
+                "Resolve relative dates using local_time and time_zone. A draft needs explicit approval. ",
+                "TinyBot sends its own confirmation after creation. Continue with the remaining work if requested."
+            ),
+        })
+    }))
+}
+
+pub(super) async fn require_review_path(
+    ctx: &ToolContext<'_>,
+    connector: &Connector,
+    tool: &str,
+) -> Result<()> {
+    if tool == CREATE
+        && super::settings::available(ctx).await?
+        && selection(ctx.app, &ctx.task.user)
+            .await?
+            .is_some_and(|profile| profile.connector == connector.id)
+    {
+        anyhow::bail!(
+            "Use draft_calendar_event to open an exact review for the selected calendar."
+        );
+    }
+    Ok(())
 }
 
 async fn connection(ctx: &ToolContext<'_>) -> Result<(Selection, Connector)> {

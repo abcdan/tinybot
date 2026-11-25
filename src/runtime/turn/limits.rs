@@ -229,6 +229,7 @@ pub(super) fn replan_input(input: &Value) -> Value {
         "connectors",
         "saved_agents",
         "mail_accounts",
+        "calendar",
         "shared_helper_scope",
         "shared_memory_chat",
     ] {
@@ -421,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_recovery_keeps_attachment_routine_and_email_metadata() {
+    fn compact_recovery_keeps_context_needed_for_tool_selection() {
         let input = json!({
             "latest_request": "a".repeat(4_999) + "!",
             "attachment": {"status":"read","content":"a".repeat(2_000),"truncated":false},
@@ -430,9 +431,11 @@ mod tests {
             "email":{"access":"revealed","content":{"from":"sender@example.test",
                 "message_id":"message-42@example.test","text":"c".repeat(2_000)}},
             "inbox_briefing":[{"subject":"Next train","text":"d".repeat(700)}],
+            "calendar":{"account":"work","calendar_id":"team@example.test"},
         });
         let reduced = replan_input(&input);
         assert_eq!(reduced["latest_request"], input["latest_request"]);
+        assert_eq!(reduced["calendar"], input["calendar"]);
         assert_eq!(reduced["attachment"]["status"], "read");
         assert_eq!(reduced["attachment"]["truncated"], true);
         assert_eq!(
