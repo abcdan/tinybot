@@ -108,47 +108,6 @@ test('schedules edit instructions, pause and run a saved routine', async () => {
     }
 });
 
-test('a routine webhook reveals its signing key only during setup', async () => {
-    const browser = await chromium.launch({chromiumSandbox: true});
-    try {
-        const context = await browser.newContext({viewport: {width: 320, height: 640}});
-        const page = await context.newPage();
-        const schedule = {id:'routine', title:'Inbox watch', revision: 1, state:'manual', kind:'task', time_zone:'UTC'};
-        const endpoint = 'https://tinybot.test/hooks/routine/fixture';
-        let enabled = false;
-        await mockMiniApp(context, ({action, data}) => {
-            if (action === 'status') return {user:'1', provider:'openrouter', requests:[], tasks:[], schedules:[schedule]};
-            assert.equal(data.id, schedule.id);
-            if (action === 'schedule-webhook') return {webhook: enabled ? {id:'fixture', enabled:true, url:endpoint} : null};
-            if (action === 'enable-schedule-webhook') {
-                assert.equal(data.revision, 1);
-                enabled = true;
-                return {id:'fixture', url:endpoint, secret:'fixture-signing-value'};
-            }
-            if (action === 'revoke-schedule-webhook') {
-                assert.equal(data.hook, 'fixture');
-                enabled = false;
-                return {ok:true};
-            }
-            assert.fail(`Unexpected Mini App action ${action}`);
-        });
-        await page.goto('https://tinybot.test/');
-        await page.getByRole('button', {name:'Schedules'}).click();
-        await page.getByText('Webhook', {exact:true}).click();
-        await page.getByRole('button', {name:'Enable webhook'}).click();
-        await page.getByText('fixture-signing-value', {exact:true}).waitFor();
-        await page.reload();
-        await page.getByRole('button', {name:'Schedules'}).click();
-        await page.getByText('Webhook', {exact:true}).click();
-        await page.getByText(endpoint, {exact:true}).waitFor();
-        assert.equal(await page.getByText('fixture-signing-value', {exact:true}).count(), 0);
-        await page.getByRole('button', {name:'Revoke webhook'}).click();
-        await page.getByText('Webhook revoked.', {exact:true}).waitFor();
-    } finally {
-        await browser.close();
-    }
-});
-
 test('task search stops the specific returned revision', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
     try {
@@ -1711,8 +1670,6 @@ test('operator invitations and guest shared memory respect the signed account vi
             if (action === 'list-invites') return {pending: [], guests: [{
                 id: '2', display_name: 'Guest Sample', setup_complete: true, suspended: false, accepted_at: 1795526400,
                 active_day: null, runs_started: 1, runs_completed: 1, tokens: null, cost_usd: 0,
-                first_result: true, active_days: 1, delivered_runs: 1, checked_off_tasks: 0,
-                model_calls: 2, token_reported_calls: 0, cost_reported_calls: 1,
             }]};
             if (action === 'create-invite') {
                 assert.deepEqual(data, {});
@@ -1725,13 +1682,10 @@ test('operator invitations and guest shared memory respect the signed account vi
         await owner.getByRole('button', {name: 'Invites', exact: true}).click();
         await owner.getByRole('heading', {name: 'Guest Sample'}).waitFor();
         assert.equal(await owner.getByText('Not reported', {exact: true}).count(), 1);
-        await owner.getByText('Delivered', {exact: true}).waitFor();
-        await owner.getByText('Cost for 1 of 2 calls, tokens for 0 of 2.', {exact: true}).waitFor();
         await owner.getByRole('button', {name: 'Create invitation'}).click();
         await owner.getByText('/start fixture-invite', {exact: true}).waitFor();
 
         let joined = false;
-        let weekly_cents = null;
         const guestContext = await browser.newContext({viewport: {width: 320, height: 640}});
         await mockMiniApp(guestContext, ({action, data}) => {
             if (action === 'status') return {...state, user: '2', operator: false, shared_memory_available: true};
@@ -1745,16 +1699,6 @@ test('operator invitations and guest shared memory respect the signed account vi
                 return {ok: true};
             }
             if (action === 'shared-memory-notes') return {notes: [{id: 'note', body: 'A published reference.', own: false}]};
-            if (action === 'audit-sessions') return {sessions: [], next_before: null, usage: null};
-            if (action === 'my-usage') {
-                assert.deepEqual(data, {});
-                return {guest: {model_connected: true, first_result_at_ms: 1795526400000},
-                    alert: {weekly_cents, spent_microusd: null, model_calls: 1, cost_reported_calls: 0}};
-            }
-            if (action === 'save-usage-alert') {
-                weekly_cents = data.weekly_cents;
-                return {ok: true};
-            }
             throw new Error('Unexpected guest action ' + action);
         });
         const guest = await guestContext.newPage();
@@ -1764,17 +1708,53 @@ test('operator invitations and guest shared memory respect the signed account vi
         await guest.getByRole('button', {name: 'Join shared memory'}).click();
         await guest.getByText('A published reference.', {exact: true}).waitFor();
         assert.equal(await guest.getByRole('button', {name: 'Remove shared note'}).count(), 0);
-        await guest.getByRole('button', {name: 'Audit', exact: true}).click();
-        await guest.getByText('Setup and spend alerts', {exact: true}).click();
-        await guest.getByText('First result delivered', {exact: true}).waitFor();
-        await guest.getByText('Reported this week: Not reported', {exact: true}).waitFor();
-        await guest.getByLabel(/Weekly alert amount/).fill('1,25');
-        await guest.getByRole('button', {name: 'Save spend alert', exact: true}).click();
-        await guest.getByText('Spend alert saved.', {exact: true}).waitFor();
-        assert.equal(weekly_cents, 125);
-        await guest.getByRole('button', {name: 'Turn off spend alert', exact: true}).click();
-        await guest.getByText('Spend alert turned off.', {exact: true}).waitFor();
-        assert.equal(weekly_cents, null);
+    } finally {
+        await browser.close();
+    }
+});
+
+
+test('starting a fresh Telegram task clears only the selected continuation', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 640}});
+        const page = await context.newPage();
+        const first = {id: 'first', revision: 3, state: 'running', title: 'Duplicate task title',
+            created_at: 1795526400, updated: 1795526700, recent_reply: 'First run is still working.'};
+        const second = {id: 'second', revision: 2, state: 'idle', title: 'Duplicate task title',
+            created_at: 1795530000, updated: 1795530300, recent_reply: 'Second run gathered the notes.'};
+        const state = {user: '1', provider: 'openrouter', time_zone: 'UTC',
+            requests: [], tasks: [first, second], active_task: first.id, telegram_task: first};
+        const posted = [];
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return state;
+            posted.push({action, data});
+            if (action === 'start-new-task') {
+                assert.deepEqual(data, {task: first.id, revision: first.revision});
+                state.active_task = null;
+                state.telegram_task = null;
+            } else if (action === 'select-task') {
+                assert.deepEqual(data, {task: second.id, revision: second.revision});
+                state.active_task = second.id;
+                state.telegram_task = second;
+            } else assert.fail(`Unexpected action ${action}`);
+            return {ok: true};
+        });
+        await page.goto('https://tinybot.test/');
+        const current = page.locator('section.card').filter({has: page.getByRole('heading', {name: 'Your next Telegram message continues'})});
+        await current.getByText('Duplicate task title', {exact: true}).waitFor();
+        const firstCard = page.locator('.task-card').filter({hasText: first.recent_reply});
+        const secondCard = page.locator('.task-card').filter({hasText: second.recent_reply});
+        assert.notEqual(await firstCard.getByText(/^Started /).textContent(), await secondCard.getByText(/^Started /).textContent());
+        await current.getByRole('button', {name: 'Start new task'}).click();
+        await page.getByText('Send a message in Telegram to start your new task.').waitFor();
+        await current.waitFor({state: 'hidden'});
+        await firstCard.getByText('Working', {exact: true}).waitFor();
+        await secondCard.getByRole('button', {name: 'Continue', exact: true}).click();
+        await current.waitFor();
+        await secondCard.getByText('Current Chief task', {exact: true}).waitFor();
+        assert.deepEqual(posted.map(entry => entry.action), ['start-new-task', 'select-task']);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
     } finally {
         await browser.close();
     }

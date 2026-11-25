@@ -22,6 +22,19 @@ export function tasks(state, requestCard, openModel) {
         dateStyle: 'medium', timeStyle: 'short', timeZone: state.time_zone,
     });
     const date = timestamp => dateFormat.format(new Date(timestamp * 1000));
+    const telegramTask = state.telegram_task || state.tasks.find(task => task.id === state.active_task);
+
+    function taskDates(task) {
+        const dates = [];
+        if (Number.isFinite(task.created_at)) dates.push(`Started ${date(task.created_at)}`);
+        if (Number.isFinite(task.updated) && task.updated !== task.created_at) dates.push(`Updated ${date(task.updated)}`);
+        return dates.length ? node('p', dates.join(' · '), 'meta') : '';
+    }
+
+    function startNew(task) {
+        return action('Start new task', 'start-new-task', {task: task.id, revision: task.revision},
+            'Send a message in Telegram to start your new task.');
+    }
 
     function select(taskId) {
         selectedTask = taskId;
@@ -39,6 +52,14 @@ export function tasks(state, requestCard, openModel) {
             return;
         }
         panel.append(node('h2', 'Tasks'));
+        if (telegramTask && Number.isSafeInteger(telegramTask.revision)) {
+            const selected = card('Your next Telegram message continues', telegramTask.title);
+            selected.append(taskDates(telegramTask), node('p', 'Replies to earlier TinyBot messages follow those tasks.', 'meta'), row(
+                startNew(telegramTask),
+                button('Open selected task', () => select(telegramTask.id), true)
+            ));
+            panel.append(selected);
+        }
         const views = row(...[
             ['open', 'Open'], ['needs-you', 'Needs you'], ['completed', 'Completed tasks'],
         ].map(([id, label]) => {
@@ -143,7 +164,8 @@ export function tasks(state, requestCard, openModel) {
     function taskCard(task) {
         const item = card(task.title, labels[task.state] || task.state);
         item.classList.add('task-card');
-        if (Number.isFinite(task.updated)) item.append(node('span', `Updated ${date(task.updated)}`, 'meta'));
+        item.append(taskDates(task));
+        if (task.recent_reply) item.append(node('p', `Last reply · ${task.recent_reply}`, 'meta'));
         if (task.id === state.active_task) item.append(node('span', 'Current Chief task', 'meta'));
         item.append(row(button(task.state === 'waiting' ? 'Review requests' : 'Open task', () => select(task.id), true), ...controls(task)));
         return item;
@@ -157,7 +179,7 @@ export function tasks(state, requestCard, openModel) {
         if (task.state === 'completed') {
             buttons.push(action('Reopen', 'select-task', input, 'Task reopened. Send your next message in Telegram.', true));
         } else if (task.id !== state.active_task && task.state !== 'cancelled') {
-            buttons.push(action('Continue', 'select-task', input, 'Send your next message in Telegram.', true));
+            buttons.push(action('Continue', 'select-task', input, `Your next Telegram message continues “${task.title}”.`, true));
         }
         if (Number.isSafeInteger(task.revision)) {
             if ([...stoppable, 'idle', 'blocked'].includes(task.state)) {
@@ -179,19 +201,22 @@ export function tasks(state, requestCard, openModel) {
             if (!body.isConnected) return;
             const {task, reply, audit, requests} = data;
             const status = card(task.title, labels[task.state] || task.state);
-            if (Number.isFinite(task.updated)) status.append(node('span', `Updated ${date(task.updated)}`, 'meta'));
+            status.append(taskDates(task));
             if (task.id === state.active_task) status.append(node('span', 'Current Chief task', 'meta'));
             if (data.executing) status.append(node('p', 'An action is in progress. Refresh to see its result.'));
             else if (data.failure) status.append(node('p', data.failure));
             else {
                 const guidance = {
-                    completed: 'Reopen this task to continue in Telegram.', idle: 'Send a follow-up in Telegram to continue.',
+                    completed: 'Reopen this task to continue in Telegram.',
+                    idle: task.id === state.active_task ? 'Send a follow-up in Telegram to continue.'
+                        : 'Choose Continue to route your next Telegram message here.',
                     waiting: requests.length ? '' : 'Check the request in Telegram.',
                     uncertain: 'Verify the result at its destination, then send /reconcile in Telegram.',
                 }[task.state];
                 if (guidance) status.append(node('p', guidance));
             }
             const buttons = controls(task, data.executing);
+            if (task.id === state.active_task && Number.isSafeInteger(task.revision)) buttons.push(startNew(task));
             if (task.state === 'setup') buttons.push(button('Set up model', openModel, true));
             if (audit) buttons.push(button('View audit', () => focusedAudit(panel, state, {
                 ...audit, message: task.title,
