@@ -26,9 +26,38 @@ export function connectors(state) {
         } else {
             item.append(authorization(connector, gateway));
         }
+        if (['api', 'oauth'].includes(connector.auth)) item.append(calendarControls(connector));
         item.append(row(action('Remove connection', 'disconnect-mcp', {id: connector.id}, 'Connection removed.', true)));
         content.append(item);
     }
+}
+
+function calendarControls(connector) {
+    const panel = node('div');
+    const settings = node('div');
+    const details = {id: connector.id};
+    const load = async () => {
+        const {calendar} = await api('calendar-settings', details);
+        settings.replaceChildren(
+            node('p', 'Select one calendar for availability checks and event reviews in Telegram. Requires a compatible Google Calendar MCP connection.'),
+            form('Use this calendar', [
+                field('account', 'Connected account alias', {max: 64, value: calendar?.account || ''}),
+                field('calendar', 'Calendar ID', {max: 254, value: calendar?.calendar || 'primary'})
+            ], async data => {
+                await api('set-calendar', {...data, ...details});
+                await load();
+                show('Calendar selected.');
+            })
+        );
+        if (calendar) settings.append(button('Clear calendar selection', async () => {
+            await api('remove-calendar', details);
+            await load();
+            show('Calendar selection cleared.');
+        }, true));
+        settings.querySelector('input')?.focus();
+    };
+    panel.append(button('Calendar setup', load, true), settings);
+    return panel;
 }
 
 function docblockCard(connector, access) {
