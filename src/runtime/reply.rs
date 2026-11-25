@@ -58,6 +58,9 @@ fn unwrapped(response: &str) -> Result<(String, &'static str)> {
         return Ok((reply.text, "text_object"));
     }
     let text = response.trim();
+    if crate::store::REACTION_EMOJIS.contains(&text.trim_end_matches('\u{fe0f}')) {
+        return Ok((text.to_owned(), "emoji"));
+    }
     let link_led = text
         .strip_prefix('[')
         .and_then(|rest| rest.split_once("]("))
@@ -109,6 +112,16 @@ fn has_embedded_envelope(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_completed_telegram_heart_is_a_reply() {
+        for response in ["❤", "❤️", "👍"] {
+            assert!(
+                matches!(turn(response).await.unwrap(), Step::Reply {text, ..} if text == response)
+            );
+        }
+        assert!(turn("\u{fe0f}").await.is_err());
+    }
 
     #[tokio::test]
     async fn complete_prose_or_a_text_object_can_only_become_a_reply() {
