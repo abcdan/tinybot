@@ -4,7 +4,7 @@ use crate::{
     channel::ChannelAdapter,
     store::{self, Task},
 };
-use serde_json::Value;
+use serde_json::json;
 use std::{sync::Arc, time::Duration};
 
 async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> anyhow::Result<()> {
@@ -38,7 +38,6 @@ async fn run_tasks(app: Arc<App>, channel: Arc<dyn ChannelAdapter>) {
                         let channel=channel.clone();
                         jobs.spawn(async move {
                             let trace = start_audit(&app, &task).await;
-                            audit::scope(trace.clone(), audit::record("session", "agent", "running", Value::Null)).await;
                             let group = store::groups::is_group_task(&app.db, &task.id).await.unwrap_or(true);
                             let result = audit::scope(trace.clone(), async {
                                 if group {
@@ -86,8 +85,17 @@ async fn run_acknowledgements(app: Arc<App>) {
                             let trace = audit::Trace::for_progress(
                                 &app.db, &ready.task, &ready.user, ready.revision
                             ).await.ok().flatten();
+                            let confirmed_steps = match (&trace, ready.queued) {
+                                (Some(trace), false) => trace.confirmed_progress_steps().await.unwrap_or(0),
+                                _ => 0,
+                            };
+                            if !ready.queued && confirmed_steps == 0
+                                && store::acknowledgements::retry_for_evidence(&app.db, &ready).await.unwrap_or(false)
+                            {
+                                return;
+                            }
                             let reply = audit::scope(trace, super::acknowledgement::generate(
-                                &app, &ready.user, &ready.request, ready.queued,
+                                &app, &ready.user, &ready.request, ready.queued, confirmed_steps,
                             )).await.ok().flatten();
                             if store::acknowledgements::finish(&app.db, &ready, reply.as_deref()).await.is_err() {
                                 tracing::debug!("progress update could not enter delivery");
@@ -141,11 +149,7 @@ async fn record_failure(
 #[cfg(test)]
 pub(crate) async fn work(app: &App, task: &Task) -> anyhow::Result<()> {
     let trace = start_audit(app, task).await;
-    let result = audit::scope(trace.clone(), async {
-        audit::record("session", "agent", "running", Value::Null).await;
-        work_task(app, task, None).await
-    })
-    .await;
+    let result = audit::scope(trace.clone(), work_task(app, task, None)).await;
     if let Err(error) = &result {
         let group = store::groups::is_group_task(&app.db, &task.id).await?;
         record_failure(app, task, trace.clone(), group, error).await;
@@ -156,7 +160,19 @@ pub(crate) async fn work(app: &App, task: &Task) -> anyhow::Result<()> {
 
 async fn start_audit(app: &App, task: &Task) -> Option<audit::Trace> {
     match audit::Trace::start(&app.db, task).await {
-        Ok(trace) => trace,
+        Ok(trace) => {
+            audit::scope(
+                trace.clone(),
+                audit::record(
+                    "session",
+                    "agent",
+                    "running",
+                    json!({"revision":task.revision}),
+                ),
+            )
+            .await;
+            trace
+        }
         Err(_) => {
             tracing::warn!("unable to start agent audit session");
             None
