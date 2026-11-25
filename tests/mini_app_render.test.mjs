@@ -340,6 +340,82 @@ test('the task files shelf downloads the selected retained version with its safe
     }
 });
 
+test('saving a retained reply signs in, chooses a folder and opens the exact Docblock review', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 640}});
+        const page = await context.newPage();
+        const task = {id: 'source', title: 'Review this week', state: 'completed', revision: 2};
+        const saveTask = {id: 'save-note', title: 'Save to Docblock', state: 'waiting', revision: 0};
+        const reply = {event: 13, text: 'Two decisions, one follow-up.', truncated: false};
+        const saved = {request: 'save-request', approval_task: saveTask.id, source_event: reply.event,
+            status: 'review', path: 'work/review-this-week-123'};
+        const request = {id: saved.request, kind: 'approve', task: saveTask.id, content: {
+            destination: 'https://docblock.dev', operation: 'Create Docblock note',
+            docblock: {workspace: 'my-workspace', target: saved.path, change: 'Title: Review this week\n' + reply.text},
+        }};
+        const state = {user: '1', provider: 'codex', requests: [], tasks: [task], docblock_access: {}};
+        const receipts = [];
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return state;
+            if (action === 'task-detail') {
+                if (data.task === saveTask.id) return {task: saveTask, requests: state.requests};
+                assert.deepEqual(data, {task: task.id});
+                return {task, reply, requests: [], docblock_saves: receipts};
+            }
+            if (action === 'docblock-oauth') {
+                assert.deepEqual(data, {});
+                return {consent_url: 'https://docblock.dev/oauth/authorize?state=task-fixture'};
+            }
+            if (action === 'docblock-workspaces') return {workspaces: [
+                {id: 'my-workspace', name: 'Personal', role: 'editor'}, {id: 'readonly', name: 'Reference', role: 'viewer'},
+            ]};
+            if (action === 'docblock-folders') {
+                assert.deepEqual(data, {id: 'docs', workspace: 'my-workspace'});
+                return {folders: ['work']};
+            }
+            if (action === 'save-result-to-docblock') {
+                assert.deepEqual(data, {id: 'docs', workspace: 'my-workspace', folder: 'work', title: task.title,
+                    task: task.id, revision: task.revision, event: reply.event});
+                state.requests = [request];
+                receipts.push(saved);
+                return saved;
+            }
+            if (action === 'approve') {
+                assert.deepEqual(data, {id: saved.request});
+                state.requests = [];
+                saveTask.state = 'completed';
+                saved.status = 'saved';
+                saved.url = 'https://docblock.dev/personal#/note/test-note';
+                return {ok: true};
+            }
+            assert.fail(action);
+        }, 'window.Telegram = {WebApp: {initData: "fixture", ready() {}, openLink(url) { window.openedLink = url; }}};');
+        await page.goto('https://tinybot.test/mini?task=source');
+        await page.getByRole('button', {name: 'Save to Docblock'}).click();
+        await page.getByRole('button', {name: 'Sign in to Docblock'}).click();
+        await page.waitForFunction(() => Boolean(window.openedLink));
+        assert.match(await page.evaluate(() => window.openedLink), /^https:\/\/docblock.dev\/oauth\/authorize/);
+        state.docblock_access.docs = 'write';
+        await page.getByRole('button', {name: 'Check connection'}).click();
+        await page.getByLabel('Docblock folder').selectOption('work');
+        assert.equal(await page.getByLabel('Docblock workspace').locator('option').count(), 1);
+        await page.getByRole('button', {name: 'Review note', exact: true}).click();
+        await page.getByText('Note: ' + saved.path).waitFor();
+        await page.getByText(reply.text, {exact: false}).waitFor();
+        assert.equal(await page.getByRole('button', {name: 'Always approve'}).count(), 0);
+        await page.getByRole('button', {name: 'Approve once'}).click();
+        await page.getByText('Change approved.').waitFor();
+        await page.goto('https://tinybot.test/mini?task=source');
+        await page.getByText('Saved in Docblock').waitFor();
+        await page.getByRole('button', {name: 'Open note'}).click();
+        assert.equal(await page.evaluate(() => window.openedLink), saved.url);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
+    } finally {
+        await browser.close();
+    }
+});
+
 test('first-run setup checks one key, searches tool models and opens the named Chief', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
     try {
