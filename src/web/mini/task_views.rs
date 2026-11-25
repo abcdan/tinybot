@@ -4,6 +4,7 @@ use crate::{
     store::{self, task_views},
 };
 use anyhow::{Context, Result, ensure};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 
 pub(super) async fn search(app: &App, user: &str, data: &Value) -> Result<Value> {
@@ -41,7 +42,21 @@ pub(super) async fn detail(app: &App, user: &str, data: &Value) -> Result<Value>
         .collect::<Vec<_>>();
     let mut view = serde_json::to_value(detail)?;
     view["requests"] = json!(requests);
+    view["files"] = json!(store::artifacts::list(&app.db, user, task_id).await?);
     Ok(view)
+}
+
+pub(super) async fn download(app: &App, user: &str, data: &Value) -> Result<Value> {
+    let file = store::artifacts::download(
+        &app.db,
+        &app.vault,
+        user,
+        text(data, "task", 64)?,
+        text(data, "id", 64)?,
+        text(data, "kind", 16)?,
+    )
+    .await?;
+    Ok(json!({"name":file.name,"content":STANDARD.encode(file.bytes)}))
 }
 
 pub(super) async fn select(app: &App, user: &str, data: &Value) -> Result<()> {
