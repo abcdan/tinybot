@@ -13,7 +13,8 @@ const EVIDENCE_WINDOW: i64 = 35;
 
 // A progress notice only follows a Telegram message in the user's personal Chief chat.
 const CHAT_SCOPE: &str = "t.chief_chat=1 AND t.agent IS NULL AND t.shared_memory_pair IS NULL
-    AND t.schedule IS NULL AND u.suspended_at IS NULL AND t.state IN ('queued','running')";
+    AND t.schedule IS NULL AND u.suspended_at IS NULL";
+const ACTIVE: &str = "t.state IN ('queued','running')";
 const CANDIDATE_SCOPE: &str =
     "e.telegram_message_id>0 AND e.telegram_message_id=o.reply_to_message_id";
 const CANDIDATE_JOIN: &str = "FROM outbox o JOIN tasks t ON t.id=o.task AND t.user=o.user
@@ -51,7 +52,7 @@ pub(super) async fn schedule(
 ) -> Result<()> {
     let revision: Option<i64> = sqlx::query_scalar(&format!(
         "SELECT t.revision FROM tasks t JOIN users u ON u.id=t.user
-         WHERE t.id=? AND t.user=? AND {CHAT_SCOPE}"
+         WHERE t.id=? AND t.user=? AND {CHAT_SCOPE} AND {ACTIVE}"
     ))
     .bind(task)
     .bind(user)
@@ -116,7 +117,7 @@ pub(crate) async fn claim(db: &SqlitePool) -> Result<Option<Generation>> {
         "UPDATE outbox SET state='failed',body='',button=NULL
          WHERE button LIKE 'ack-generate/%' AND state IN ('queued','generating') AND retry_at<=?
            AND NOT EXISTS(SELECT 1 {CANDIDATE_JOIN}
-             WHERE o.id=outbox.id AND {CHAT_SCOPE} AND {CANDIDATE_SCOPE}
+             WHERE o.id=outbox.id AND {CHAT_SCOPE} AND {ACTIVE} AND {CANDIDATE_SCOPE}
                AND (({INITIAL}) OR ({FOLLOWUP})))"
     ))
     .bind(time)
@@ -125,7 +126,7 @@ pub(crate) async fn claim(db: &SqlitePool) -> Result<Option<Generation>> {
     let mut generation: Option<Generation> = sqlx::query_as(&format!(
         "SELECT o.id,t.id AS task,t.user,t.revision,e.body AS request,t.state='queued' AS queued,e.id AS event,
                 e.acknowledged=1 AS followup
-         {CANDIDATE_JOIN} WHERE {CHAT_SCOPE} AND {CANDIDATE_SCOPE}
+         {CANDIDATE_JOIN} WHERE {CHAT_SCOPE} AND {ACTIVE} AND {CANDIDATE_SCOPE}
            AND (({INITIAL}) OR ({FOLLOWUP}))
            AND o.state IN ('queued','generating') AND o.retry_at<=?
          ORDER BY o.retry_at,o.id LIMIT 1"
@@ -181,7 +182,7 @@ pub(crate) async fn finish(
     let button = format!("{WAIT_PREFIX}{}{suffix}", generation.revision);
     let current: Option<(String, i64)> = sqlx::query_as(&format!(
         "SELECT t.state,e.telegram_message_id {CANDIDATE_JOIN}
-         WHERE {CHAT_SCOPE} AND {CANDIDATE_SCOPE} AND o.id=? AND o.user=? AND o.task=?
+         WHERE {CHAT_SCOPE} AND {ACTIVE} AND {CANDIDATE_SCOPE} AND o.id=? AND o.user=? AND o.task=?
            AND o.state='generating' AND o.retry_at=? AND o.button=? AND t.revision=?
            AND e.id=? AND (({INITIAL}) OR ({FOLLOWUP}))"
     ))
@@ -260,7 +261,14 @@ pub(crate) async fn ready(db: &SqlitePool, item: &Outbound) -> Result<bool> {
     Ok(sqlx::query_scalar(&format!(
         "SELECT EXISTS(SELECT 1 {CANDIDATE_JOIN}
          WHERE {CHAT_SCOPE} AND {CANDIDATE_SCOPE} AND o.id=? AND o.user=? AND o.task=?
-           AND o.state='sending' AND o.button=? AND o.button='ack-progress/' || t.state || '/' || t.revision
+           AND o.state='sending' AND o.button=?
+           AND (({ACTIVE} AND o.button='ack-progress/' || t.state || '/' || t.revision)
+                OR (t.state='idle' AND o.button='ack-progress/running/' || t.revision
+                    AND EXISTS(SELECT 1 FROM outbox media JOIN telegram_outputs f ON f.outbox=media.id
+                               WHERE media.task=t.id AND media.user=t.user AND media.id>o.id
+                                 AND media.state='queued' AND media.reply_to_message_id=e.telegram_message_id
+                                 AND f.revision=t.revision AND f.media_format IS NOT NULL
+                                 AND f.media_expires_at>unixepoch())))
            AND e.acknowledged=1
            AND NOT EXISTS(SELECT 1 FROM events h WHERE h.task=t.id AND h.role='handoff'
                           AND json_extract(h.body,'$.event')=e.id))"
@@ -271,6 +279,20 @@ pub(crate) async fn ready(db: &SqlitePool, item: &Outbound) -> Result<bool> {
     .bind(&item.button)
     .fetch_one(db)
     .await?)
+}
+
+pub(super) async fn skip_unwritten(tx: &mut Transaction<'_, Sqlite>, task: &Task) -> Result<()> {
+    sqlx::query(
+        "UPDATE outbox SET state='skipped',body='',button=NULL,retry_at=0
+         WHERE user=?1 AND task=?2 AND state IN ('queued','generating')
+           AND button IN (?3,?3 || '/followup')",
+    )
+    .bind(&task.user)
+    .bind(&task.id)
+    .bind(format!("{WAIT_PREFIX}{}", task.revision))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 pub(crate) async fn suppress(db: &SqlitePool, task: &Task) -> Result<()> {

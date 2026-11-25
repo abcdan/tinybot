@@ -2,7 +2,10 @@ use super::*;
 use crate::{
     audit,
     channel::Telegram,
-    store::outputs::{self, MediaFormat},
+    store::{
+        acknowledgements,
+        outputs::{self, MediaDelivery, MediaFormat},
+    },
 };
 use axum::{Router, body::Bytes, extract::Path, routing::post};
 use std::collections::VecDeque;
@@ -26,6 +29,125 @@ async fn start(db: &SqlitePool, task: &store::Task, action: &str) {
     assert!(store::start_action(db, task, action).await.unwrap());
 }
 
+fn media(tool: &'static str, format: MediaFormat, bytes: &[u8]) -> MediaDelivery {
+    MediaDelivery {
+        tool,
+        format,
+        bytes: bytes.into(),
+        finish_turn: false,
+        cookie_dialog: None,
+    }
+}
+
+async fn due_progress(db: &SqlitePool) {
+    sqlx::query("UPDATE outbox SET retry_at=0 WHERE button LIKE 'ack-generate/%'")
+        .execute(db)
+        .await
+        .unwrap();
+}
+
+async fn queue_screenshot(app: &App, task: &store::Task, finish_turn: bool) {
+    start(&app.db, task, "image").await;
+    let mut screenshot = media(SCREENSHOT, MediaFormat::Png, PNG);
+    screenshot.finish_turn = finish_turn;
+    assert!(
+        outputs::queue_media(&app.db, &app.vault, task, "image", &screenshot)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        task_for(&app.db, &task.id).await.state,
+        if finish_turn { "idle" } else { "running" }
+    );
+}
+
+#[tokio::test]
+async fn media_skips_progress_that_is_waiting_or_still_being_written() {
+    for (generating, finish_turn) in [(false, true), (true, false)] {
+        let db = fixture().await;
+        let app = app_with_model(&db, Arc::new(QueueOnlyChief));
+        store::ingest_telegram(&db, "1", 1, "1", "Capture the page.", 27)
+            .await
+            .unwrap();
+        let task = store::claim(&db).await.unwrap().unwrap();
+        let generation = if generating {
+            due_progress(&db).await;
+            Some(acknowledgements::claim(&db).await.unwrap().unwrap())
+        } else {
+            None
+        };
+        queue_screenshot(&app, &task, finish_turn).await;
+        let progress: String =
+            sqlx::query_scalar("SELECT state FROM audit_deliveries WHERE kind='progress'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(progress, "skipped");
+        let image = store::claim_delivery(&db).await.unwrap().unwrap();
+        assert_eq!(image.button.as_deref(), Some(outputs::BUTTON));
+        sqlx::query("UPDATE outbox SET state='sent' WHERE id=?")
+            .bind(image.id)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        if let Some(generation) = generation {
+            acknowledgements::finish(&db, &generation, Some("I’ll capture the page."), true)
+                .await
+                .unwrap();
+        }
+        due_progress(&db).await;
+        assert!(acknowledgements::claim(&db).await.unwrap().is_none());
+        assert!(store::claim_delivery(&db).await.unwrap().is_none());
+    }
+}
+
+#[tokio::test]
+async fn a_written_acknowledgement_takes_its_delivery_turn_before_media() {
+    for sending in [false, true] {
+        let db = fixture().await;
+        let app = app_with_model(&db, Arc::new(QueueOnlyChief));
+        store::ingest_telegram(&db, "1", 1, "1", "Capture the page.", 27)
+            .await
+            .unwrap();
+        let task = store::claim(&db).await.unwrap().unwrap();
+        due_progress(&db).await;
+        let first = acknowledgements::claim(&db).await.unwrap().unwrap();
+        acknowledgements::finish(&db, &first, Some("I’ll capture the page."), true)
+            .await
+            .unwrap();
+        let claimed = if sending {
+            Some(store::claim_delivery(&db).await.unwrap().unwrap())
+        } else {
+            None
+        };
+        queue_screenshot(&app, &task, true).await;
+        let progress = match claimed {
+            Some(progress) => progress,
+            None => store::claim_delivery(&db).await.unwrap().unwrap(),
+        };
+        assert_eq!(progress.id, first.id);
+        assert!(acknowledgements::ready(&db, &progress).await.unwrap());
+        assert!(store::claim_delivery(&db).await.unwrap().is_none());
+        sqlx::query("UPDATE outbox SET state='sent' WHERE id=?")
+            .bind(progress.id)
+            .execute(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            store::claim_delivery(&db)
+                .await
+                .unwrap()
+                .unwrap()
+                .button
+                .as_deref(),
+            Some(outputs::BUTTON)
+        );
+        due_progress(&db).await;
+        assert!(acknowledgements::claim(&db).await.unwrap().is_none());
+    }
+}
+
 #[tokio::test]
 async fn delivers_ephemeral_media_with_retry_then_removes_the_ciphertext() {
     let db = fixture().await;
@@ -44,9 +166,7 @@ async fn delivers_ephemeral_media_with_retry_then_removes_the_ciphertext() {
             &app.vault,
             &task,
             "image",
-            SCREENSHOT,
-            MediaFormat::Png,
-            PNG
+            &media(SCREENSHOT, MediaFormat::Png, PNG),
         )
         .await
         .unwrap()
@@ -58,9 +178,7 @@ async fn delivers_ephemeral_media_with_retry_then_removes_the_ciphertext() {
             &app.vault,
             &task,
             "same-image",
-            SCREENSHOT,
-            MediaFormat::Png,
-            PNG
+            &media(SCREENSHOT, MediaFormat::Png, PNG),
         )
         .await
         .unwrap()
@@ -72,9 +190,7 @@ async fn delivers_ephemeral_media_with_retry_then_removes_the_ciphertext() {
             &app.vault,
             &task,
             "video",
-            RECORD,
-            MediaFormat::Mp4,
-            MP4
+            &media(RECORD, MediaFormat::Mp4, MP4),
         )
         .await
         .unwrap()
@@ -225,9 +341,7 @@ async fn does_not_deliver_superseded_media_and_prunes_expired_retries() {
             &app.vault,
             &task,
             "image",
-            SCREENSHOT,
-            MediaFormat::Png,
-            MP4
+            &media(SCREENSHOT, MediaFormat::Png, MP4),
         )
         .await
         .is_err()
@@ -238,9 +352,7 @@ async fn does_not_deliver_superseded_media_and_prunes_expired_retries() {
             &app.vault,
             &task,
             "image",
-            SCREENSHOT,
-            MediaFormat::Png,
-            PNG
+            &media(SCREENSHOT, MediaFormat::Png, PNG),
         )
         .await
         .unwrap()
@@ -259,9 +371,7 @@ async fn does_not_deliver_superseded_media_and_prunes_expired_retries() {
             &app.vault,
             &task,
             "video",
-            RECORD,
-            MediaFormat::Mp4,
-            MP4
+            &media(RECORD, MediaFormat::Mp4, MP4),
         )
         .await
         .unwrap()
@@ -282,9 +392,7 @@ async fn does_not_deliver_superseded_media_and_prunes_expired_retries() {
             &app.vault,
             &task,
             "superseded",
-            SCREENSHOT,
-            MediaFormat::Png,
-            PNG
+            &media(SCREENSHOT, MediaFormat::Png, PNG),
         )
         .await
         .is_err()
@@ -320,45 +428,34 @@ async fn media_enqueue_and_action_completion_are_atomic() {
     store::finish_action(&db, &task, "already-finished", "Done.", false)
         .await
         .unwrap();
+    let mut screenshot = media(SCREENSHOT, MediaFormat::Png, PNG);
+    screenshot.finish_turn = true;
     for action in ["missing", "already-finished"] {
         assert!(
-            outputs::queue_media(
-                &db,
-                &app.vault,
-                &task,
-                action,
-                SCREENSHOT,
-                MediaFormat::Png,
-                PNG
-            )
-            .await
-            .is_err()
+            outputs::queue_media(&db, &app.vault, &task, action, &screenshot)
+                .await
+                .is_err()
         );
     }
-    let counts: (i64, i64, i64) = sqlx::query_as(
+    let counts: (i64, i64, i64, String) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM outbox WHERE button='telegram-output'),
                 (SELECT count(*) FROM telegram_outputs),
-                (SELECT count(*) FROM audit_deliveries WHERE kind='reply')",
+                (SELECT count(*) FROM audit_deliveries WHERE kind='reply'),
+                (SELECT state FROM audit_deliveries WHERE kind='progress')",
     )
     .fetch_one(&db)
     .await
     .unwrap();
-    assert_eq!(counts, (0, 0, 0));
+    assert_eq!(counts, (0, 0, 0, "queued".into()));
+    assert_eq!(task_for(&db, &task.id).await.state, "running");
 
     start(&db, &task, "active").await;
     assert!(
-        outputs::queue_media(
-            &db,
-            &app.vault,
-            &task,
-            "active",
-            SCREENSHOT,
-            MediaFormat::Png,
-            PNG
-        )
-        .await
-        .unwrap()
+        outputs::queue_media(&db, &app.vault, &task, "active", &screenshot)
+            .await
+            .unwrap()
     );
+    assert_eq!(task_for(&db, &task.id).await.state, "idle");
     let result: (String, String) = sqlx::query_as(
         "SELECT p.state,e.body FROM pending p JOIN events e ON e.task=p.task
          WHERE p.id='active' AND e.role='tool' ORDER BY e.id DESC LIMIT 1",

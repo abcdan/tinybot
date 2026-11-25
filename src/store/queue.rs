@@ -228,6 +228,28 @@ pub async fn settle_widget(
     settle_task(db, task, "idle", Some(&message), suggestions, Some(&widget)).await
 }
 
+pub(super) async fn settle_state(
+    tx: &mut Transaction<'_, Sqlite>,
+    task: &Task,
+    state: &str,
+) -> Result<bool> {
+    let revision: Option<i64> = sqlx::query_scalar(
+        "UPDATE tasks SET state=CASE WHEN revision=? THEN ? ELSE 'queued' END,updated=?
+         WHERE id=? AND state='running' RETURNING revision",
+    )
+    .bind(task.revision)
+    .bind(state)
+    .bind(now())
+    .bind(&task.id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let settled = revision == Some(task.revision);
+    if settled {
+        crate::audit::mark_task(tx, task, state).await?;
+    }
+    Ok(settled)
+}
+
 async fn settle_task(
     db: &SqlitePool,
     task: &Task,
@@ -237,44 +259,27 @@ async fn settle_task(
     widget: Option<&str>,
 ) -> Result<()> {
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
-    let affected = sqlx::query(
-        "UPDATE tasks SET state=CASE WHEN revision=? THEN ? ELSE 'queued' END,updated=?
-        WHERE id=? AND state='running' RETURNING revision",
-    )
-    .bind(task.revision)
-    .bind(state)
-    .bind(now())
-    .bind(&task.id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if let Some(row) = &affected {
-        use sqlx::Row;
-        if row.get::<i64, _>("revision") == task.revision {
-            crate::audit::mark_task(&mut tx, task, state).await?;
+    if settle_state(&mut tx, task, state).await?
+        && let Some(message) = message
+    {
+        let assistant_event =
+            sqlx::query("INSERT INTO events(task,role,body) VALUES(?,'assistant',?)")
+                .bind(&task.id)
+                .bind(message)
+                .execute(&mut *tx)
+                .await?
+                .last_insert_rowid();
+        if state == "idle" && widget.is_none() {
+            crate::schedules::notifications::record_result(&mut tx, task, assistant_event).await?;
         }
-    }
-    if let (Some(row), Some(message)) = (affected, message) {
-        use sqlx::Row;
-        if row.get::<i64, _>("revision") == task.revision {
-            let assistant_event =
-                sqlx::query("INSERT INTO events(task,role,body) VALUES(?,'assistant',?)")
-                    .bind(&task.id)
-                    .bind(message)
-                    .execute(&mut *tx)
-                    .await?
-                    .last_insert_rowid();
-            if state == "idle" && widget.is_none() {
-                crate::schedules::notifications::record_result(&mut tx, task, assistant_event)
-                    .await?;
-            }
-            let parts = if widget.is_some() {
-                vec![message.into()]
-            } else {
-                crate::channel::telegram_reply_parts(message)
-            };
-            let mut parts = parts.into_iter().peekable();
-            while let Some(part) = parts.next() {
-                let outbox = sqlx::query(
+        let parts = if widget.is_some() {
+            vec![message.into()]
+        } else {
+            crate::channel::telegram_reply_parts(message)
+        };
+        let mut parts = parts.into_iter().peekable();
+        while let Some(part) = parts.next() {
+            let outbox = sqlx::query(
                     "INSERT INTO outbox(user,task,agent,body,widget,assistant_event_id,reply_to_message_id)
                      VALUES(?,?,?,?,?,?,(SELECT CASE WHEN telegram_reply_message_id IS NOT NULL
                         THEN COALESCE(telegram_message_id, telegram_reply_message_id) END
@@ -290,9 +295,8 @@ async fn settle_task(
                     .execute(&mut *tx)
                     .await?
                     .last_insert_rowid();
-                if parts.peek().is_none() {
-                    replies::insert(&mut tx, outbox, task.revision, suggestions).await?;
-                }
+            if parts.peek().is_none() {
+                replies::insert(&mut tx, outbox, task.revision, suggestions).await?;
             }
         }
     }

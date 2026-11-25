@@ -229,7 +229,7 @@ pub(super) async fn delegate(ctx: &ToolContext<'_>, args: &Value) -> Result<Valu
                             .push(json!({"tool":tool.name(),"status":"completed","result":value}));
                     }
                     Ok(Outcome::Pause) => anyhow::bail!("a read-only helper tool paused the task"),
-                    Ok(Outcome::Media { .. }) => anyhow::bail!("a helper cannot deliver media"),
+                    Ok(Outcome::Media(_)) => anyhow::bail!("a helper cannot deliver media"),
                     Err(_) => history.push(json!({"tool":tool.name(),"status":"failed"})),
                 }
             }

@@ -316,7 +316,9 @@ pub(super) async fn resume(
         .map_err(|_| anyhow::anyhow!("The mail server did not confirm delivery submission."));
     audit::tool_finished("send_email", &result).await;
     let uncertain = result.is_err();
-    super::execution::finish(ctx, &pending.id, result, uncertain).await
+    super::execution::finish(ctx, &pending.id, result, uncertain)
+        .await
+        .map(|_| ())
 }
 
 async fn mark_changed(ctx: &ToolContext<'_>, pending: &Pending) -> Result<()> {

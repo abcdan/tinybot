@@ -11,6 +11,11 @@ pub struct Workers {
     pub python: String,
 }
 
+pub(crate) struct BrowserCapture {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) cookie_dialog: Option<&'static str>,
+}
+
 impl Workers {
     pub(crate) async fn check(&self) -> (Option<WorkerHealth>, Option<WorkerHealth>) {
         tokio::join!(health(&self.browser), health(&self.python))
@@ -25,7 +30,7 @@ impl Workers {
         route: &str,
         mime: &str,
         body: &Value,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<BrowserCapture> {
         let response = request(&self.browser, route, body).await?;
         if !response.status().is_success() {
             let error: Value = serde_json::from_slice(&net::body(response, 4096).await?)?;
@@ -42,7 +47,20 @@ impl Workers {
                 == Some(mime),
             "browser did not return the requested capture format"
         );
-        net::body(response, MAX_BROWSER_MEDIA_BYTES).await
+        let cookie_dialog = match response
+            .headers()
+            .get("x-tinybot-cookie-dialog")
+            .map(|value| value.as_bytes())
+        {
+            Some(b"dismissed") => Some("dismissed"),
+            Some(b"visible") => Some("visible"),
+            _ => None,
+        };
+        let bytes = net::body(response, MAX_BROWSER_MEDIA_BYTES).await?;
+        Ok(BrowserCapture {
+            bytes,
+            cookie_dialog,
+        })
     }
 
     pub async fn web_search(&self, query: &str) -> Result<Vec<Value>> {

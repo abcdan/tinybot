@@ -4,30 +4,43 @@ use crate::{audit, security::clip, store};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 
-/// Runs a pending approval, if present, and reports whether the turn can continue.
-pub(super) async fn resume_approval(ctx: &ToolContext<'_>) -> Result<bool> {
+pub(super) enum ApprovalProgress {
+    Continue,
+    Settle,
+    Finished,
+}
+
+async fn continue_if_current(ctx: &ToolContext<'_>) -> Result<ApprovalProgress> {
+    Ok(if store::current(&ctx.app.db, ctx.task).await? {
+        ApprovalProgress::Continue
+    } else {
+        ApprovalProgress::Settle
+    })
+}
+
+pub(super) async fn resume_approval(ctx: &ToolContext<'_>) -> Result<ApprovalProgress> {
     let app = ctx.app;
     let docblock_save = store::docblock_saves::dedicated(&app.db, ctx.task).await?;
     let Some(pending) = store::claim_approval(&app.db, ctx.task).await? else {
         if docblock_save {
             store::docblock_saves::dismiss(&app.db, ctx.task).await?;
-            return Ok(false);
+            return Ok(ApprovalProgress::Settle);
         }
-        return Ok(true);
+        return Ok(ApprovalProgress::Continue);
     };
     let payload: Value = serde_json::from_str(&pending.payload)?;
     if docblock_save {
         super::docblock_save::resume(ctx, &pending, &payload).await?;
-        return Ok(false);
+        return Ok(ApprovalProgress::Settle);
     }
     let (result, announce) = match pending.kind.as_str() {
         "approve" if payload["calendar_event"] == true => {
             super::calendar::resume(ctx, &pending, &payload).await?;
-            return store::current(&app.db, ctx.task).await;
+            return continue_if_current(ctx).await;
         }
         super::email::KIND => {
             super::email::resume(ctx, &pending, &payload).await?;
-            return store::current(&app.db, ctx.task).await;
+            return continue_if_current(ctx).await;
         }
         "form-submit" => {
             audit::record("tool", "form_submission", "approved", Value::Null).await;
@@ -64,20 +77,22 @@ pub(super) async fn resume_approval(ctx: &ToolContext<'_>) -> Result<bool> {
                     && store::mcp_approval_current(&app.db, &ctx.task.user, &scope).await?;
                 if !current {
                     store::finish_action(&app.db, ctx.task, &pending.id, "The MCP connection changed. Ask for a new approval before executing this call.", false).await?;
-                    return store::current(&app.db, ctx.task).await;
+                    return continue_if_current(ctx).await;
                 }
             }
             let media = super::media_tools::is_media_tool(&call.name);
             let result = execute_approved(ctx, call).await;
             if media && !store::current(&app.db, ctx.task).await? {
                 store::interrupt_action(&app.db, ctx.task, &pending.id).await?;
-                return Ok(false);
+                return Ok(ApprovalProgress::Settle);
             }
             (result, !media)
         }
     };
-    finish(ctx, &pending.id, result, announce).await?;
-    store::current(&app.db, ctx.task).await
+    if finish(ctx, &pending.id, result, announce).await? {
+        return Ok(ApprovalProgress::Finished);
+    }
+    continue_if_current(ctx).await
 }
 
 pub(super) async fn execute_approved(ctx: &ToolContext<'_>, payload: Call) -> Result<Outcome> {
@@ -98,12 +113,13 @@ pub(super) async fn execute_approved(ctx: &ToolContext<'_>, payload: Call) -> Re
     result
 }
 
+/// Saves the action result. Returns true when the result has already settled the turn.
 pub(super) async fn finish(
     ctx: &ToolContext<'_>,
     id: &str,
     result: Result<Outcome>,
     announce: bool,
-) -> Result<()> {
+) -> Result<bool> {
     match result {
         Ok(Outcome::Continue(value)) => {
             let text = value.to_string();
@@ -133,27 +149,31 @@ pub(super) async fn finish(
             )
             .await?;
         }
-        Ok(Outcome::Media {
-            tool,
-            format,
-            bytes,
-        }) => {
+        Ok(Outcome::Media(media)) => {
             let app = ctx.app;
             let queued = match store::outputs::queue_media(
-                &app.db, &app.vault, ctx.task, id, tool, format, &bytes,
+                &app.db, &app.vault, ctx.task, id, &media,
             )
             .await
             {
                 Ok(queued) => queued,
                 Err(_) if !store::current(&app.db, ctx.task).await? => {
-                    return store::interrupt_action(&app.db, ctx.task, id).await;
+                    store::interrupt_action(&app.db, ctx.task, id).await?;
+                    return Ok(false);
                 }
                 Err(error) => return Err(error),
             };
             if queued {
                 app.delivery_ready.notify_one();
             }
-            audit::record("tool", tool, "completed", json!({"queued":queued})).await;
+            audit::record(
+                "tool",
+                media.tool,
+                "completed",
+                json!({"queued":queued,"cookie_dialog":media.cookie_dialog}),
+            )
+            .await;
+            return Ok(queued && media.finish_turn);
         }
         Err(error) => {
             let text = if announce {
@@ -171,5 +191,5 @@ pub(super) async fn finish(
             }
         }
     }
-    Ok(())
+    Ok(false)
 }
