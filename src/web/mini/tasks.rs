@@ -123,8 +123,37 @@ pub(super) async fn run_schedule(app: &App, user: &str, data: &Value) -> Result<
 }
 
 pub(super) async fn schedule_history(app: &App, user: &str, data: &Value) -> Result<Value> {
-    let runs = schedules::history(&app.db, user, text(data, "id", 64)?).await?;
-    Ok(json!({"runs":runs}))
+    let id = text(data, "id", 64)?;
+    let runs = schedules::history(&app.db, user, id).await?;
+    let occurrences = schedules::occurrences(&app.db, user, id).await?;
+    Ok(json!({"runs":runs,"occurrences":occurrences}))
+}
+
+pub(super) async fn schedule_policy(app: &App, user: &str, data: &Value) -> Result<()> {
+    let policy: schedules::Policy =
+        serde_json::from_value(data["policy"].clone()).context("invalid schedule policy")?;
+    schedules::set_policy(
+        &app.db,
+        user,
+        text(data, "id", 64)?,
+        revision(data)?,
+        policy,
+    )
+    .await
+}
+
+pub(super) async fn snooze_schedule(app: &App, user: &str, data: &Value) -> Result<()> {
+    schedules::snooze(
+        &app.db,
+        user,
+        text(data, "id", 64)?,
+        revision(data)?,
+        data["minutes"]
+            .as_i64()
+            .context("invalid snooze duration")?,
+        now(),
+    )
+    .await
 }
 
 fn revision(data: &Value) -> Result<i64> {
