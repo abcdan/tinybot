@@ -136,6 +136,11 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
         super::openrouter_tools::available(&ctx).await?
     };
     let personal_settings = super::settings::available(&ctx).await?;
+    let calendar = if personal_settings {
+        super::calendar::model_context(app, &task.user).await?
+    } else {
+        None
+    };
     let can_plan = !paired
         && owner
         && task.agent.is_none()
@@ -147,6 +152,10 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
         .filter(|tool| {
             ctx.allows(tool.name())
                 && (!super::settings::is_settings_tool(tool.name()) || personal_settings)
+                && (!matches!(
+                    tool.name(),
+                    super::calendar::CALENDAR_READ | super::calendar::CALENDAR_DRAFT
+                ) || calendar.is_some())
                 && (!task_plan::is_tool(tool.name()) || can_plan)
                 && (!paired
                     || matches!(tool.name(), "send_reply" | "send_card" | "react_to_message"))
@@ -331,6 +340,9 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
         };
         if let Some(progress) = &routine_progress {
             input["routine"] = serde_json::to_value(progress)?;
+        }
+        if let Some(calendar) = &calendar {
+            input["calendar"] = calendar.clone();
         }
         if let Some(briefing) = &inbox_briefing {
             input["inbox_briefing"] = serde_json::to_value(briefing)?;
@@ -711,6 +723,7 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
                     || matches!(
                         name.as_str(),
                         "request_form"
+                            | super::calendar::CALENDAR_DRAFT
                             | "request_input"
                             | "configure_settings"
                             | "complete_task"

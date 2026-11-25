@@ -1998,6 +1998,55 @@ test('project publication reviews the audience and version before sharing', asyn
     }
 });
 
+test('calendar settings select a connection and exact guest details appear before approval', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 640}});
+        const page = await context.newPage();
+        const connector = {id: 'calendar', name: 'Calendar connection', endpoint: 'https://calendar.example/mcp', auth: 'oauth'};
+        const preview = 'Calendar: team@example.test\nTitle: Quarterly review\nStarts: 2027-01-08T15:00:00+01:00\nGuests:\nCasey <casey@example.test>\nCalendar will be asked to send invitations to all listed guests.';
+        const state = {user: '1', provider: 'openrouter', connectors: [connector], tasks: [], agents: [], requests: [{
+            id: 'event-approval', kind: 'approve', content: {operation: 'Create calendar event', destination: connector.name, preview},
+        }]};
+        let calendar = null;
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return state;
+            if (action === 'calendar-settings') return {calendar};
+            if (action === 'set-calendar') {
+                assert.deepEqual(data, {id: connector.id, account: 'work', calendar: 'team@example.test'});
+                calendar = {account: data.account, calendar: data.calendar};
+                return {ok: true};
+            }
+            if (action === 'remove-calendar') {
+                assert.deepEqual(data, {id: connector.id});
+                calendar = null;
+                return {ok: true};
+            }
+            if (action === 'approve') {
+                assert.deepEqual(data, {id: 'event-approval'});
+                state.requests = [];
+                return {ok: true};
+            }
+            assert.fail(`Unexpected Mini App action ${action}`);
+        });
+        await page.goto('https://tinybot.test/');
+        await page.locator('pre').filter({hasText: 'Casey <casey@example.test>'}).waitFor();
+        assert.equal(await page.getByRole('button', {name: 'Always approve'}).count(), 0);
+        await page.getByRole('button', {name: 'Approve', exact: true}).click();
+        await page.getByText('Approved. TinyBot will continue.').waitFor();
+        await page.getByRole('button', {name: 'Connections', exact: true}).click();
+        await page.getByRole('button', {name: 'Calendar setup'}).click();
+        await page.getByLabel('Connected account alias').fill('work');
+        await page.getByLabel('Calendar ID', {exact: true}).fill('team@example.test');
+        await page.getByRole('button', {name: 'Use this calendar'}).click();
+        await page.getByText('Calendar selected.').waitFor();
+        await page.getByRole('button', {name: 'Clear calendar selection'}).click();
+        await page.getByText('Calendar selection cleared.').waitFor();
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
+    } finally {
+        await browser.close();
+    }
+});
 
 test('starting a fresh Telegram task clears only the selected continuation', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});

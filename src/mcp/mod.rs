@@ -51,6 +51,8 @@ pub struct Mcp {
     refresh: Mutex<()>,
     policy: policy::Policy,
     #[cfg(test)]
+    pub(crate) stdio_fixture: Option<String>,
+    #[cfg(test)]
     docblock_fixture: Option<DocblockFixture>,
 }
 
@@ -62,6 +64,8 @@ impl Mcp {
             origin,
             refresh: Mutex::new(()),
             policy: policy::Policy::load(),
+            #[cfg(test)]
+            stdio_fixture: None,
             #[cfg(test)]
             docblock_fixture: None,
         }
@@ -170,7 +174,8 @@ impl Mcp {
             key: key.into(),
         };
         if connector.transport == discovery::STDIO {
-            stdio::call(&connector, Some(key), "tools/list", json!({})).await?;
+            self.stdio_request(&connector, Some(key), "tools/list", json!({}))
+                .await?;
         } else {
             Session::open(
                 &connector.endpoint,
@@ -200,7 +205,8 @@ impl Mcp {
             "Sign in or use a personal MCP API key"
         );
         if connector.transport == discovery::STDIO {
-            stdio::call(&connector, None, "tools/list", json!({})).await?;
+            self.stdio_request(&connector, None, "tools/list", json!({}))
+                .await?;
         } else {
             Session::open(&connector.endpoint, &connector.transport, HeaderMap::new())
                 .await?

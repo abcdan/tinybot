@@ -129,6 +129,11 @@ pub(super) fn request_view(app: &App, user: &str, entry: &store::Pending) -> Opt
             let draft =
                 crate::runtime::smtp_editable_fields(&app.vault, user, &entry.id, &raw).ok()?;
             json!({"operation":"Send email","explanation":preview,"draft":draft})
+        } else if entry.kind == "approve"
+            && let Ok(payload) = serde_json::from_str::<Value>(&entry.payload)
+            && payload["calendar_event"] == true
+        {
+            crate::runtime::calendar::preview(app, user, &entry.id, &payload).ok()?
         } else {
             request_content(&entry.kind, &entry.payload)
         };

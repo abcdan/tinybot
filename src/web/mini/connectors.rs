@@ -114,6 +114,26 @@ pub(super) async fn oauth_start(app: &App, user: &str, data: &Value) -> Result<V
     Ok(json!({"consent_url":url}))
 }
 
+pub(super) async fn calendar_settings(app: &App, user: &str, data: &Value) -> Result<Value> {
+    let id = text(data, "id", 64)?;
+    Ok(json!({"calendar":crate::runtime::calendar::settings(app, user, id).await?}))
+}
+
+pub(super) async fn set_calendar(app: &App, user: &str, data: &Value) -> Result<()> {
+    crate::runtime::calendar::configure(
+        app,
+        user,
+        text(data, "id", 64)?,
+        text(data, "account", 64)?,
+        text(data, "calendar", 254)?,
+    )
+    .await
+}
+
+pub(super) async fn remove_calendar(app: &App, user: &str, data: &Value) -> Result<()> {
+    crate::runtime::calendar::remove(app, user, text(data, "id", 64)?).await
+}
+
 pub(super) async fn save_token(app: &App, user: &str, data: &Value) -> Result<()> {
     let connector = text(data, "id", 64)?;
     app.mcp

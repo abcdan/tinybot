@@ -21,6 +21,10 @@ pub(super) async fn resume_approval(ctx: &ToolContext<'_>) -> Result<bool> {
         return Ok(false);
     }
     let (result, announce) = match pending.kind.as_str() {
+        "approve" if payload["calendar_event"] == true => {
+            super::calendar::resume(ctx, &pending, &payload).await?;
+            return store::current(&app.db, ctx.task).await;
+        }
         super::email::KIND => {
             super::email::resume(ctx, &pending, &payload).await?;
             return store::current(&app.db, ctx.task).await;
