@@ -2,6 +2,7 @@ mod codex;
 mod connections;
 mod decisions;
 mod failure;
+mod inception;
 mod media;
 mod openrouter;
 mod server_tools;
@@ -101,6 +102,7 @@ pub struct Models {
     codex_binary: String,
     review_model: Option<String>,
     review_key: Option<String>,
+    progress_mercury: Option<Arc<dyn ModelProvider>>,
     refresh: Mutex<()>,
     #[cfg(test)]
     fixture: Option<Arc<dyn ModelProvider>>,
@@ -124,6 +126,7 @@ impl Models {
             codex_binary,
             review_model,
             review_key,
+            progress_mercury: None,
             refresh: Mutex::new(()),
             #[cfg(test)]
             fixture: None,
@@ -132,6 +135,23 @@ impl Models {
             #[cfg(test)]
             memory_decisions_fixture: None,
         }
+    }
+
+    pub fn with_progress_mercury_key(mut self, key: Option<String>) -> Self {
+        self.progress_mercury = key
+            .filter(|key| !key.trim().is_empty())
+            .map(|key| Arc::new(inception::Mercury3 { key }) as Arc<dyn ModelProvider>);
+        self
+    }
+
+    pub(crate) fn progress_mercury(&self) -> Option<Arc<dyn ModelProvider>> {
+        self.progress_mercury.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_mercury_fixture(mut self, model: Arc<dyn ModelProvider>) -> Self {
+        self.progress_mercury = Some(model);
+        self
     }
 
     #[cfg(test)]
