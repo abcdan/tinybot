@@ -28,6 +28,7 @@ mod output_limits;
 mod quick_chat;
 mod routines;
 mod self_settings;
+mod task_artifacts;
 mod task_workbench;
 mod telegram_workflows;
 mod tool_budget;

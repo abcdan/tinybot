@@ -73,6 +73,8 @@ pub(super) async fn mini(
                 ApiError(StatusCode::NOT_FOUND, "This audit session is no longer available.")
             } else if action == "task-detail" {
                 ApiError(StatusCode::NOT_FOUND, "This task is no longer available.")
+            } else if action == "download-task-file" {
+                ApiError(StatusCode::NOT_FOUND, "This task file is no longer available.")
             } else if error.downcast_ref::<crate::settings::Stale>().is_some() {
                 ApiError(StatusCode::CONFLICT, "Your settings changed. Ask your Chief for a fresh form.")
             } else if error.downcast_ref::<crate::store::settings_requests::NoChanges>().is_some() {
@@ -185,6 +187,7 @@ async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<
         "select-task" => task_views::select(app, user, data).await?,
         "search-tasks" => return task_views::search(app, user, data).await,
         "task-detail" => return task_views::detail(app, user, data).await,
+        "download-task-file" => return task_views::download(app, user, data).await,
         "stop-task" => task_views::stop(app, user, data).await?,
         "complete-task" => task_views::complete(app, user, data).await?,
         "edit-email-draft" => return mail::edit_draft(app, user, data).await,

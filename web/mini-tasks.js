@@ -1,4 +1,5 @@
 import { api, content } from './mini.js';
+import { fileShelf } from './mini-artifacts.js';
 import { focusedAudit } from './mini-audit.js';
 import { action, button, card, field, form, node, row } from './mini-ui.js';
 
@@ -205,6 +206,7 @@ export function tasks(state, requestCard, openModel) {
                 if (reply.truncated) latest.append(node('p', 'Open the Telegram conversation for the full reply.', 'meta'));
                 body.append(latest);
             }
+            if (data.files?.length) body.append(fileShelf(task, data.files, date));
         } catch (error) {
             if (!body.isConnected) return;
             const item = card(null, error.message);
