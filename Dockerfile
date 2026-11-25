@@ -1,4 +1,6 @@
 FROM rust:1.100-bookworm AS build
+ARG TINYBOT_RELEASE_SHA
+ENV TINYBOT_RELEASE_SHA=${TINYBOT_RELEASE_SHA}
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
