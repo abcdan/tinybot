@@ -100,6 +100,15 @@ pub fn router(app: Arc<App>) -> Router {
             }),
         )
         .route(
+            "/mini-settings-history.js",
+            get(|| async {
+                asset(
+                    "application/javascript; charset=utf-8",
+                    include_str!("../../web/mini-settings-history.js"),
+                )
+            }),
+        )
+        .route(
             "/mini-settings.js",
             get(|| async {
                 asset(

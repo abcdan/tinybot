@@ -7,6 +7,7 @@ import { mail } from './mini-mail.js';
 import { memories } from './mini-memory.js';
 import { onboarding } from './mini-onboarding.js';
 import { browser, schedules, model } from './mini-settings.js';
+import { settingsHistory as renderSettingsHistory } from './mini-settings-history.js';
 import { tasks } from './mini-tasks.js';
 
 export const telegram = window.Telegram?.WebApp;
@@ -164,7 +165,7 @@ function setTab(next) {
 function render(animate = false) {
     if (!state) return;
     content.replaceChildren();
-    ({home, agents, memories, connectors, mail, browser, schedules, audit, invites, model})[tab](state);
+    ({home, agents, memories, connectors, mail, browser, schedules, audit, invites, model, settingsHistory})[tab](state);
     if (animate && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
         content.getAnimations?.().forEach(animation => animation.cancel());
         content.animate?.([{opacity: 0, transform: 'translateY(6px)'}, {opacity: 1, transform: 'translateY(0)'}],
@@ -179,6 +180,10 @@ function home() {
         content.append(setup);
     }
     tasks(state, requestCard, () => setTab('model'));
+}
+
+function settingsHistory(state) {
+    renderSettingsHistory(state, settingsReview);
 }
 
 function requestCard(request) {

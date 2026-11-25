@@ -1260,6 +1260,47 @@ test('TinyBot settings form shows exact changes before explicit approval', async
     }
 });
 
+test('settings history reuses the exact signed review before restoring a change', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 640}});
+        const page = await context.newPage();
+        const original = {id: 42, source: 'approval', created: 1795555555, can_restore: true,
+            changes: [{label: 'Time zone', before: 'UTC', after: 'Europe/Amsterdam'}]};
+        const restored = {id: 43, source: 'restore', created: 1795555556, can_restore: true,
+            changes: [{label: 'Time zone', before: 'Europe/Amsterdam', after: 'UTC'}]};
+        let approved = false;
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return {user: '1', provider: 'codex', requests: [], tasks: []};
+            if (action === 'settings-history') return {items: approved ? [restored] : [original], next_before: null};
+            if (action === 'restore-settings') {
+                assert.deepEqual(data, {id: original.id});
+                return {id: 'restore-review', kind: 'settings-approve', content: {changes: restored.changes}};
+            }
+            if (action === 'approve-settings') {
+                assert.deepEqual(data, {id: 'restore-review'});
+                approved = true;
+                return {ok: true};
+            }
+            assert.fail(action);
+        });
+        await page.goto('https://tinybot.test/mini');
+        await page.getByRole('button', {name: 'Settings history', exact: true}).click();
+        await page.getByRole('heading', {name: 'Approved settings change'}).waitFor();
+        await page.getByRole('button', {name: 'Review restore'}).click();
+        const review = page.locator('.settings-review');
+        await review.getByRole('heading', {name: 'Approve settings changes'}).waitFor();
+        assert.deepEqual(await review.locator('dd').allTextContents(), ['Europe/Amsterdam', 'UTC']);
+        assert.equal(approved, false);
+        await review.getByRole('button', {name: 'Approve changes'}).click();
+        await page.getByRole('heading', {name: 'Approved restore'}).waitFor();
+        assert.equal(approved, true);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
+    } finally {
+        await browser.close();
+    }
+});
+
 test('a pending TinyBot settings review can be declined from Requests', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
     try {
