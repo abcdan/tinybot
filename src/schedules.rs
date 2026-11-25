@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Sqlite, SqlitePool, Transaction};
 use std::time::Duration;
 
+mod occurrences;
+pub(crate) use occurrences::{Policy, occurrences, set_policy, snooze};
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
@@ -33,6 +36,11 @@ pub struct Schedule {
     pub next_run: Option<i64>,
     pub state: String,
     pub revision: i64,
+    catch_up: String,
+    quiet_start: Option<i64>,
+    quiet_end: Option<i64>,
+    snoozed_until: Option<i64>,
+    held_until: Option<i64>,
     #[serde(skip)]
     steps: String,
     #[serde(skip)]
@@ -335,7 +343,7 @@ pub async fn edit(
         (Some(_), _) => "active",
     };
     sqlx::query(
-        "UPDATE schedules SET title=?,input=?,cron=?,next_run=?,state=?,steps=?,revision=revision+1
+        "UPDATE schedules SET title=?,input=?,cron=?,next_run=?,state=?,steps=?,held_until=NULL,revision=revision+1
          WHERE id=? AND owner=?",
     )
     .bind(request.title)
@@ -405,7 +413,7 @@ pub async fn set_paused(
         _ => anyhow::bail!("schedule unavailable"),
     };
     sqlx::query(
-        "UPDATE schedules SET state=?,next_run=?,revision=revision+1 WHERE id=? AND owner=?",
+        "UPDATE schedules SET state=?,next_run=?,held_until=NULL,revision=revision+1 WHERE id=? AND owner=?",
     )
     .bind(if pause { "paused" } else { "active" })
     .bind(next_run)
@@ -504,39 +512,7 @@ pub async fn run(db: SqlitePool) {
 }
 
 pub async fn dispatch(db: &SqlitePool, time: i64) -> Result<()> {
-    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
-    let rows: Vec<Schedule> = sqlx::query_as(
-        "SELECT s.* FROM schedules s JOIN users u ON u.id=s.owner
-         WHERE s.state='active' AND s.next_run<=? AND u.suspended_at IS NULL
-         ORDER BY s.next_run LIMIT 30",
-    )
-    .bind(time)
-    .fetch_all(&mut *tx)
-    .await?;
-    for schedule in rows {
-        let next = schedule.cron.as_ref().and_then(|cron| {
-            schedule
-                .time_zone
-                .parse::<Tz>()
-                .ok()
-                .and_then(|zone| next(cron, zone, time).ok())
-        });
-        sqlx::query("UPDATE schedules SET next_run=?,state=? WHERE id=?")
-            .bind(next)
-            .bind(if next.is_some() {
-                "active"
-            } else if schedule.cron.is_some() {
-                "invalid"
-            } else {
-                "done"
-            })
-            .bind(&schedule.id)
-            .execute(&mut *tx)
-            .await?;
-        enqueue(&mut tx, &schedule, time, None).await?;
-    }
-    tx.commit().await?;
-    Ok(())
+    occurrences::dispatch(db, time).await
 }
 
 async fn enqueue(
@@ -546,19 +522,22 @@ async fn enqueue(
     request: Option<&str>,
 ) -> Result<Option<String>> {
     let task = id();
+    let reminder = schedule.kind == "reminder";
     let created = sqlx::query(
         "INSERT INTO tasks(id,user,title,state,goal,updated,schedule)
-         SELECT ?,id,?,CASE WHEN provider IS NULL THEN 'setup' ELSE 'queued' END,?,?,?
-         FROM users WHERE id=? AND suspended_at IS NULL AND NOT EXISTS(
+         SELECT ?,id,?,CASE WHEN ? THEN 'completed' WHEN provider IS NULL THEN 'setup' ELSE 'queued' END,?,?,?
+         FROM users WHERE id=? AND suspended_at IS NULL AND (? OR NOT EXISTS(
             SELECT 1 FROM tasks WHERE schedule=? AND state IN ('queued','running','waiting','setup','uncertain')
-         )",
+         ))",
     )
     .bind(&task)
     .bind(&schedule.title)
+    .bind(reminder)
     .bind(clip(&schedule.input, 1500))
     .bind(time)
     .bind(&schedule.id)
     .bind(&schedule.owner)
+    .bind(reminder)
     .bind(&schedule.id)
     .execute(&mut **tx)
     .await?
@@ -596,13 +575,35 @@ async fn enqueue(
     crate::audit::open(
         tx,
         &task,
-        if request.is_some() {
+        if reminder {
+            "Scheduled reminder"
+        } else if request.is_some() {
             "Manual schedule run"
         } else {
             "Scheduled task"
         },
     )
     .await?;
+    if reminder {
+        let event = sqlx::query("INSERT INTO events(task,role,body) VALUES(?,'assistant',?)")
+            .bind(&task)
+            .bind(&schedule.input)
+            .execute(&mut **tx)
+            .await?
+            .last_insert_rowid();
+        sqlx::query("INSERT INTO outbox(user,task,body,assistant_event_id) VALUES(?,?,?,?)")
+            .bind(&schedule.owner)
+            .bind(&task)
+            .bind(&schedule.input)
+            .bind(event)
+            .execute(&mut **tx)
+            .await?;
+        let completed = sqlx::query_as::<_, Task>("SELECT * FROM tasks WHERE id=?")
+            .bind(&task)
+            .fetch_one(&mut **tx)
+            .await?;
+        crate::audit::mark_task(tx, &completed, "completed").await?;
+    }
     Ok(Some(task))
 }
 
@@ -718,13 +719,11 @@ mod tests {
         let late = start + 1800;
         dispatch(&db, late).await.unwrap();
         dispatch(&db, late).await.unwrap();
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM outbox")
-                .fetch_one(&db)
-                .await
-                .unwrap(),
-            0
-        );
+        let reminders: Vec<String> = sqlx::query_scalar("SELECT body FROM outbox")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        assert_eq!(reminders, ["Check the report"]);
         let prompts: Vec<(String, String, String, String)> = sqlx::query_as(
             "SELECT tasks.schedule, tasks.user, tasks.state, events.body FROM tasks
             JOIN events ON events.task=tasks.id WHERE tasks.agent IS NULL AND events.role='user'
@@ -736,7 +735,7 @@ mod tests {
         assert_eq!(prompts.len(), 2);
         assert_eq!(prompts[0].0, reminder.id);
         assert_eq!(prompts[0].1, "1");
-        assert_eq!(prompts[0].2, "setup");
+        assert_eq!(prompts[0].2, "completed");
         assert!(prompts[0].3.contains("scheduled reminder is due now"));
         assert!(prompts[0].3.ends_with("Check the report"));
         assert_eq!(prompts[1].0, recurring.id);
@@ -752,6 +751,11 @@ mod tests {
             2
         );
         assert_eq!(list(&db, "1").await.unwrap()[0].next_run, Some(late + 1200));
+        let history =
+            serde_json::to_value(occurrences(&db, "1", &recurring.id).await.unwrap()).unwrap();
+        assert_eq!(history[0]["outcome"], "skipped_overlap");
+        assert_eq!(history[1]["outcome"], "queued");
+        assert!(occurrences(&db, "2", &recurring.id).await.is_err());
         cancel(&db, "1", &recurring.id).await.unwrap();
     }
 

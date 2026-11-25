@@ -729,34 +729,14 @@ async fn compaction_is_atomic_and_preserves_new_and_unprocessed_context() {
     assert_eq!(remaining.last().unwrap().2, "latest change");
 }
 
-struct ScheduledChief;
-
-#[async_trait]
-impl ModelProvider for ScheduledChief {
-    async fn complete(&self, _system: &str, input: &str) -> Result<String> {
-        let input: Value = serde_json::from_str(input)?;
-        let first = &input["history"][0];
-        assert_eq!(first["role"], "user");
-        assert!(
-            first["text"]
-                .as_str()
-                .unwrap()
-                .ends_with("Check the report")
-        );
-        assert!(input["agent_role"].is_null());
-        let response = if input["goal"] == "Remind the user to check the report" {
-            json!({"kind":"reply","text":"Time to check the report."})
-        } else {
-            json!({"kind":"tool","name":"set_goal","args":{"text":"Remind the user to check the report"}})
-        };
-        Ok(response.to_string())
-    }
-}
-
 #[tokio::test]
-async fn due_reminder_runs_the_chief_and_delivers_its_reply() {
+async fn due_legacy_reminder_delivers_the_saved_text_with_no_model() {
     let db = fixture().await;
     let time = now();
+    sqlx::query("UPDATE users SET provider=NULL WHERE id='2'")
+        .execute(&db)
+        .await
+        .unwrap();
     sqlx::query(
         "INSERT INTO schedules(id,owner,title,input,kind,time_zone,next_run)
         VALUES('legacy-reminder','2','Report','Check the report','reminder','UTC',?)",
@@ -766,15 +746,12 @@ async fn due_reminder_runs_the_chief_and_delivers_its_reply() {
     .await
     .unwrap();
     schedules::dispatch(&db, time).await.unwrap();
-    assert!(store::claim_outbox(&db).await.unwrap().is_none());
-    let task = store::claim(&db).await.unwrap().unwrap();
-    assert_eq!(task.user, "2");
-    let app = app_with_model(&db, Arc::new(ScheduledChief));
-    runtime::work(&app, &task).await.unwrap();
+    assert!(store::claim(&db).await.unwrap().is_none());
     let reply = store::claim_outbox(&db).await.unwrap().unwrap();
     assert_eq!(reply.user, "2");
-    assert_eq!(reply.task.as_deref(), Some(task.id.as_str()));
-    assert_eq!(reply.body, "Time to check the report.");
+    assert_eq!(reply.body, "Check the report");
+    let task = task_for(&db, reply.task.as_deref().unwrap()).await;
+    assert_eq!(task.state, "completed");
 }
 
 struct ScriptedChief {

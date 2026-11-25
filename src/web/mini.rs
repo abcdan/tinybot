@@ -195,6 +195,8 @@ async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<
         "schedule-details" => return tasks::schedule_details(app, user, data).await,
         "create-routine" => tasks::create_routine(app, user, data).await?,
         "edit-schedule" => tasks::edit_schedule(app, user, data).await?,
+        "schedule-policy" => tasks::schedule_policy(app, user, data).await?,
+        "snooze-schedule" => tasks::snooze_schedule(app, user, data).await?,
         "pause-schedule" | "resume-schedule" => {
             tasks::pause_schedule(app, user, data, action == "pause-schedule").await?
         }

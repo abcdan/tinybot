@@ -62,7 +62,14 @@ test('schedules edit instructions, pause and run a saved routine', async () => {
                 return {task: 'fixture-run'};
             }
             if (action === 'schedule-history') {
-                return {runs: [{task: 'fixture-run', title: 'Weekly review', state: 'idle', trigger: 'manual', started_at: 1795526400}]};
+                return {runs: [{task: 'fixture-run', title: 'Weekly review', state: 'idle', trigger: 'manual', started_at: 1795526400}],
+                    occurrences: [{due_at: 1795526400, outcome: 'skipped_overlap'}]};
+            }
+            if (action === 'schedule-policy') {
+                assert.equal(data.revision, 2);
+                assert.deepEqual(data.policy, {catch_up: 'skip', quiet_start: 1320, quiet_end: 420});
+                schedule.revision++;
+                return {ok: true};
             }
             assert.fail(`Unexpected Mini App action ${action}`);
         });
@@ -78,6 +85,13 @@ test('schedules edit instructions, pause and run a saved routine', async () => {
         await page.getByText('Run queued.').waitFor();
         await page.getByText('Run history', {exact: true}).click();
         await page.getByText('Manual · Finished', {exact: false}).waitFor();
+        await page.getByText('Skipped · previous run still open', {exact: true}).waitFor();
+        await page.getByText('Timing policy', {exact: true}).click();
+        await page.getByLabel('After downtime').selectOption('skip');
+        await page.getByLabel('Quiet hours start').fill('22:00');
+        await page.getByLabel('Quiet hours end').fill('07:00');
+        await page.getByRole('button', {name: 'Save timing policy'}).click();
+        await page.getByText('Timing policy saved.').waitFor();
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
     } finally {
         await browser.close();
