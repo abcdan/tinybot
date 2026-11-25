@@ -114,15 +114,7 @@ pub async fn timezone(db: &SqlitePool, user: &str) -> Result<Tz> {
 }
 
 pub async fn set_zone(db: &SqlitePool, user: &str, value: &str) -> Result<()> {
-    let zone: Tz = value
-        .parse()
-        .context("enter an IANA time zone, such as Europe/Amsterdam")?;
-    sqlx::query("UPDATE users SET time_zone=? WHERE id=?")
-        .bind(zone.name())
-        .bind(user)
-        .execute(db)
-        .await?;
-    Ok(())
+    crate::settings::update_personal(db, user, crate::settings::Key::TimeZone, value).await
 }
 
 pub fn local_iso(timestamp: i64, zone: Tz) -> String {
