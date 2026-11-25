@@ -1549,6 +1549,8 @@ test('operator invitations and guest shared memory respect the signed account vi
             if (action === 'list-invites') return {pending: [], guests: [{
                 id: '2', display_name: 'Guest Sample', setup_complete: true, suspended: false, accepted_at: 1795526400,
                 active_day: null, runs_started: 1, runs_completed: 1, tokens: null, cost_usd: 0,
+                first_result: true, active_days: 1, delivered_runs: 1, checked_off_tasks: 0,
+                model_calls: 2, token_reported_calls: 0, cost_reported_calls: 1,
             }]};
             if (action === 'create-invite') {
                 assert.deepEqual(data, {});
@@ -1561,10 +1563,13 @@ test('operator invitations and guest shared memory respect the signed account vi
         await owner.getByRole('button', {name: 'Invites', exact: true}).click();
         await owner.getByRole('heading', {name: 'Guest Sample'}).waitFor();
         assert.equal(await owner.getByText('Not reported', {exact: true}).count(), 1);
+        await owner.getByText('Delivered', {exact: true}).waitFor();
+        await owner.getByText('Cost for 1 of 2 calls, tokens for 0 of 2.', {exact: true}).waitFor();
         await owner.getByRole('button', {name: 'Create invitation'}).click();
         await owner.getByText('/start fixture-invite', {exact: true}).waitFor();
 
         let joined = false;
+        let weekly_cents = null;
         const guestContext = await browser.newContext({viewport: {width: 320, height: 640}});
         await mockMiniApp(guestContext, ({action, data}) => {
             if (action === 'status') return {...state, user: '2', operator: false, shared_memory_available: true};
@@ -1578,6 +1583,16 @@ test('operator invitations and guest shared memory respect the signed account vi
                 return {ok: true};
             }
             if (action === 'shared-memory-notes') return {notes: [{id: 'note', body: 'A published reference.', own: false}]};
+            if (action === 'audit-sessions') return {sessions: [], next_before: null, usage: null};
+            if (action === 'my-usage') {
+                assert.deepEqual(data, {});
+                return {guest: {model_connected: true, first_result_at_ms: 1795526400000},
+                    alert: {weekly_cents, spent_microusd: null, model_calls: 1, cost_reported_calls: 0}};
+            }
+            if (action === 'save-usage-alert') {
+                weekly_cents = data.weekly_cents;
+                return {ok: true};
+            }
             throw new Error('Unexpected guest action ' + action);
         });
         const guest = await guestContext.newPage();
@@ -1587,6 +1602,17 @@ test('operator invitations and guest shared memory respect the signed account vi
         await guest.getByRole('button', {name: 'Join shared memory'}).click();
         await guest.getByText('A published reference.', {exact: true}).waitFor();
         assert.equal(await guest.getByRole('button', {name: 'Remove shared note'}).count(), 0);
+        await guest.getByRole('button', {name: 'Audit', exact: true}).click();
+        await guest.getByText('Setup and spend alerts', {exact: true}).click();
+        await guest.getByText('First result delivered', {exact: true}).waitFor();
+        await guest.getByText('Reported this week: Not reported', {exact: true}).waitFor();
+        await guest.getByLabel(/Weekly alert amount/).fill('1,25');
+        await guest.getByRole('button', {name: 'Save spend alert', exact: true}).click();
+        await guest.getByText('Spend alert saved.', {exact: true}).waitFor();
+        assert.equal(weekly_cents, 125);
+        await guest.getByRole('button', {name: 'Turn off spend alert', exact: true}).click();
+        await guest.getByText('Spend alert turned off.', {exact: true}).waitFor();
+        assert.equal(weekly_cents, null);
     } finally {
         await browser.close();
     }
