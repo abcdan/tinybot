@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod acceptance;
 mod audit;
+mod backup;
 mod channel;
 mod forms;
 mod mail;
@@ -62,7 +63,7 @@ async fn main() -> Result<()> {
         [cmd] if cmd == "egress" => return proxy::serve().await,
         [cmd] if matches!(cmd.as_str(), "help" | "--help" | "-h") => {
             println!(
-                "tinybot [serve | health | backup PATH | generate-key | codex connect HTTPS_ORIGIN]"
+                "tinybot [serve | health | backup PATH | check-backup PATH | generate-key | codex connect HTTPS_ORIGIN]"
             );
             return Ok(());
         }
@@ -81,6 +82,11 @@ async fn main() -> Result<()> {
             let db = store::open(Path::new(&db_path())).await?;
             sqlx::query("VACUUM INTO ?").bind(path).execute(&db).await?;
             println!("SQLite snapshot written.");
+            return Ok(());
+        }
+        [cmd, path] if cmd == "check-backup" => {
+            backup::check(Path::new(path)).await?;
+            println!("SQLite snapshot passed read-only integrity and reference checks.");
             return Ok(());
         }
         [] => {}

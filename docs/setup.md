@@ -221,6 +221,7 @@ destination for each snapshot so the backup never overwrites a previous copy.
 
 ```sh
 docker compose exec tinybot tinybot backup /data/snapshot.sqlite
+docker compose exec tinybot tinybot check-backup /data/snapshot.sqlite
 docker compose cp tinybot:/data/snapshot.sqlite ./snapshot.sqlite
 ```
 
@@ -250,3 +251,19 @@ browser image and use the Compose seccomp settings for Chromium. Check Python
 file mutation, job isolation, and resource limits with
 `docker compose exec -T sandbox python - < tests/python_worker.py`. Live
 Telegram, OAuth, and model-provider checks need accounts and a public hostname.
+
+## Verify a rollout
+
+Build the core, browser, and sandbox with `TINYBOT_RELEASE_SHA` set to the full
+commit SHA of the checkout. In Dokploy, set that value on the Compose project
+before building the release.
+
+```sh
+export TINYBOT_RELEASE_SHA="$(git rev-parse HEAD)"
+docker compose build tinybot browser sandbox
+python3 deploy/verify-release.py https://bot.example.com "$TINYBOT_RELEASE_SHA"
+```
+
+Run the verification command after the new stack starts. It checks the database,
+both worker revisions, and the served Mini App files against the checkout. The
+same command works against an isolated HTTP stack on loopback.
