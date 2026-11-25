@@ -1,7 +1,7 @@
-use super::super::{ENGINE, Step, feedback::Feedback, lookup, task_plan};
+use super::super::{ENGINE, Step, feedback::Feedback, lookup, reply, task_plan};
 use crate::{
     App, audit,
-    model::{ModelProvider, ProviderFailure, ToolDefinition, parse_json_reply, provider_failure},
+    model::{ModelProvider, ProviderFailure, ToolDefinition, provider_failure},
     security::clip,
     store::{self, Task},
 };
@@ -152,7 +152,7 @@ impl Limit {
                 let response = model
                     .complete_turn(instructions, &body, tools, None)
                     .await?;
-                let step = parse_json_reply(&response)?;
+                let step = reply::turn(&response).await?;
                 let usable = match &step {
                     Step::Reply { text, .. } => !text.trim().is_empty(),
                     Step::Tool { name, .. } => tools.iter().any(|tool| tool.name == name),
@@ -179,7 +179,7 @@ impl Limit {
 
 fn finish_step(response: &str, reaction_queued: bool) -> Result<Step> {
     Ok(Step::Reply {
-        text: lookup::reply_text(response, reaction_queued)?,
+        text: reply::text(response, reaction_queued)?,
         suggested_replies: Value::Null,
     })
 }

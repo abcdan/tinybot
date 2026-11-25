@@ -1,12 +1,11 @@
-use super::{Outcome, Step, string};
+use super::{Outcome, string};
 use crate::{
     audit,
-    model::{ModelProvider, ProviderFailure, parse_json_reply},
+    model::ModelProvider,
     net,
     security::{clip, hash},
 };
 use anyhow::{Result, ensure};
-use serde::Deserialize;
 use serde_json::{Value, json};
 use std::time::Duration;
 
@@ -149,47 +148,6 @@ pub(super) fn opened_page(observation: &Value) -> Option<Value> {
     }))
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct FinalReply {
-    text: String,
-}
-
-pub(super) fn reply_text(response: &str, allow_empty: bool) -> Result<String> {
-    let text = match parse_json_reply::<Step>(response) {
-        Ok(Step::Reply { text, .. }) => text,
-        Ok(_) => return Err(ProviderFailure::Incomplete.into()),
-        Err(_) => match parse_json_reply::<FinalReply>(response) {
-            Ok(reply) => reply.text,
-            Err(_) => {
-                let text = response.trim();
-                let link_led = text
-                    .strip_prefix('[')
-                    .and_then(|rest| rest.split_once("]("))
-                    .and_then(|(_, target)| target.split_once(')'))
-                    .is_some_and(|(url, _)| {
-                        url.starts_with("https://") && net::website(url).is_ok()
-                    });
-                ensure!(
-                    !text.starts_with(['{', '"', '<'])
-                        && (!text.starts_with('[') || link_led)
-                        && !text.starts_with("```")
-                        && !matches!(text, "null" | "true" | "false")
-                        && text.chars().any(char::is_alphanumeric)
-                        && text.len() <= 8_000,
-                    ProviderFailure::Incomplete
-                );
-                text.to_owned()
-            }
-        },
-    };
-    ensure!(
-        !text.trim().is_empty() || allow_empty,
-        ProviderFailure::Incomplete
-    );
-    Ok(text)
-}
-
 pub(super) async fn reply(
     model: &dyn ModelProvider,
     context: &Value,
@@ -216,7 +174,7 @@ pub(super) async fn reply(
             model.complete(FINAL_REPLY, &input.to_string()),
         )
         .await??;
-        reply_text(&response, false)
+        super::reply::text(&response, false)
     })
     .await
 }
@@ -242,13 +200,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_final_model_can_answer_as_plain_text_without_exposing_tool_envelopes() {
+    async fn the_final_model_can_answer_as_plain_text() {
         let context = json!({"latest_request":"When does the research meeting start?"});
         assert_eq!(
             reply(&PlainReply, &context, None).await.unwrap(),
             "The meeting starts at 10:00."
         );
-        assert!(reply_text(r#"{"kind":"tool","name":"browse","args":{}}"#, false).is_err());
-        assert!(reply_text(r#"{"text":"A truncated message"#, false).is_err());
     }
 }
