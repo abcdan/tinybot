@@ -11,7 +11,9 @@ use sqlx::{FromRow, Sqlite, SqlitePool, Transaction};
 use std::time::Duration;
 
 mod occurrences;
+mod preview;
 pub(crate) use occurrences::{Policy, occurrences, set_policy, snooze};
+pub(crate) use preview::{Preview, context as preview_context, queue as queue_preview};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -85,6 +87,7 @@ pub struct Run {
     started_at: Option<i64>,
     schedule_revision: Option<i64>,
     trigger: Option<String>,
+    preview: bool,
 }
 
 #[derive(Serialize)]
@@ -438,7 +441,7 @@ pub async fn run_now(
     active_owner(&mut tx, user, task_scope).await?;
     let schedule = owned(&mut *tx, user, id).await?;
     if let Some(task) =
-        sqlx::query_scalar("SELECT task FROM schedule_runs WHERE schedule=? AND request_id=?")
+        sqlx::query_scalar("SELECT task FROM schedule_runs WHERE schedule=? AND request_id=? AND preview_sample IS NULL")
             .bind(id)
             .bind(request_id)
             .fetch_optional(&mut *tx)
@@ -488,7 +491,8 @@ async fn active_owner(
 pub async fn history(db: &SqlitePool, user: &str, id: &str) -> Result<Vec<Run>> {
     owned(db, user, id).await?;
     Ok(sqlx::query_as(
-        "SELECT t.id AS task,t.title,t.state,t.updated,r.started_at,r.schedule_revision,r.trigger
+        "SELECT t.id AS task,t.title,t.state,t.updated,r.started_at,r.schedule_revision,r.trigger,
+                r.preview_sample IS NOT NULL AS preview
          FROM tasks t LEFT JOIN schedule_runs r ON r.task=t.id
          WHERE t.schedule=? AND t.user=? AND t.state<>'revoked'
            AND (t.agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=t.agent AND
@@ -527,7 +531,8 @@ async fn enqueue(
         "INSERT INTO tasks(id,user,title,state,goal,updated,schedule)
          SELECT ?,id,?,CASE WHEN ? THEN 'completed' WHEN provider IS NULL THEN 'setup' ELSE 'queued' END,?,?,?
          FROM users WHERE id=? AND suspended_at IS NULL AND (? OR NOT EXISTS(
-            SELECT 1 FROM tasks WHERE schedule=? AND state IN ('queued','running','waiting','setup','uncertain')
+            SELECT 1 FROM tasks t LEFT JOIN schedule_runs r ON r.task=t.id
+            WHERE t.schedule=? AND t.state IN ('queued','running','waiting','setup','uncertain') AND r.preview_sample IS NULL
          ))",
     )
     .bind(&task)
