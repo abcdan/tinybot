@@ -27,6 +27,7 @@ pub(crate) use email::{edit_draft, smtp_editable_fields, smtp_outbound_preview, 
 pub use engine::run;
 #[cfg(test)]
 pub(crate) use engine::work;
+pub(crate) use failure::confirmed_step;
 
 use crate::{
     App,

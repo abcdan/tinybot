@@ -27,6 +27,7 @@ mod model_settings;
 mod output_limits;
 mod routines;
 mod self_settings;
+mod task_workbench;
 mod telegram_workflows;
 mod tool_budget;
 
