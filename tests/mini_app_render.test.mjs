@@ -62,7 +62,20 @@ test('schedules edit instructions, pause and run a saved routine', async () => {
                 return {task: 'fixture-run'};
             }
             if (action === 'schedule-history') {
-                return {runs: [{task: 'fixture-run', title: 'Weekly review', state: 'idle', trigger: 'manual', started_at: 1795526400}]};
+                return {runs: [{task: 'fixture-run', title: 'Weekly review', state: 'idle', trigger: 'manual', started_at: 1795526400}],
+                    occurrences: [{due_at: 1795526400, outcome: 'skipped_overlap'}]};
+            }
+            if (action === 'schedule-policy') {
+                assert.equal(data.revision, 2);
+                assert.deepEqual(data.policy, {catch_up: 'skip', quiet_start: 1320, quiet_end: 420});
+                schedule.revision++;
+                return {ok: true};
+            }
+            if (action === 'preview-routine') {
+                assert.equal(data.revision, 3);
+                assert.equal(data.sample, 'Sample update: release ready.');
+                assert.match(data.request_id, /^[a-f0-9-]{36}$/);
+                return {task: 'fixture-preview'};
             }
             assert.fail(`Unexpected Mini App action ${action}`);
         });
@@ -78,6 +91,17 @@ test('schedules edit instructions, pause and run a saved routine', async () => {
         await page.getByText('Run queued.').waitFor();
         await page.getByText('Run history', {exact: true}).click();
         await page.getByText('Manual · Finished', {exact: false}).waitFor();
+        await page.getByText('Skipped · previous run still open', {exact: true}).waitFor();
+        await page.getByText('Timing policy', {exact: true}).click();
+        await page.getByLabel('After downtime').selectOption('skip');
+        await page.getByLabel('Quiet hours start').fill('22:00');
+        await page.getByLabel('Quiet hours end').fill('07:00');
+        await page.getByRole('button', {name: 'Save timing policy'}).click();
+        await page.getByText('Timing policy saved.').waitFor();
+        await page.getByText('Dry run', {exact: true}).click();
+        await page.getByLabel('Sample input').fill('Sample update: release ready.');
+        await page.getByRole('button', {name: 'Preview in Telegram'}).click();
+        await page.getByText('Dry run queued. The preview will arrive in Telegram.').waitFor();
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
     } finally {
         await browser.close();
@@ -146,7 +170,7 @@ test('completing a task moves it to paginated history and reopening selects it a
                 return {items: [archived], next_offset: null};
             }
             if (action === 'select-task') {
-                assert.deepEqual(data, {task: current.id});
+                assert.deepEqual(data, {task: current.id, revision: 8});
                 current.state = 'idle';
                 state.active_task = current.id;
                 return {ok: true};
@@ -167,11 +191,108 @@ test('completing a task moves it to paginated history and reopening selects it a
         await page.getByRole('button', {name: 'Load more tasks', exact: true}).click();
         await page.getByRole('heading', {name: archived.title}).waitFor();
         await task.getByRole('button', {name: 'Reopen', exact: true}).click();
+        await page.getByText('Task reopened. Send your next message in Telegram.').waitFor();
+        await page.getByRole('button', {name: 'Open', exact: true}).click();
         await task.getByText('Current Chief task', {exact: true}).waitFor();
         await page.getByLabel('Search retained messages and tasks').fill('older plan');
         await page.getByRole('button', {name: 'Search tasks', exact: true}).click();
         await page.getByRole('heading', {name: archived.title}).locator('..')
             .getByRole('button', {name: 'Reopen', exact: true}).waitFor();
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
+    } finally {
+        await browser.close();
+    }
+});
+
+test('a task deep link shows the latest result and opens the exact pending review and audit', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 640}});
+        const page = await context.newPage();
+        const task = {id: 'research', title: 'Prepare a release note', state: 'waiting', revision: 4};
+        const other = {id: 'other', title: 'Bookkeeping task', state: 'waiting', revision: 1};
+        const pending = {
+            id: 'write-note', task: task.id, revision: 4, kind: 'approve', expires: 1795600000,
+            content: {operation: 'Update release notes', destination: 'https://notes.example.test',
+                mcp: true, explanation: 'Write the reviewed summary into the release note.'},
+        };
+        const unrelated = {...pending, id: 'other-request', task: other.id, revision: 1,
+            content: {...pending.content, operation: 'Review bookkeeping change'}};
+        const audit = {id: 53, status: 'waiting', started_at: 1795526400, finished_at: null};
+        const state = {user: '1', provider: 'codex', requests: [pending, unrelated], tasks: [task, other], time_zone: 'UTC'};
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return state;
+            if (action === 'task-detail') {
+                assert.deepEqual(data, {task: task.id});
+                return {task, audit, requests: state.requests.filter(request => request.task === task.id),
+                    last_confirmed: 'I had already read a web page for this task.',
+                    reply: {event: 7, text: 'The release summary is ready.', truncated: false}};
+            }
+            if (action === 'audit-session') {
+                assert.deepEqual(data, {id: 53});
+                return {session: {...audit, task: task.id}, entries: [], next_after: null};
+            }
+            if (action === 'approve') {
+                assert.deepEqual(data, {id: pending.id});
+                task.state = 'queued';
+                state.requests = [unrelated];
+                return {ok: true};
+            }
+            assert.fail('Unexpected Mini App request ' + action);
+        });
+        await page.goto('https://tinybot.test/mini?task=research');
+        await page.getByRole('heading', {name: 'Prepare a release note'}).waitFor();
+        await page.getByText('The release summary is ready.').waitFor();
+        await page.getByText('I had already read a web page for this task.').waitFor();
+        await page.getByRole('heading', {name: 'Update release notes'}).waitFor();
+        await page.getByText('https://notes.example.test').waitFor();
+        await page.getByText(/^Expires /).waitFor();
+        assert.equal(await page.getByText('Review bookkeeping change').count(), 0);
+
+        await page.getByRole('button', {name: 'View audit'}).click();
+        await page.getByText('No activity recorded for this message yet.').waitFor();
+        await page.getByRole('button', {name: 'Back to task', exact: true}).click();
+        await page.getByRole('button', {name: 'Approve once'}).click();
+        await page.getByText('Approved for this call.').waitFor();
+        await page.getByRole('heading', {name: 'Update release notes'}).waitFor({state: 'detached'});
+        await page.getByRole('button', {name: 'Back to tasks'}).click();
+        await page.getByRole('button', {name: 'Needs you', exact: true}).click();
+        await page.getByRole('heading', {name: 'Review bookkeeping change'}).waitFor();
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
+    } finally {
+        await browser.close();
+    }
+});
+
+test('the task files shelf downloads the selected retained version with its safe filename', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 640}, acceptDownloads: true});
+        const page = await context.newPage();
+        const task = {id: 'receipt', title: 'Make a receipt', state: 'completed', revision: 3};
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return {user: '1', provider: 'codex', requests: [], tasks: [task]};
+            if (action === 'task-detail') {
+                assert.deepEqual(data, {task: task.id});
+                return {task, requests: [], files: [
+                    {id: 'latest', kind: 'file', name: 'receipt.txt', version: 2, delivery: 'sent'},
+                    {id: 'earlier', kind: 'file', name: 'receipt.txt', version: 1},
+                ]};
+            }
+            if (action === 'download-task-file') {
+                assert.deepEqual(data, {task: task.id, id: 'earlier', kind: 'file'});
+                return {name: '../receipt.txt', content: Buffer.from('Retained version one').toString('base64')};
+            }
+            assert.fail('Unexpected Mini App request ' + action);
+        });
+        await page.goto('https://tinybot.test/mini?task=receipt');
+        await page.getByText('Sent to Telegram').waitFor();
+        const earlier = page.locator('.task-card').filter({hasText: 'Generated file · Version 1'});
+        const [file] = await Promise.all([
+            page.waitForEvent('download'), earlier.getByRole('button', {name: 'Download'}).click(),
+        ]);
+        assert.equal(file.suggestedFilename(), '_receipt.txt');
+        assert.equal(await readFile(await file.path(), 'utf8'), 'Retained version one');
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
     } finally {
         await browser.close();
@@ -224,7 +345,7 @@ test('first-run setup checks one key, searches tool models and opens the named C
         await page.getByRole('searchbox', {name: 'Search models'}).fill('another');
         await page.getByRole('combobox', {name: 'Task model'}).selectOption('fixture/chosen');
         await page.getByRole('button', {name: 'Finish setup'}).click();
-        await page.getByRole('heading', {name: 'Requests'}).waitFor();
+        await page.getByRole('heading', {name: 'Tasks'}).waitFor();
         assert.equal(await page.locator('#chief-label').textContent(), input.chief_name);
         assert.equal(await page.locator('input[type=password]').count(), 0);
         assert.deepEqual(await page.evaluate(() => [localStorage.length, sessionStorage.length]), [0, 0]);
@@ -564,11 +685,11 @@ test('a Telegram profile launch requests fullscreen after verification and can f
                 document.documentElement.style.setProperty('--tg-content-safe-area-inset-top', '32px');
             `);
             await page.goto('https://tinybot.test/#tgWebAppData=fixture');
-            await page.getByRole('heading', {name: 'Requests', exact: true}).waitFor();
+            await page.getByRole('heading', {name: 'Tasks', exact: true}).waitFor();
             assert.deepEqual(await page.evaluate(() => window.calls), expected);
             assert.equal(await page.locator('.shell').evaluate(element => getComputedStyle(element).paddingTop), '68px');
             await page.getByRole('button', {name: 'Refresh', exact: true}).click();
-            await page.getByRole('heading', {name: 'Requests', exact: true}).waitFor();
+            await page.getByRole('heading', {name: 'Tasks', exact: true}).waitFor();
             assert.deepEqual(await page.evaluate(() => window.calls), expected);
             await context.close();
         }
@@ -635,7 +756,7 @@ test('settings follow live Telegram colors and open the GitHub source in Telegra
     `);
     try {
         await page.goto('https://tinybot.test/mini');
-        await page.getByRole('heading', {name: 'Requests', exact: true}).waitFor();
+        await page.getByRole('heading', {name: 'Tasks', exact: true}).waitFor();
         const colors = () => page.evaluate(() => ({
             bodyBackground: getComputedStyle(document.body).backgroundColor,
             cardBackground: getComputedStyle(document.querySelector('.card')).backgroundColor,
@@ -679,7 +800,7 @@ test('settings have readable light and dark palettes without Telegram theme data
     await mockMiniApp(context, () => ({user: '1', provider: 'codex', requests: [], tasks: []}));
     try {
         await page.goto('https://tinybot.test/mini');
-        await page.getByRole('heading', {name: 'Requests', exact: true}).waitFor();
+        await page.getByRole('heading', {name: 'Tasks', exact: true}).waitFor();
         const colors = () => page.locator('body').evaluate(body => {
             const {backgroundColor, color} = getComputedStyle(body);
             return {backgroundColor, color};
@@ -725,7 +846,7 @@ test('browser proxy settings are operator only and clear the private URL after s
     });
     try {
         await page.goto('https://tinybot.test/mini');
-        await page.getByRole('heading', {name: 'Requests', exact: true}).waitFor();
+        await page.getByRole('heading', {name: 'Tasks', exact: true}).waitFor();
         const tab = page.getByRole('button', {name: 'Browser', exact: true});
         assert.equal(await tab.count(), 0);
         const refresh = page.getByRole('button', {name: 'Refresh', exact: true});
@@ -760,7 +881,7 @@ test('browser proxy settings are operator only and clear the private URL after s
 
         state.browser_proxy = null;
         await refresh.click();
-        await page.getByRole('heading', {name: 'Requests', exact: true}).waitFor();
+        await page.getByRole('heading', {name: 'Tasks', exact: true}).waitFor();
         assert.equal(await tab.count(), 0);
     } finally {
         await browser.close();
@@ -868,7 +989,7 @@ test('Email approval shows the exact plain-text draft and offers a one-time appr
             return {ok: true};
         });
         await page.goto('https://tinybot.test/mini');
-        const request = page.locator('#view > .card').filter({has: page.getByRole('heading', {name: 'Send email'})});
+        const request = page.locator('#view .card').filter({has: page.getByRole('heading', {name: 'Send email'})});
         await request.waitFor();
         assert.equal(await request.locator('pre').textContent(), draft);
         assert.equal(await request.getByRole('button', {name: 'Always approve'}).count(), 0);

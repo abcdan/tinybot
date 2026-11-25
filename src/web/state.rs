@@ -37,26 +37,11 @@ pub(super) async fn status(app: &App, user: &str) -> Result<Value> {
             }
         })
         .collect::<Vec<_>>();
-    let tasks = store::list_tasks(&app.db, user).await?;
+    let tasks = store::task_views::recent(&app.db, user).await?;
     let requests = store::list_requests(&app.db, user)
         .await?
-        .into_iter()
-        .filter_map(|entry| {
-            if store::settings_requests::is_settings_kind(&entry.kind) {
-                return store::settings_requests::view(&entry).ok();
-            }
-            let payload = if entry.kind == "email-send" {
-                let raw: Value = serde_json::from_str(&entry.payload).ok()?;
-                let preview =
-                    crate::runtime::smtp_preview(&app.vault, user, &entry.id, &raw).ok()?;
-                let draft =
-                    crate::runtime::smtp_editable_fields(&app.vault, user, &entry.id, &raw).ok()?;
-                json!({"operation":"Send email","explanation":preview,"draft":draft})
-            } else {
-                request_content(&entry.kind, &entry.payload)
-            };
-            Some(json!({"id":entry.id,"kind":entry.kind,"content":payload,"expires":entry.expires}))
-        })
+        .iter()
+        .filter_map(|entry| request_view(app, user, entry))
         .collect::<Vec<_>>();
     let mail_accounts = store::mail::list_accounts(&app.db, &app.vault, user).await?;
     let connectors: Vec<Connector> =
@@ -134,6 +119,26 @@ pub(super) async fn status(app: &App, user: &str) -> Result<Value> {
         "onboarding_required":onboarding.required,"display_name":onboarding.display_name,"chief_name":onboarding.chief_name,
         "mcp_approvals":mcp_approvals,"mail_accounts":mail_accounts}),
     )
+}
+
+pub(super) fn request_view(app: &App, user: &str, entry: &store::Pending) -> Option<Value> {
+    let mut view = if store::settings_requests::is_settings_kind(&entry.kind) {
+        store::settings_requests::view(entry).ok()?
+    } else {
+        let content = if entry.kind == "email-send" {
+            let raw: Value = serde_json::from_str(&entry.payload).ok()?;
+            let preview = crate::runtime::smtp_preview(&app.vault, user, &entry.id, &raw).ok()?;
+            let draft =
+                crate::runtime::smtp_editable_fields(&app.vault, user, &entry.id, &raw).ok()?;
+            json!({"operation":"Send email","explanation":preview,"draft":draft})
+        } else {
+            request_content(&entry.kind, &entry.payload)
+        };
+        json!({"id":entry.id,"kind":entry.kind,"content":content,"expires":entry.expires})
+    };
+    view["task"] = json!(entry.task);
+    view["revision"] = json!(entry.revision);
+    Some(view)
 }
 
 fn request_content(kind: &str, raw: &str) -> Value {

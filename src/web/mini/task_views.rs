@@ -1,6 +1,10 @@
-use super::text;
-use crate::{App, store::task_views};
+use super::{state, text};
+use crate::{
+    App,
+    store::{self, task_views},
+};
 use anyhow::{Context, Result, ensure};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 
 pub(super) async fn search(app: &App, user: &str, data: &Value) -> Result<Value> {
@@ -24,6 +28,49 @@ pub(super) async fn search(app: &App, user: &str, data: &Value) -> Result<Value>
     let next = (items.len() > 20 && offset < 100_000).then_some(offset + 20);
     items.truncate(20);
     Ok(json!({"items":items,"next_offset":next}))
+}
+
+pub(super) async fn detail(app: &App, user: &str, data: &Value) -> Result<Value> {
+    let task_id = text(data, "task", 64)?;
+    let detail = task_views::detail(&app.db, user, task_id)
+        .await?
+        .context("task unavailable")?;
+    let requests = detail
+        .requests
+        .iter()
+        .filter_map(|request| state::request_view(app, user, request))
+        .collect::<Vec<_>>();
+    let mut view = serde_json::to_value(detail)?;
+    view["requests"] = json!(requests);
+    view["files"] = json!(store::artifacts::list(&app.db, user, task_id).await?);
+    Ok(view)
+}
+
+pub(super) async fn download(app: &App, user: &str, data: &Value) -> Result<Value> {
+    let file = store::artifacts::download(
+        &app.db,
+        &app.vault,
+        user,
+        text(data, "task", 64)?,
+        text(data, "id", 64)?,
+        text(data, "kind", 16)?,
+    )
+    .await?;
+    Ok(json!({"name":file.name,"content":STANDARD.encode(file.bytes)}))
+}
+
+pub(super) async fn select(app: &App, user: &str, data: &Value) -> Result<()> {
+    let selected = if data.get("revision").is_some() {
+        let (task_id, revision) = task_revision(data)?;
+        task_views::select_at(&app.db, user, task_id, revision).await?
+    } else {
+        store::select_task(&app.db, user, text(data, "task", 64)?).await?
+    };
+    ensure!(
+        selected,
+        "Task changed or is unavailable. Refresh to check its status."
+    );
+    Ok(())
 }
 
 pub(super) async fn stop(app: &App, user: &str, data: &Value) -> Result<()> {

@@ -93,6 +93,6 @@ pub async fn latest(db: &SqlitePool, vault: &Vault, task: &Task) -> Result<Optio
     .transpose()
 }
 
-fn binding(user: &str, message_id: i64) -> String {
+pub(super) fn binding(user: &str, message_id: i64) -> String {
     format!("telegram-attachment:{user}:{message_id}")
 }

@@ -15,6 +15,7 @@ use tokio::{net::TcpListener, sync::Mutex};
 type Mock = Arc<Mutex<(Vec<(String, Value)>, VecDeque<Value>)>>;
 
 mod reply_parts;
+mod task_status;
 
 #[tokio::test]
 async fn settings_form_links_open_the_signed_mini_app_and_expire_on_steering() {

@@ -1,5 +1,10 @@
 use super::{app_with_model, fixture, message, pending_id};
-use crate::{model::ModelProvider, runtime, schedules, security::now, store};
+use crate::{
+    model::{ModelProvider, TextDelta, ToolDefinition},
+    runtime, schedules,
+    security::now,
+    store,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -85,4 +90,96 @@ async fn a_chat_routine_requires_approval_and_keeps_chief_and_helper_steps_in_or
             .await
             .unwrap();
     assert_eq!(reply, "The routine finished.");
+}
+
+struct PreviewModel;
+
+#[async_trait]
+impl ModelProvider for PreviewModel {
+    async fn complete(&self, _: &str, _: &str) -> Result<String> {
+        unreachable!()
+    }
+
+    async fn complete_turn(
+        &self,
+        instructions: &str,
+        input: &str,
+        tools: &[ToolDefinition],
+        _: Option<&mut TextDelta<'_>>,
+    ) -> Result<String> {
+        assert!(tools.is_empty());
+        assert!(instructions.contains("Never claim any tool"));
+        let input: Value = serde_json::from_str(input)?;
+        assert_eq!(
+            input,
+            json!({"instructions":"Review meeting notes.",
+            "sample":"Sample decision: ship on Friday.","steps":["Draft a private note."]})
+        );
+        Ok(json!({"text":"I would draft a note with the Friday decision."}).to_string())
+    }
+}
+
+#[tokio::test]
+async fn a_routine_dry_run_simulates_saved_steps_without_running_tools() {
+    let db = fixture().await;
+    let app = app_with_model(&db, Arc::new(PreviewModel));
+    let time = now();
+    let schedule = schedules::save_routine(
+        &db,
+        "1",
+        schedules::RoutineRequest {
+            title: "Meeting notes".into(),
+            input: "Review meeting notes.".into(),
+            at: None,
+            cron: None,
+            steps: vec![schedules::RoutineStep {
+                instruction: "Draft a private note.".into(),
+                agent: None,
+            }],
+        },
+        None,
+        time,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        schedules::queue_preview(&db, "2", &schedule.id, 0, "foreign", "sample", time)
+            .await
+            .is_err()
+    );
+    let sample = "Sample decision: ship on Friday.";
+    let preview = schedules::queue_preview(&db, "1", &schedule.id, 0, "fixture", sample, time)
+        .await
+        .unwrap();
+    assert_eq!(
+        schedules::queue_preview(&db, "1", &schedule.id, 0, "fixture", sample, time)
+            .await
+            .unwrap(),
+        preview
+    );
+    let task = store::claim(&db).await.unwrap().unwrap();
+    assert_eq!(task.id, preview);
+    let live = schedules::run_now(&db, "1", &schedule.id, 0, "live", time, None)
+        .await
+        .unwrap();
+    assert_ne!(live, preview);
+    runtime::work(&app, &task).await.unwrap();
+    assert_eq!(
+        store::claim_outbox(&db).await.unwrap().unwrap().body,
+        "Dry run\n\nI would draft a note with the Friday decision."
+    );
+    let attempts: i64 = sqlx::query_scalar("SELECT count(*) FROM task_tool_attempts WHERE task=?")
+        .bind(&preview)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(attempts, 0);
+    assert!(
+        store::list_tasks(&db, "1")
+            .await
+            .unwrap()
+            .iter()
+            .all(|item| item.id != preview)
+    );
 }

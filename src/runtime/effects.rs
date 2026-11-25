@@ -375,6 +375,8 @@ pub(super) async fn execute(tool: Builtin, ctx: &ToolContext<'_>, args: Value) -
                         .bind(body)
                         .execute(&mut *tx)
                         .await?;
+                    store::artifacts::remember_document(&mut tx, &app.vault, task, name, body)
+                        .await?;
                 }
                 tx.commit().await?;
             }

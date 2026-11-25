@@ -31,15 +31,6 @@ fn audit_cursor(data: &Value, field: &str) -> Result<Option<i64>> {
         .transpose()
 }
 
-pub(super) async fn select_task(app: &App, user: &str, data: &Value) -> Result<()> {
-    let task = text(data, "task", 64)?;
-    ensure!(
-        store::select_task(&app.db, user, task).await?,
-        "task unavailable"
-    );
-    Ok(())
-}
-
 pub(super) async fn get_form(app: &App, user: &str, data: &Value) -> Result<Value> {
     forms::input_request(&app.db, user, text(data, "id", 36)?).await
 }
@@ -104,17 +95,12 @@ pub(super) async fn pause_schedule(app: &App, user: &str, data: &Value, pause: b
 }
 
 pub(super) async fn run_schedule(app: &App, user: &str, data: &Value) -> Result<Value> {
-    let request = text(data, "request_id", 36)?;
-    ensure!(
-        uuid::Uuid::parse_str(request).is_ok(),
-        "invalid run request"
-    );
     let task = schedules::run_now(
         &app.db,
         user,
         text(data, "id", 64)?,
         revision(data)?,
-        request,
+        run_request(data)?,
         now(),
         None,
     )
@@ -122,9 +108,61 @@ pub(super) async fn run_schedule(app: &App, user: &str, data: &Value) -> Result<
     Ok(json!({"task":task}))
 }
 
+pub(super) async fn preview_routine(app: &App, user: &str, data: &Value) -> Result<Value> {
+    let task = schedules::queue_preview(
+        &app.db,
+        user,
+        text(data, "id", 64)?,
+        revision(data)?,
+        run_request(data)?,
+        text(data, "sample", 2_000)?,
+        now(),
+    )
+    .await?;
+    Ok(json!({"task":task}))
+}
+
+fn run_request(data: &Value) -> Result<&str> {
+    let request = text(data, "request_id", 36)?;
+    ensure!(
+        uuid::Uuid::parse_str(request).is_ok(),
+        "invalid run request"
+    );
+    Ok(request)
+}
+
 pub(super) async fn schedule_history(app: &App, user: &str, data: &Value) -> Result<Value> {
-    let runs = schedules::history(&app.db, user, text(data, "id", 64)?).await?;
-    Ok(json!({"runs":runs}))
+    let id = text(data, "id", 64)?;
+    let runs = schedules::history(&app.db, user, id).await?;
+    let occurrences = schedules::occurrences(&app.db, user, id).await?;
+    Ok(json!({"runs":runs,"occurrences":occurrences}))
+}
+
+pub(super) async fn schedule_policy(app: &App, user: &str, data: &Value) -> Result<()> {
+    let policy: schedules::Policy =
+        serde_json::from_value(data["policy"].clone()).context("invalid schedule policy")?;
+    schedules::set_policy(
+        &app.db,
+        user,
+        text(data, "id", 64)?,
+        revision(data)?,
+        policy,
+    )
+    .await
+}
+
+pub(super) async fn snooze_schedule(app: &App, user: &str, data: &Value) -> Result<()> {
+    schedules::snooze(
+        &app.db,
+        user,
+        text(data, "id", 64)?,
+        revision(data)?,
+        data["minutes"]
+            .as_i64()
+            .context("invalid snooze duration")?,
+        now(),
+    )
+    .await
 }
 
 fn revision(data: &Value) -> Result<i64> {

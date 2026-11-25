@@ -16,6 +16,7 @@ mod media;
 mod memory;
 mod openrouter_tools;
 mod output;
+mod preview;
 mod review;
 mod settings;
 mod suggestions;
@@ -27,6 +28,7 @@ pub(crate) use email::{edit_draft, smtp_editable_fields, smtp_outbound_preview, 
 pub use engine::run;
 #[cfg(test)]
 pub(crate) use engine::work;
+pub(crate) use failure::confirmed_step;
 
 use crate::{
     App,

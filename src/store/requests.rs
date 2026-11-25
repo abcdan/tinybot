@@ -4,16 +4,27 @@ use super::{
 use crate::security::{clip, now};
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
-use sqlx::{Sqlite, SqlitePool, Transaction};
+use sqlx::{Executor, Sqlite, SqlitePool, Transaction};
 
 pub async fn list_requests(db: &SqlitePool, user: &str) -> Result<Vec<Pending>> {
-    Ok(sqlx::query_as(&format!("SELECT p.* FROM pending p JOIN tasks t ON t.id=p.task
+    list_requests_in(db, user, None).await
+}
+
+pub(super) async fn list_requests_in<'a>(
+    db: impl Executor<'a, Database = Sqlite>,
+    user: &str,
+    task: Option<&str>,
+) -> Result<Vec<Pending>> {
+    Ok(sqlx::query_as(&format!("SELECT p.* FROM pending p JOIN tasks t ON t.id=p.task AND t.user=p.user
         WHERE p.user=? AND p.state='waiting' AND p.expires>=? AND p.kind IN ('approve','form','form-submit','agent-spec','elicitation','email-send','settings-form','settings-approve')
-        AND t.state='waiting' AND t.revision=p.revision
+        AND t.state='waiting' AND t.revision=p.revision AND (? IS NULL OR p.task=?)
+        AND EXISTS(SELECT 1 FROM users u WHERE u.id=t.user AND u.suspended_at IS NULL)
+        AND (t.shared_memory_pair IS NULL OR EXISTS(SELECT 1 FROM available_shared_memory_pairs sm
+          WHERE sm.id=t.shared_memory_pair AND (sm.owner=t.user OR sm.guest=t.user)))
         AND (t.agent IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=t.agent
         AND (a.owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=?))))
         AND (p.kind NOT IN ('settings-form','settings-approve') OR (t.user=p.user AND {}))
-        ORDER BY p.expires, p.id LIMIT 30", settings_requests::TASK_SCOPE)).bind(user).bind(now()).bind(user).bind(user).fetch_all(db).await?)
+        ORDER BY p.expires, p.id LIMIT 30", settings_requests::TASK_SCOPE)).bind(user).bind(now()).bind(task).bind(task).bind(user).bind(user).fetch_all(db).await?)
 }
 
 pub async fn pause(

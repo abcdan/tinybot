@@ -82,6 +82,11 @@ function scheduleCard(state, schedule) {
         ? scheduleTime(schedule.next_run, schedule.time_zone) + ' · ' + schedule.time_zone
         : label[schedule.state];
     const item = card(schedule.title, next);
+    const snoozed = schedule.snoozed_until > Date.now() / 1000;
+    const delayedUntil = Math.max(schedule.held_until ?? 0, schedule.snoozed_until ?? 0);
+    if (active && delayedUntil > Date.now() / 1000) {
+        item.append(node('p', `${snoozed ? 'Snoozed' : 'Deferred'} until ${scheduleTime(delayedUntil, schedule.time_zone)}`, 'meta'));
+    }
     const {id, revision} = schedule;
     const controls = row();
     if (editable || schedule.state === 'done') {
@@ -93,32 +98,86 @@ function scheduleCard(state, schedule) {
             ? action('Pause', 'pause-schedule', {id, revision}, 'Schedule paused.', true)
             : action('Resume', 'resume-schedule', {id, revision}, 'Schedule resumed.', true));
     }
+    if (active) {
+        controls.append(snoozed
+            ? action('End snooze', 'snooze-schedule', {id, revision, minutes: 0}, 'Snooze ended.', true)
+            : action('Snooze for 1 hour', 'snooze-schedule', {id, revision, minutes: 60}, 'Snoozed for one hour.', true));
+    }
     if (editable) {
         controls.append(action('Cancel schedule', 'cancel-schedule', {id}, 'Schedule cancelled.', true));
         item.append(controls, schedulePanel('Edit schedule', async () => {
             const draft = await api('schedule-details', {id});
             return routineForm(state, draft, true);
-        }));
+        }), schedulePanel('Timing policy', async () => schedulePolicy(schedule)));
+        if (schedule.kind !== 'reminder') item.append(schedulePanel('Dry run', async () => previewForm(schedule)));
     } else if (controls.childElementCount) item.append(controls);
     item.append(schedulePanel('Run history', async () => {
-        const {runs} = await api('schedule-history', {id});
+        const {runs, occurrences = []} = await api('schedule-history', {id});
         const history = node('div');
-        if (!runs.length) history.append(node('p', 'No runs yet.'));
-        for (const run of runs) {
-            const status = {idle: 'Finished', setup: 'Needs setup'};
+        if (!runs.length && !occurrences.length) history.append(node('p', 'No runs yet.'));
+        const status = {idle: 'Finished', setup: 'Needs setup', completed: 'Finished', running: 'Working', waiting: 'Needs you'};
+        const seen = new Set();
+        for (const occurrence of occurrences) {
+            if (occurrence.task) seen.add(occurrence.task);
+            const labels = {deferred: 'Deferred', skipped_overlap: 'Skipped · previous run still open',
+                skipped_missed: 'Skipped · missed occurrence', invalid: 'Invalid schedule', superseded: 'Schedule changed'};
+            const delivery = {sent: 'Delivered', queued: 'Delivery queued', sending: 'Sending', failed: 'Delivery failed', uncertain: 'Delivery unconfirmed'};
+            const result = labels[occurrence.outcome] ?? delivery[occurrence.delivery]
+                ?? status[occurrence.task_state] ?? occurrence.task_state ?? 'Run queued';
+            const entry = card(scheduleTime(occurrence.due_at, schedule.time_zone), result);
+            if (occurrence.delayed_until) {
+                entry.append(node('p', `Held until ${scheduleTime(occurrence.delayed_until, schedule.time_zone)}`, 'meta'));
+            }
+            if (occurrence.task && occurrence.task_state !== 'cancelled') {
+                entry.append(action('Continue in chat', 'select-task', {task: occurrence.task}, 'Send your next message in Telegram.', true));
+            }
+            history.append(entry);
+        }
+        for (const run of runs.filter(run => !seen.has(run.task))) {
             const type = {manual: 'Manual', schedule: 'Scheduled'};
             const details = [
                 scheduleTime(run.started_at ?? run.updated, schedule.time_zone),
-                type[run.trigger],
+                run.preview ? 'Dry run' : type[run.trigger],
                 status[run.state] ?? run.state,
             ].filter(Boolean).join(' · ');
             const entry = card(run.title, details);
-            if (run.state !== 'cancelled') entry.append(action('Continue in chat', 'select-task', {task: run.task}, 'Send your next message in Telegram.', true));
+            if (!run.preview && run.state !== 'cancelled') entry.append(action('Continue in chat', 'select-task', {task: run.task}, 'Send your next message in Telegram.', true));
             history.append(entry);
         }
         return history;
     }));
     return item;
+}
+
+function previewForm(schedule) {
+    const request_id = crypto.randomUUID();
+    return form('Preview in Telegram', [field('sample', 'Sample input', {
+        type: 'textarea', max: 2000, hint: 'Use sample data to see what the saved steps would produce.',
+    })], async ({sample}) => {
+        await api('preview-routine', {id: schedule.id, revision: schedule.revision, request_id, sample});
+        await refresh();
+        show('Dry run queued. The preview will arrive in Telegram.');
+    });
+}
+
+function schedulePolicy(schedule) {
+    const localTime = value => Number.isInteger(value)
+        ? `${String(Math.floor(value / 60)).padStart(2, '0')}:${String(value % 60).padStart(2, '0')}` : '';
+    const minutes = value => {
+        if (!value) return null;
+        const [hour, minute] = value.split(':').map(Number);
+        return hour * 60 + minute;
+    };
+    return form('Save timing policy', [
+        field('catch_up', 'After downtime', {choices: [['coalesce', 'Run once'], ['skip', 'Skip missed recurring runs']], value: schedule.catch_up ?? 'coalesce'}),
+        field('quiet_start', 'Quiet hours start', {type: 'time', required: false, value: localTime(schedule.quiet_start), hint: schedule.time_zone}),
+        field('quiet_end', 'Quiet hours end', {type: 'time', required: false, value: localTime(schedule.quiet_end)}),
+    ], async data => {
+        await api('schedule-policy', {id: schedule.id, revision: schedule.revision,
+            policy: {catch_up: data.catch_up, quiet_start: minutes(data.quiet_start), quiet_end: minutes(data.quiet_end)}});
+        await refresh();
+        show('Timing policy saved.');
+    });
 }
 
 function scheduleTime(time, timeZone) {
@@ -165,7 +224,7 @@ function routineForm(state, draft, editing) {
     if (draft.kind !== 'reminder') routineSteps(steps, state, draft);
     return form(editing ? 'Save changes' : 'Save routine', [
         field('title', 'Title', {value: draft.title, max: 100}),
-        field('input', 'Instructions', {type: 'textarea', value: draft.instructions, max: 2000}),
+        field('input', draft.kind === 'reminder' ? 'Reminder text' : 'Instructions', {type: 'textarea', value: draft.instructions, max: 2000}),
         timing, ...scheduleControls, steps,
     ], async data => {
         const names = [...steps.querySelectorAll('fieldset')];
