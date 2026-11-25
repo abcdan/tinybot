@@ -12,6 +12,7 @@ use std::time::Duration;
 
 mod occurrences;
 mod preview;
+pub(crate) mod webhooks;
 pub(crate) use occurrences::{Policy, occurrences, set_policy, snooze};
 pub(crate) use preview::{Preview, context as preview_context, queue as queue_preview};
 
@@ -491,7 +492,8 @@ async fn active_owner(
 pub async fn history(db: &SqlitePool, user: &str, id: &str) -> Result<Vec<Run>> {
     owned(db, user, id).await?;
     Ok(sqlx::query_as(
-        "SELECT t.id AS task,t.title,t.state,t.updated,r.started_at,r.schedule_revision,r.trigger,
+        "SELECT t.id AS task,t.title,t.state,t.updated,r.started_at,r.schedule_revision,
+                CASE WHEN r.request_id LIKE 'webhook/%' THEN 'webhook' ELSE r.trigger END AS trigger,
                 r.preview_sample IS NOT NULL AS preview
          FROM tasks t LEFT JOIN schedule_runs r ON r.task=t.id
          WHERE t.schedule=? AND t.user=? AND t.state<>'revoked'

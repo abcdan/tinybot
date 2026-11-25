@@ -183,3 +183,103 @@ async fn a_routine_dry_run_simulates_saved_steps_without_running_tools() {
             .all(|item| item.id != preview)
     );
 }
+
+#[tokio::test]
+async fn a_signed_webhook_queues_one_run_and_cannot_replay_after_revision_change() {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    use tower_service::Service;
+
+    let db = fixture().await;
+    let app = Arc::new(app_with_model(&db, Arc::new(PreviewModel)));
+    let time = now();
+    let routine = schedules::save_routine(
+        &db,
+        "1",
+        schedules::RoutineRequest {
+            title: "Inbound briefing".into(),
+            input: "Draft a briefing.".into(),
+            at: None,
+            cron: Some("0 9 * * *".into()),
+            steps: vec![schedules::RoutineStep {
+                instruction: "Read the latest status.".into(),
+                agent: None,
+            }],
+        },
+        None,
+        time,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        schedules::webhooks::install(&db, &app.vault, "2", &routine.id, 0, time)
+            .await
+            .is_err()
+    );
+    let hook = schedules::webhooks::install(&db, &app.vault, "1", &routine.id, 0, time)
+        .await
+        .unwrap();
+    let body = r#"{"event_id":"fixture-first"}"#;
+    let request = |body: &str, at: i64, signed: bool| {
+        let timestamp = at.to_string();
+        let mut mac = Hmac::<Sha256>::new_from_slice(hook.secret.as_bytes()).unwrap();
+        mac.update(timestamp.as_bytes());
+        mac.update(b".");
+        mac.update(body.as_bytes());
+        let signature = if signed {
+            hex::encode(mac.finalize().into_bytes())
+        } else {
+            "0".repeat(64)
+        };
+        Request::builder()
+            .method("POST")
+            .uri(format!("/hooks/routine/{}", hook.id))
+            .header("x-tinybot-timestamp", timestamp)
+            .header("x-tinybot-signature", signature)
+            .body(Body::from(body.to_owned()))
+            .unwrap()
+    };
+    let mut router = crate::web::router(app);
+    for (event, at, signed, expected) in [
+        (body, time, false, StatusCode::UNAUTHORIZED),
+        (body, time - 301, true, StatusCode::UNAUTHORIZED),
+        (body, time, true, StatusCode::ACCEPTED),
+        (body, time, true, StatusCode::ACCEPTED),
+        (
+            r#"{"event_id":"fixture-second"}"#,
+            time,
+            true,
+            StatusCode::CONFLICT,
+        ),
+    ] {
+        assert_eq!(
+            router
+                .clone()
+                .call(request(event, at, signed))
+                .await
+                .unwrap()
+                .status(),
+            expected
+        );
+    }
+    let runs =
+        serde_json::to_value(schedules::history(&db, "1", &routine.id).await.unwrap()).unwrap();
+    assert_eq!(runs.as_array().unwrap().len(), 1);
+    assert_eq!(runs[0]["trigger"], "webhook");
+    schedules::set_paused(&db, "1", &routine.id, 0, true, time)
+        .await
+        .unwrap();
+    assert_eq!(
+        router
+            .call(request(body, time, true))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
