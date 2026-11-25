@@ -26,6 +26,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
 mod limits;
+mod quick;
 
 pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback>) -> Result<()> {
     if store::groups::is_group_task(&app.db, &task.id).await? {
@@ -34,6 +35,11 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
     if !store::current(&app.db, task).await? {
         return store::settle(&app.db, task, "cancelled", None).await;
     }
+    let mut quick_failure = match quick::try_reply(app, task, feedback).await? {
+        quick::Attempt::Finished => return Ok(()),
+        quick::Attempt::Defer => None,
+        quick::Attempt::ProviderFailed(error) => Some(error),
+    };
     let paired = task.shared_memory_pair.is_some();
     let agent = if let Some(agent) = &task.agent {
         sqlx::query_as::<_, Agent>("SELECT * FROM agents WHERE id=?")
@@ -314,7 +320,9 @@ pub(super) async fn work_task(app: &App, task: &Task, feedback: Option<&Feedback
         let instructions = recovery.as_deref().unwrap_or(ENGINE);
         let compact_input = recovery.as_ref().map(|_| limits::replan_input(&input));
         let model_input = compact_input.as_ref().unwrap_or(&input);
-        let step = if let Some(feedback) = feedback {
+        let step = if let Some(error) = quick_failure.take() {
+            Err(error)
+        } else if let Some(feedback) = feedback {
             feedback
                 .complete(&*model, instructions, model_input, &definitions)
                 .await
