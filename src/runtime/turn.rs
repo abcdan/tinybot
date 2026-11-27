@@ -173,6 +173,7 @@ async fn run_turn(
                 && (!super::media_tools::is_media_tool(tool.name()) || personal_settings)
                 && (!super::media_tools::is_image_tool(tool.name()) || image_tools_available)
                 && (!super::settings::is_settings_tool(tool.name()) || personal_settings)
+                && (!super::routine_results::is_tool(tool.name()) || personal_settings)
                 && (!matches!(
                     tool.name(),
                     super::calendar::CALENDAR_READ | super::calendar::CALENDAR_DRAFT
