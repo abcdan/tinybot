@@ -28,7 +28,7 @@ impl ModelProvider for BusyChief {
             );
         }
         let position = self.0.fetch_add(1, Ordering::Relaxed) + 1;
-        Ok(json!({"kind":"tool","name":"set_goal","args":{"text":format!("Inspect record {position}")}}).to_string())
+        Ok(json!({"kind":"tool","name":"recall_memory","args":{"query":format!("Inspect record {position}")}}).to_string())
     }
 }
 
@@ -44,7 +44,11 @@ impl ModelProvider for LoopDecisions {
         let input: Value = serde_json::from_str(input)?;
         let attempts = input["state"]["attempts"].as_array().unwrap();
         assert_eq!(attempts.len(), 10);
-        assert!(attempts.iter().all(|attempt| attempt["tool"] == "set_goal"));
+        assert!(
+            attempts
+                .iter()
+                .all(|attempt| attempt["tool"] == "recall_memory")
+        );
         assert!(!input.to_string().contains("Inspect record"));
         let count = self.checks.fetch_add(1, Ordering::Relaxed) + 1;
         Ok(json!({"stalled":{"type":"noul","noul":if self.stop_at == Some(count) {0.99} else {0.05}}}).to_string())

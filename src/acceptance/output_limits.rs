@@ -36,7 +36,9 @@ enum Stage {
     },
     ConfirmGoal {
         without_tools: bool,
+        during_replan: bool,
     },
+    RepeatSavedGoal,
     RepeatGoalWithoutTools,
 }
 
@@ -113,9 +115,12 @@ impl ModelProvider for LimitModel {
                 assert!(tools.iter().any(|tool| tool.name == "set_goal"));
                 json!({"kind":"tool","name":"set_goal","args":{"text":GOAL}})
             }
-            Stage::ConfirmGoal { without_tools } => {
+            Stage::ConfirmGoal {
+                without_tools,
+                during_replan,
+            } => {
                 assert_eq!(tools.is_empty(), *without_tools);
-                assert_eq!(plan, !without_tools);
+                assert_eq!(plan, *during_replan);
                 let context: Value = serde_json::from_str(input)?;
                 assert_eq!(context["goal"], GOAL);
                 assert!(context["history"].as_array().unwrap().iter().any(|entry| {
@@ -123,6 +128,19 @@ impl ModelProvider for LimitModel {
                         && entry["text"].as_str().unwrap().contains(r#""saved":true"#)
                 }));
                 json!({"kind":"reply","text":SAVED})
+            }
+            Stage::RepeatSavedGoal => {
+                assert!(!tools.iter().any(|tool| tool.name == "set_goal"));
+                let context: Value = serde_json::from_str(input)?;
+                assert!(
+                    !context["tools"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|tool| tool["name"] == "set_goal")
+                );
+                assert_eq!(context["goal"], GOAL);
+                json!({"kind":"tool","name":"set_goal","args":{"text":"A redundant rewrite"}})
             }
             Stage::RepeatGoalWithoutTools => {
                 assert!(tools.is_empty());
@@ -292,6 +310,7 @@ async fn a_smaller_plan_uses_the_normal_tool_broker() {
             },
             Stage::ConfirmGoal {
                 without_tools: false,
+                during_replan: true,
             },
         ],
         calls: AtomicUsize::new(0),
@@ -311,11 +330,43 @@ async fn a_smaller_plan_uses_the_normal_tool_broker() {
 }
 
 #[tokio::test]
+async fn a_saved_goal_is_not_rewritten_during_the_same_turn() {
+    let db = fixture().await;
+    let model = Arc::new(LimitModel {
+        steps: vec![
+            Stage::SaveGoal {
+                during_replan: false,
+            },
+            Stage::RepeatSavedGoal,
+            Stage::ConfirmGoal {
+                without_tools: false,
+                during_replan: false,
+            },
+        ],
+        calls: AtomicUsize::new(0),
+    });
+    let app = app_with_model(&db, model.clone());
+    message(&db, 1, "1", "Save the goal to compare three train routes.").await;
+    let task = store::claim(&db).await.unwrap().unwrap();
+    runtime::work(&app, &task).await.unwrap();
+
+    assert_eq!(store::claim_outbox(&db).await.unwrap().unwrap().body, SAVED);
+    assert_eq!(model.calls.load(Ordering::Relaxed), 3);
+    let attempts: i64 = sqlx::query_scalar("SELECT count(*) FROM task_tool_attempts WHERE task=?")
+        .bind(&task.id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(attempts, 1);
+}
+
+#[tokio::test]
 async fn saved_work_is_reported_without_enabling_more_tools() {
     for (completion, succeeds) in [
         (
             Stage::ConfirmGoal {
                 without_tools: true,
+                during_replan: false,
             },
             true,
         ),
@@ -399,6 +450,7 @@ async fn a_limit_in_the_saved_work_finalizer_gets_a_compact_retry() {
             Stage::LookupLimit,
             Stage::ConfirmGoal {
                 without_tools: true,
+                during_replan: false,
             },
         ],
         calls: AtomicUsize::new(0),
