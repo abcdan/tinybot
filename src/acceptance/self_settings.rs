@@ -16,7 +16,10 @@ struct SettingsChief;
 
 #[async_trait]
 impl ModelProvider for SettingsChief {
-    async fn complete(&self, _: &str, _: &str) -> Result<String> {
+    async fn complete(&self, system: &str, _: &str) -> Result<String> {
+        if system.starts_with("Return JSON with authorized") {
+            return Ok(json!({"authorized":true}).to_string());
+        }
         unreachable!("settings use the normal Chief tool protocol")
     }
 
@@ -38,6 +41,10 @@ impl ModelProvider for SettingsChief {
         }
         assert!(has_tool("read_settings") && has_tool("configure_settings"));
         match (request, last["role"].as_str()) {
+            ("Use my existing connections automatically",Some("user"))=>Ok(json!({"kind":"tool","name":"manage_account","args":{"action":"connection-policy","data":{"id":"all","automatic":true}}}).to_string()),
+            ("Use my existing connections automatically",Some("tool"))=>Ok(json!({"kind":"reply","text":"Connections updated."}).to_string()),
+            ("Switch to Amsterdam time",Some("user"))=>Ok(json!({"kind":"tool","name":"configure_settings","args":{"apply":true,"fields":["time_zone"],"values":{"time_zone":"Europe/Amsterdam"}}}).to_string()),
+            ("Switch to Amsterdam time",Some("tool"))=>Ok(json!({"kind":"reply","text":"Timezone set."}).to_string()),
             ("Show my settings", Some("user")) => {
                 Ok(json!({"kind":"tool","name":"read_settings","args":{}}).to_string())
             }
@@ -584,4 +591,46 @@ async fn settings_history_discards_credential_like_values_and_expires_pending_re
         app.models.server_tool_settings("1").await.unwrap()["web_search"],
         false
     );
+}
+
+#[tokio::test]
+async fn direct_chat_settings_use_history_without_a_form() {
+    let db = fixture().await;
+    let app = app_with_model(&db, Arc::new(SettingsChief));
+    send(&app, 701, "Switch to Amsterdam time").await;
+    assert_eq!(saved(&app).await.1, "Europe/Amsterdam");
+    assert!(store::list_requests(&db, "1").await.unwrap().is_empty());
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM settings_history WHERE user='1'")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn upgrading_connections_from_chat_only_changes_the_owners_future_actions() {
+    let db = fixture().await;
+    let app = app_with_model(&db, Arc::new(SettingsChief));
+    sqlx::query("INSERT INTO connectors(id,owner,name,endpoint,auth,automatic_actions) VALUES('first','1','First','https://first.test','public',0),('other','2','Other','https://other.test','public',0)").execute(&db).await.unwrap();
+    sqlx::query("INSERT INTO mail_accounts(id,owner,label,address,can_send,encrypted,automatic_actions) VALUES('work','1','Work','me@example.test',1,'fixture',0)").execute(&db).await.unwrap();
+    sqlx::query("INSERT INTO tasks(id,user,title,state,updated) VALUES('previous','1','Old review','waiting',1)").execute(&db).await.unwrap();
+    sqlx::query("INSERT INTO pending(id,user,task,revision,kind,payload,expires) VALUES('old','1','previous',0,'approve','{}',9999999999)").execute(&db).await.unwrap();
+    send(&app, 801, "Use my existing connections automatically").await;
+    let modes: Vec<bool> =
+        sqlx::query_scalar("SELECT automatic_actions FROM connectors ORDER BY id")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+    assert_eq!(modes, vec![true, false]);
+    let mail: bool =
+        sqlx::query_scalar("SELECT automatic_actions FROM mail_accounts WHERE id='work'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert!(mail);
+    let pending: String = sqlx::query_scalar("SELECT state FROM pending WHERE id='old'")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(pending, "waiting");
 }

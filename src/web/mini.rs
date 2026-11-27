@@ -49,16 +49,7 @@ pub(super) async fn mini(
         return Err(forbidden());
     }
     let action = request.action.as_str();
-    if matches!(
-        action,
-        "list-invites"
-            | "create-invite"
-            | "revoke-invite"
-            | "suspend-guest"
-            | "restore-guest"
-            | "invite-shared-memory"
-    ) && user != app.operator
-    {
+    if operator_action(action) && user != app.operator {
         return Err(forbidden());
     }
     operation(&app, &user, action, &request.data)
@@ -118,6 +109,31 @@ pub(super) fn text<'a>(data: &'a Value, key: &str, max: usize) -> Result<&'a str
         .map(str::trim)
         .filter(|value| !value.is_empty() && value.len() <= max)
         .with_context(|| format!("invalid {key}"))
+}
+
+fn operator_action(action: &str) -> bool {
+    matches!(
+        action,
+        "list-invites"
+            | "create-invite"
+            | "revoke-invite"
+            | "suspend-guest"
+            | "restore-guest"
+            | "invite-shared-memory"
+    )
+}
+
+pub(crate) async fn chief_operation(
+    app: &App,
+    user: &str,
+    action: &str,
+    data: &Value,
+) -> Result<Value> {
+    anyhow::ensure!(
+        !operator_action(action) || user == app.operator,
+        "Operator access required"
+    );
+    operation(app, user, action, data).await
 }
 
 async fn operation(app: &App, user: &str, action: &str, data: &Value) -> Result<Value> {

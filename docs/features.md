@@ -13,6 +13,31 @@ With both providers connected, you can choose a **Backup model**. TinyBot can ma
 attempt with that provider after a temporary model failure before tool work starts.
 The chat shows when the task switches providers.
 
+## Give an instruction once
+
+“Send Sam the update” authorizes sending. “Draft an update for Sam” gives you a draft in chat.
+New mail and MCP connections can carry out a matching instruction automatically. Existing
+connections keep their review settings until you say **Use my existing connections automatically**.
+Say **Ask before using my work email** to restore review for that connection. Pending reviews
+keep their original decision. TinyBot asks when it needs a recipient, a sign-in, or a clearer instruction.
+
+In private chat, ask the Chief to change settings, pause a routine, configure a helper,
+manage a project or change a connection’s action policy. Operator controls use the same
+account permissions as the Mini App. Enter passwords and tokens in the private setup screen.
+
+For a standing mail rule, try **File receipts from my Receipts folder in my Personal Docblock
+workspace. Only tell me if filing fails.** Connect an IMAP inbox and a writable Docblock workspace
+first. For each new message in that folder, TinyBot extracts the merchant, date and total from
+the email text and files a note under `receipts/`. Missing information or an unconfirmed write
+appears in Telegram. Ask **Which folders are you watching?** to inspect your rules,
+or **Pause receipt filing in my Receipts folder** to keep the rule for later.
+
+To handle meeting requests, give the Chief a folder, the teammates’ addresses, working hours,
+and permission to reply with free slots from your selected calendar. For a weekly project
+update, name the project source and recipient and specify what counts as a change worth sending.
+A pre-meeting brief needs a connector that can list upcoming events or an external service that
+triggers the saved routine before the meeting.
+
 ## Take a task beyond one message
 
 > Compare these three options and tell me which is easiest to set up.
@@ -154,7 +179,7 @@ synthesis.
 > What model are you using? Change your name to Atlas and set my timezone to Europe/Amsterdam.
 
 In a private chat, your Chief can read your personal settings and see which
-services are connected. When you ask for a change, TinyBot opens a form with the
+services are connected. Ask for a specific change to apply it in chat. For a preview, TinyBot opens a form with the
 requested fields. Submit the form to compare the current and proposed values,
 then tap **Approve changes** to save them. If a setting changed since you opened
 the form, ask for a fresh one.
@@ -173,7 +198,7 @@ to enter your answers in the Mini App. The Chief picks up the task after you sub
 can use your task model or Mercury 3 to prepare the form.
 
 For a supported public website form, TinyBot can offer private inputs in the Mini App
-and ask you to review a masked preview before submitting. It submits to the same website
+with a **Submit to website** button and an optional masked review. It submits to the same website
 over HTTPS. The website form values go to TinyBot over HTTPS and stay in memory until
 use or expiry. Use provider or connector settings for API keys and credentials.
 
@@ -204,7 +229,7 @@ webhook. Existing approvals still apply to the triggered run.
 
 Ask the Chief to save a repeatable procedure, then review its steps before saving.
 Choose whether each step runs with the Chief or one of your own helpers. A run uses
-the steps saved when it started and asks for approvals through the normal task flow.
+the steps saved when it started and applies the selected connection policy to its actions.
 Start with **Inbox briefing** for messages in folders enabled for automatic handling,
 or edit **Weekly research digest** to follow a topic using public sources.
 
@@ -255,8 +280,7 @@ When a tool call needs a decision, TinyBot explains what it would do and offers
 **Approve once**, **Always approve**, and **Deny**. A saved approval covers that tool on
 the current connection. Manage these approvals in **Connections**. Replacing or removing
 the connection clears its saved approvals. With an OpenRouter key, Jev can check whether
-a call uses an operator-verified tool for a read. Writes and ambiguous calls require
-approval unless you have explicitly saved approval for that tool.
+a call uses an operator-verified tool for a read. A requested write can run directly under an automatic connection policy. Other writes can open a review.
 
 ## Write and share notes in Docblock
 
@@ -283,8 +307,7 @@ Telegram. Tap **Read more** or reply to the notice to give the Chief the email t
 can enable automatic handling for a folder to summarize incoming mail, ask you a
 question, or prepare a draft.
 
-Every SMTP send asks for one-time approval. Review the sender, recipients, subject, and
-body. Choose **Edit email draft** in the Mini App to save changes for a fresh review,
+An explicit send instruction can use an automatic mail connection. When a send needs review, check the sender, recipients, subject, and body. Choose **Edit email draft** in the Mini App to save changes for a fresh review,
 then tap **Approve once** or **Deny**. TinyBot reports when the mail server
 accepts the message for delivery. It encrypts mail credentials and retrieved mail.
 

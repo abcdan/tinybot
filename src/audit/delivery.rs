@@ -70,6 +70,10 @@ struct Summary {
     runs: i64,
     completed_runs: i64,
     checked_off_tasks: i64,
+    automatic_runs_finished: i64,
+    clarification_runs: i64,
+    connection_setup_runs: i64,
+    provider_failure_runs: i64,
     delivered_runs: i64,
     failed_deliveries: i64,
     uncertain_deliveries: i64,
@@ -89,6 +93,10 @@ pub(super) async fn summary(
     let sql = format!(
         "WITH visible AS (SELECT s.* {VISIBLE_SESSIONS}), {TIMINGS}
          SELECT COUNT(*) AS runs,COUNT(*) FILTER (WHERE status='completed') AS completed_runs,
+                COUNT(*) FILTER (WHERE status='completed' AND EXISTS(SELECT 1 FROM audit_entries e WHERE e.session=timings.id AND e.kind='authorization' AND e.status='automatic') AND NOT EXISTS(SELECT 1 FROM audit_entries e WHERE e.session=timings.id AND e.kind='request' AND e.status='waiting')) AS automatic_runs_finished,
+                COUNT(*) FILTER (WHERE EXISTS(SELECT 1 FROM audit_entries e WHERE e.session=timings.id AND e.kind='request' AND e.status='waiting' AND e.name IN ('form','elicitation','settings-form'))) AS clarification_runs,
+                COUNT(*) FILTER (WHERE status='setup' OR EXISTS(SELECT 1 FROM audit_entries e WHERE e.session=timings.id AND e.kind='request' AND e.name IN ('connector-setup','mail-setup') AND e.status='waiting')) AS connection_setup_runs,
+                COUNT(*) FILTER (WHERE EXISTS(SELECT 1 FROM audit_entries e WHERE e.session=timings.id AND e.kind='model' AND e.status='failed' AND json_extract(e.detail,'$.category') IS NOT NULL)) AS provider_failure_runs,
                 COUNT(DISTINCT task) FILTER (WHERE EXISTS(
                     SELECT 1 FROM audit_entries e WHERE e.session=timings.id AND e.kind='task'
                       AND e.name='marked_complete' AND e.status='completed')) AS checked_off_tasks,

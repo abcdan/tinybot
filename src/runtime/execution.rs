@@ -29,6 +29,19 @@ pub(super) async fn resume_approval(ctx: &ToolContext<'_>) -> Result<ApprovalPro
         return Ok(ApprovalProgress::Continue);
     };
     let payload: Value = serde_json::from_str(&pending.payload)?;
+    if !super::automatic::current(ctx, &payload).await?
+        || !super::receipts::current(ctx, &payload).await?
+    {
+        store::finish_action(
+            &app.db,
+            ctx.task,
+            &pending.id,
+            "The action policy or instruction changed before execution. Nothing was sent.",
+            false,
+        )
+        .await?;
+        return continue_if_current(ctx).await;
+    }
     if docblock_save {
         super::docblock_save::resume(ctx, &pending, &payload).await?;
         return Ok(ApprovalProgress::Settle);
@@ -67,7 +80,14 @@ pub(super) async fn resume_approval(ctx: &ToolContext<'_>) -> Result<ApprovalPro
         }
         "chief-delegate" => (delegate(ctx, &payload).await.map(Outcome::Continue), false),
         _ => {
-            let call: Call = serde_json::from_value(payload["call"].clone())?;
+            let call: Call = if let Some(sealed) = payload["sealed_call"].as_str() {
+                serde_json::from_slice(&app.vault.open(
+                    &format!("automatic-call:{}:{}", ctx.task.user, pending.id),
+                    sealed,
+                )?)?
+            } else {
+                serde_json::from_value(payload["call"].clone())?
+            };
             audit::record("approval", "external_action", "approved", Value::Null).await;
             if let Some(scope) = payload.get("mcp_approval") {
                 let scope: store::McpApprovalScope = serde_json::from_value(scope.clone())?;
@@ -86,7 +106,11 @@ pub(super) async fn resume_approval(ctx: &ToolContext<'_>) -> Result<ApprovalPro
                 store::interrupt_action(&app.db, ctx.task, &pending.id).await?;
                 return Ok(ApprovalProgress::Settle);
             }
-            (result, !media)
+            let announce = !media
+                && (result.is_err()
+                    || (payload["receipt"] != true
+                        && payload.get("automatic_connection").is_none()));
+            (result, announce)
         }
     };
     if finish(ctx, &pending.id, result, announce).await? {

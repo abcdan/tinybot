@@ -18,7 +18,9 @@ connections, review an action, or see what happened during a run.
 | “Ask Research to check those sources.” | Hand the task to a configured helper and bring the result back to the same chat. |
 | “Remember that I prefer short summaries.” | Save the preference and recall it in future conversations. |
 | “Draft the weekly update every Monday at 9.” | Give the Chief that prompt on a schedule and send the result to Telegram. |
-| “Draft a reply to the email I just opened.” | Show the exact email for one-time approval before SMTP sends it. |
+| “Draft a reply to the email I just opened.” | Prepare a draft in chat. Ask to send it when ready. |
+
+New connections can act on your requests and standing rules. Say “Use my existing connections automatically” to enable this for previously connected accounts. Ask your Chief to manage settings or pause a rule in chat.
 
 TinyBot also accepts voice messages and uploads, opens Mini App forms, and
 connects to services through MCP. The audit log shows which steps ran, what

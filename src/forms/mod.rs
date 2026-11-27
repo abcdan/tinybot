@@ -71,6 +71,7 @@ impl Forms {
         user: &str,
         pending_id: &str,
         values: BTreeMap<String, String>,
+        send: bool,
     ) -> Result<()> {
         let mut requests = self.requests.lock().await;
         let request = requests.get(pending_id).context("form expired")?;
@@ -106,13 +107,25 @@ impl Forms {
         crate::audit::request_changed(&mut tx, &task.id, task.revision, "website_form", "answered")
             .await?;
         // Store only redacted preview data in SQLite. Full values stay in the sealed in-memory request.
-        sqlx::query("INSERT INTO pending(id,user,task,revision,kind,payload,expires) VALUES(?,?,?,?,'form-submit',?,?)")
+        sqlx::query("INSERT INTO pending(id,user,task,revision,kind,payload,expires,state) VALUES(?,?,?,?,'form-submit',?,?,?)")
             .bind(&approval).bind(&task.user).bind(&task.id).bind(task.revision)
-            .bind(json!({"destination":target,"preview":preview}).to_string()).bind(now()+600).execute(&mut *tx).await?;
-        sqlx::query("INSERT INTO outbox(user,task,agent,body,button) VALUES(?,?,?,?,'mini')")
+            .bind(json!({"destination":target,"preview":preview}).to_string()).bind(now()+600).bind(if send {"approved"} else {"waiting"}).execute(&mut *tx).await?;
+        if send {
+            sqlx::query("UPDATE tasks SET state='queued',updated=? WHERE id=? AND revision=? AND state='waiting'").bind(now()).bind(&task.id).bind(task.revision).execute(&mut *tx).await?;
+            crate::audit::request_changed(
+                &mut tx,
+                &task.id,
+                task.revision,
+                "form-submit",
+                "approved",
+            )
+            .await?;
+        } else {
+            sqlx::query("INSERT INTO outbox(user,task,agent,body,button) VALUES(?,?,?,?,'mini')")
             .bind(&task.user).bind(&task.id).bind(&task.agent)
             .bind(format!("The form is ready. Review the destination and masked preview in the Mini App before submitting.\n{target}"))
             .execute(&mut *tx).await?;
+        }
         submissions.insert(
             approval.clone(),
             SealedSubmission {

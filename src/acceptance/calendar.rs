@@ -22,6 +22,9 @@ struct CalendarChief;
 #[async_trait]
 impl ModelProvider for CalendarChief {
     async fn complete(&self, system: &str, _: &str) -> Result<String> {
+        if system.starts_with("Return JSON with authorized") {
+            return Ok(json!({"authorized":true}).to_string());
+        }
         assert!(system.starts_with("Review this proposed TinyBot tool action"));
         Ok(json!({"verdict":"allow","reason":"Read the owner's selected calendar."}).to_string())
     }
@@ -57,7 +60,7 @@ impl ModelProvider for CalendarChief {
             assert!(last["text"].as_str().unwrap().contains("\"busy\":[]"));
             json!({"kind":"tool","name":"draft_calendar_event","args":{
                 "title":TITLE,"start":START,"end":END,"attendees":[{"name":"Casey","email":GUEST}],
-                "notify_attendees":true
+                "notify_attendees":true,"execute":input["latest_request"].as_str().unwrap().contains("directly")
             }})
         } else {
             json!({"kind":"reply","text":""})
@@ -302,6 +305,43 @@ async fn calendar_reselection_invalidates_the_pending_event_even_with_identical_
     let task = store::claim(&app.db).await.unwrap().unwrap();
     runtime::work(&app, &task).await.unwrap();
     assert_eq!(calls.lock().unwrap().len(), 1);
+    worker.abort();
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn a_direct_instruction_creates_one_calendar_event_and_recovers_before_execution() {
+    let (app, calls, worker, path) = setup(true).await;
+    runtime::calendar::configure(&app, "1", "cal", "work", "team@example.test")
+        .await
+        .unwrap();
+    store::ingest_telegram(
+        &app.db,
+        "1",
+        1,
+        "1",
+        "Book the quarterly review directly and invite Casey.",
+        1,
+    )
+    .await
+    .unwrap();
+    let task = store::claim(&app.db).await.unwrap().unwrap();
+    runtime::work(&app, &task).await.unwrap();
+    assert!(store::list_requests(&app.db, "1").await.unwrap().is_empty());
+    assert_eq!(task_for(&app.db, &task.id).await.state, "queued");
+    store::recover(&app.db).await.unwrap();
+    let resumed = store::claim(&app.db).await.unwrap().unwrap();
+    runtime::work(&app, &resumed).await.unwrap();
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call["name"] == "create-event")
+            .count(),
+        1
+    );
+    assert!(store::claim(&app.db).await.unwrap().is_none());
     worker.abort();
     let _ = std::fs::remove_file(path);
 }

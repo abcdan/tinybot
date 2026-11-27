@@ -68,6 +68,57 @@ async fn permitted_on<'a>(db: impl Executor<'a, Database = Sqlite>, task: &Task)
     .await?)
 }
 
+pub(crate) async fn restore_direct(app: &App, task: &Task, original: i64) -> Result<Value> {
+    let mut tx = app.db.begin_with("BEGIN IMMEDIATE").await?;
+    ensure!(
+        permitted_on(&mut *tx, task).await?,
+        "Use your active private Chief chat."
+    );
+    let baseline = settings::snapshot(&mut tx, &task.user).await?;
+    let values = history::restore_target(&mut tx, &task.user, original, &baseline).await?;
+    let change = settings::prepare_values(&values, &baseline)?;
+    settings::apply(&mut tx, &task.user, &change).await?;
+    history::record(
+        &mut tx,
+        &task.user,
+        Some(original),
+        "restore",
+        change.personal_values(),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(json!({"restored":change.preview()}))
+}
+
+pub(crate) async fn apply_direct(
+    app: &App,
+    task: &Task,
+    values: &BTreeMap<Key, String>,
+) -> Result<Value> {
+    ensure!(
+        permitted(&app.db, task).await?,
+        "Use your private Chief chat."
+    );
+    let baseline = settings::snapshot(&mut *app.db.acquire().await?, &task.user).await?;
+    let change = settings::prepare(app, &task.user, values, &baseline).await?;
+    let mut tx = app.db.begin_with("BEGIN IMMEDIATE").await?;
+    ensure!(
+        permitted_on(&mut *tx, task).await?,
+        "The settings request changed."
+    );
+    settings::apply(&mut tx, &task.user, &change).await?;
+    history::record(
+        &mut tx,
+        &task.user,
+        None,
+        "settings",
+        change.personal_values(),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(json!(change.preview()))
+}
+
 pub(crate) async fn propose(
     app: &App,
     task: &Task,

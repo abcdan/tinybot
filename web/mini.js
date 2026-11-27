@@ -24,7 +24,7 @@ const params = new URLSearchParams(window.location.search);
 let formId = params.get('form');
 const openInTelegram = 'Open TinyBot from its Telegram profile or tap Settings & forms in the bot chat.';
 let state;
-let tab = params.get('connect') === 'docblock' ? 'connectors' : 'home';
+let tab = ({docblock: 'connectors', mail: 'mail'})[params.get('connect')] ?? 'home';
 let generation = 0;
 let opened = false;
 let disposeOnboarding;
@@ -349,17 +349,27 @@ function requestInputs(fields) {
 
 function generatedForm(request) {
     const website = request.kind === 'form';
-    const label = website ? 'Continue to review' : 'Send answers';
-    return form(label, requestInputs(request.content.fields), async (values, element) => {
-        await api(website ? 'submit-form' : 'answer-form', {id: request.id, values});
+    const label = website ? 'Submit to website' : 'Send answers';
+    let review = false;
+    const element = form(label, requestInputs(request.content.fields), async (values, element) => {
+        await api(website ? 'submit-form' : 'answer-form', {id: request.id, values, ...(website && !review ? {send: true} : {})});
         element.reset();
         if (formId) {
             finishFocusedForm('Answers sent', 'TinyBot will continue in your chat.');
             return;
         }
         await refresh();
-        show(website ? 'Details received. Review the submission below.' : 'Answers sent. TinyBot will continue.');
+        show(website && review ? 'Details received. Review the submission below.' : 'Answers sent. TinyBot will continue.');
     });
+    if (website) {
+        const submit = element.querySelector('button[type=submit]');
+        submit.addEventListener('click', () => { review = false; });
+        element.append(button('Continue to review', () => {
+            review = true;
+            element.requestSubmit();
+        }, true));
+    }
+    return element;
 }
 
 function settingsForm(request) {

@@ -1123,6 +1123,7 @@ test('Email settings keep inbox handling opt-in and passwords out of the loaded 
             if (action === 'save-mail-account') {
                 const creating = updates++ === 0;
                 assert.equal(data.id, creating ? undefined : id);
+                assert.equal(data.request, creating ? 'mail-setup-fixture' : undefined);
                 assert.deepEqual(data.config, {
                     ...account,
                     label: creating ? 'Work' : 'Projects mail',
@@ -1139,8 +1140,7 @@ test('Email settings keep inbox handling opt-in and passwords out of the loaded 
             }
             assert.fail(`Unexpected Mini App action ${action}`);
         });
-        await page.goto('https://tinybot.test/mini');
-        await openSettings(page, 'Email');
+        await page.goto('https://tinybot.test/mini?connect=mail&request=mail-setup-fixture');
         await page.getByRole('button', {name: 'Add email account'}).click();
         await page.getByLabel('Account name').fill('Work');
         await page.getByLabel('From email').fill('user@example.com');
@@ -1327,6 +1327,30 @@ test('a generated Mini App uses shared controls and submits details for masked r
         assert.deepEqual(received, {id: 'entry', values: {email: 'smoke@example.net'}});
         assert.equal((await page.locator('body').innerText()).includes('smoke@example.net'), false);
         assert.deepEqual(errors, []);
+    } finally {
+        await browser.close();
+    }
+});
+
+test('website submission can authorize the destination while entering the private values', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext();
+        const page = await context.newPage();
+        let sent;
+        await mockMiniApp(context, request => {
+            if (request.action === 'submit-form') sent = request.data;
+            return {user: '1', provider: 'openrouter', tasks: [], requests: sent ? [] : [{
+                id: 'form-id', kind: 'form', content: {destination: 'https://forms.example/submit',
+                    fields: [{name: 'email', label: 'Contact', type: 'email', required: true, private: true}]}
+            }]};
+        });
+        await page.goto('https://tinybot.test/mini');
+        await page.getByText('https://forms.example/submit', {exact: true}).waitFor();
+        await page.locator('input[name=email]').fill('fixture@example.test');
+        await page.getByRole('button', {name: 'Submit to website'}).click();
+        await page.getByText('Answers sent. TinyBot will continue.').waitFor();
+        assert.deepEqual(sent, {id: 'form-id', values: {email: 'fixture@example.test'}, send: true});
     } finally {
         await browser.close();
     }

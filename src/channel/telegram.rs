@@ -181,6 +181,10 @@ impl ChannelAdapter for Telegram {
                     {"text":"Settings & forms","web_app":{"url":format!("{}/mini",self.origin)}}
                 ]]});
             }
+            Some(button) if button.starts_with("mail-setup/")=>{
+                let request=uuid::Uuid::parse_str(&button["mail-setup/".len()..])?;
+                data["reply_markup"]=json!({"inline_keyboard":[[{"text":"Connect email","web_app":{"url":format!("{}/mini?connect=mail&request={request}",self.origin)}}]]});
+            }
             Some("docblock") => data["reply_markup"] = json!({"inline_keyboard":[[{
                 "text":"Connect Docblock","web_app":{"url":format!("{}/mini?connect=docblock",self.origin)}
             }]]}),

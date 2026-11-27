@@ -8,15 +8,27 @@ use uuid::Uuid;
 struct AccountUpdate {
     id: Option<String>,
     config: mail::MailConfig,
+    request: Option<String>,
 }
 
 pub(super) async fn save(app: &App, user: &str, data: &Value) -> Result<Value> {
-    let AccountUpdate { id, config } =
-        serde_json::from_value(data.clone()).context("invalid email account settings")?;
+    let AccountUpdate {
+        id,
+        config,
+        request,
+    } = serde_json::from_value(data.clone()).context("invalid email account settings")?;
     if let Some(id) = &id {
         Uuid::parse_str(id).context("invalid email account ID")?;
     }
-    let id = mail::save_account(&app.db, &app.vault, user, id.as_deref(), config).await?;
+    let id = mail::save_for_task(
+        &app.db,
+        &app.vault,
+        user,
+        id.as_deref(),
+        config,
+        request.as_deref(),
+    )
+    .await?;
     Ok(json!({"id":id}))
 }
 

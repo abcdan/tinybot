@@ -13,7 +13,10 @@ pub(super) struct ReadSettings;
 pub(super) struct ConfigureSettings;
 
 pub(super) fn is_settings_tool(name: &str) -> bool {
-    matches!(name, "read_settings" | "configure_settings")
+    matches!(
+        name,
+        "read_settings" | "configure_settings" | "manage_account"
+    )
 }
 
 pub(super) async fn available(ctx: &ToolContext<'_>) -> Result<bool> {
@@ -28,6 +31,8 @@ pub(super) async fn available(ctx: &ToolContext<'_>) -> Result<bool> {
 #[serde(deny_unknown_fields)]
 struct Proposal {
     fields: Vec<Key>,
+    #[serde(default)]
+    apply: bool,
     #[serde(default)]
     values: BTreeMap<Key, String>,
 }
@@ -88,7 +93,7 @@ impl Tool for ConfigureSettings {
     }
 
     fn describe(&self) -> &'static str {
-        "Open a personal settings form on the user's request. Supply the specific fields they want to change and optionally prefill values explicitly given by the user. Use on or off for OpenRouter tools. Use codex or openrouter:publisher/model for task and backup models, or off for the backup model. For image_model, use a model ID from read_settings. The user reviews and approves the exact changes after the form. Never ask for authentication secrets or use this tool for access grants."
+        "Set apply=true to apply a clear change directly in chat. Otherwise open a personal settings form. Supply the specific fields they want to change and optionally prefill values explicitly given by the user. Use on or off for OpenRouter tools. Use codex or openrouter:publisher/model for task and backup models, or off for the backup model. For image_model, use a model ID from read_settings. Use only values the account holder requested. Never ask for authentication secrets or use this tool for access grants."
     }
 
     fn input_schema(&self) -> Value {
@@ -100,7 +105,7 @@ impl Tool for ConfigureSettings {
         json!({
             "type":"object",
             "properties":{
-                "fields":{"type":"array","minItems":1,"maxItems":Key::ALL.len(),"items":{"type":"string","enum":keys}},
+                "apply":{"type":"boolean"},"fields":{"type":"array","minItems":1,"maxItems":Key::ALL.len(),"items":{"type":"string","enum":keys}},
                 "values":{"type":"object","properties":values,"additionalProperties":false}
             },
             "required":["fields"],
@@ -115,7 +120,24 @@ impl Tool for ConfigureSettings {
 
     async fn execute(&self, ctx: &ToolContext<'_>, args: Value) -> Result<Outcome> {
         settings_intent(ctx, "Open a personal settings form").await?;
-        let Proposal { fields, values } = Proposal::parse(&args)?;
+        let Proposal {
+            fields,
+            values,
+            apply,
+        } = Proposal::parse(&args)?;
+        if apply {
+            ensure!(
+                super::automatic::personal_instruction(ctx, "configure_settings", &json!(&values))
+                    .await?,
+                "Ask for the exact settings change in your private chat."
+            );
+            ensure!(
+                fields.len() == values.len(),
+                "Ask for the missing setting value."
+            );
+            let saved = settings_requests::apply_direct(ctx.app, ctx.task, &values).await?;
+            return Ok(Outcome::Continue(json!({"saved":saved})));
+        }
         settings_requests::propose(ctx.app, ctx.task, fields, values).await?;
         Ok(Outcome::Pause)
     }
