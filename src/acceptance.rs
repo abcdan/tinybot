@@ -31,6 +31,8 @@ mod mail_workflow;
 mod mcp_approvals;
 mod model_backup;
 mod model_settings;
+#[cfg(unix)]
+mod native_documents;
 mod output_limits;
 mod projects;
 mod quick_chat;

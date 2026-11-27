@@ -37,7 +37,7 @@ pub(super) fn tools() -> Vec<Box<dyn Tool>> {
 }
 
 pub(super) fn is_media_tool(name: &str) -> bool {
-    is_image_tool(name) || matches!(name, SCREENSHOT | RECORD)
+    is_image_tool(name) || matches!(name, SCREENSHOT | RECORD | super::output::CREATE_DOCUMENT)
 }
 
 pub(super) fn is_image_tool(name: &str) -> bool {
@@ -50,6 +50,17 @@ pub(super) fn allowed(ctx: &ToolContext<'_>) -> bool {
         && ctx.task.agent.is_none()
         && ctx.task.shared_memory_pair.is_none()
         && ctx.allowed_tools.is_none()
+}
+
+pub(super) async fn can_finish_turn(
+    ctx: &ToolContext<'_>,
+    otherwise_finished: bool,
+) -> Result<bool> {
+    Ok(otherwise_finished
+        && store::checkpoints::plan(&ctx.app.db, &ctx.task.id, ctx.task.revision, false)
+            .await?
+            .iter()
+            .all(|step| step.completed_at.is_some()))
 }
 
 pub(super) async fn pin_image_model(
@@ -319,17 +330,13 @@ impl Tool for MediaTool {
                 (format, generated.bytes, !request.continue_task, None)
             }
         };
-        let unfinished_plan = finish_turn
-            && store::checkpoints::plan(&app.db, &ctx.task.id, ctx.task.revision, false)
-                .await?
-                .iter()
-                .any(|step| step.completed_at.is_none());
         Ok(Outcome::Media(MediaDelivery {
             tool: self.name(),
             format,
             bytes,
-            finish_turn: finish_turn && !unfinished_plan,
+            finish_turn: can_finish_turn(ctx, finish_turn).await?,
             cookie_dialog,
+            filename: None,
         }))
     }
 }

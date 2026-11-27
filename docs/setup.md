@@ -72,7 +72,7 @@ hostname a public DNS record before opening its dashboard.
    invited users. [Telegram Mini App setup](https://core.telegram.org/bots/webapps#launching-the-main-mini-app)
 3. On the first launch, enter your name, your Chief's name, and an OpenRouter
    API key. Choose a tool-capable task model from the catalog, then finish
-   setup. Change the active provider or model later under **Model**.
+   setup. Change the active provider or model later under **Settings → Model**.
 4. Send `/invite` to invite another user. For access to a specific read-only
    helper, create an invitation in that helper's **Sharing** settings.
 
@@ -133,7 +133,7 @@ Caddy or Dokploy serve a publicly trusted certificate for it.
 For standalone deployment, use
 [`compose.anythingmcp.dokploy.yaml`](../compose.anythingmcp.dokploy.yaml) in a
 separate project, set `AMCP_DOMAIN`, and route the hostname to `gateway:8080`
-in Dokploy Domains. In TinyBot's Connections tab, enter the standalone
+in Dokploy Domains. In TinyBot's **Settings → Connections**, enter the standalone
 gateway URL manually.
 
 The gateway blocks its upstream mail relay and license hosts. To send
@@ -157,7 +157,7 @@ to monitor and choose any automation rules per folder. [Email workflows](feature
 
 ### Browser proxy and search
 
-As the operator, open **Browser** in the Mini App to save a proxy, use a
+As the operator, open **Settings → Browser** in the Mini App to save a proxy, use a
 direct connection, or restore the deployment setting. Set
 `TINYBOT_BROWSER_PROXY` in `.env` or Dokploy to configure a deployment default.
 An empty deployment setting uses direct connections.

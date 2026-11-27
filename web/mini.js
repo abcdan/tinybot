@@ -17,10 +17,9 @@ const refreshButton = document.querySelector('#refresh');
 const chiefLabel = document.querySelector('#chief-label');
 const shell = content.closest('main');
 const tabs = document.querySelector('#tabs');
-const browserTab = tabs.querySelector('[data-tab="browser"]');
-const invitesTab = tabs.querySelector('[data-tab="invites"]');
 const sourceLink = document.querySelector('#source-link');
 const footer = sourceLink.closest('footer');
+const backButton = telegram?.BackButton;
 const params = new URLSearchParams(window.location.search);
 let formId = params.get('form');
 const openInTelegram = 'Open TinyBot from its Telegram profile or tap Settings & forms in the bot chat.';
@@ -58,19 +57,21 @@ export async function refresh(animate = false) {
         const needsOnboarding = !formId && result.onboarding_required === true;
         tabs.hidden = Boolean(formId) || needsOnboarding;
         refreshButton.hidden = needsOnboarding;
-        footer.hidden = needsOnboarding;
+        footer.hidden = true;
         if (!opened) {
             opened = true;
             openFullscreen();
         }
         show('');
         if (needsOnboarding) {
+            backButton?.hide?.();
             state = undefined;
             openOnboarding(result);
             return;
         }
         closeOnboarding();
         if (formId) {
+            backButton?.hide?.();
             let item;
             if (result.kind === 'settings-form') {
                 item = settingsForm(result);
@@ -83,10 +84,9 @@ export async function refresh(animate = false) {
             content.replaceChildren(item);
         } else {
             state = result;
-            chiefLabel.textContent = state.chief_name || 'Your Chief';
-            browserTab.hidden = state.browser_proxy == null;
-            invitesTab.hidden = state.operator !== true;
-            if ((tab === 'browser' && browserTab.hidden) || (tab === 'invites' && invitesTab.hidden)) setTab('home');
+            chiefLabel.textContent = state.chief_name || '';
+            chiefLabel.hidden = !state.chief_name;
+            if (!tabAvailable(tab)) setTab('home');
             else render(animate);
         }
     } catch (error) {
@@ -94,6 +94,7 @@ export async function refresh(animate = false) {
             closeOnboarding();
             state = undefined;
             tabs.hidden = true;
+            backButton?.hide?.();
             footer.hidden = true;
             refreshButton.hidden = !telegram?.initData || error.status === 403;
             content.replaceChildren();
@@ -152,25 +153,94 @@ function openFullscreen() {
     expand();
 }
 
+const mainTabs = {home: 'Tasks', agents: 'Helpers', audit: 'Activity', settings: 'Settings'};
+const settingsGroups = [
+    ['Personal', [
+        ['model', 'Model', 'Task and image models'],
+        ['memories', 'Memory', 'Personal and shared notes'],
+        ['settingsHistory', 'Settings history', 'Changes and rollbacks'],
+    ]],
+    ['Services', [
+        ['connectors', 'Connections', 'Docblock and external tools'],
+        ['mail', 'Email', 'Accounts and watched folders'],
+        ['browser', 'Browser', 'Proxy and connection'],
+    ]],
+    ['Automation and access', [
+        ['schedules', 'Schedules', 'Reminders and routines'],
+        ['invites', 'Invites', 'Guest access'],
+    ]],
+];
+
+function tabAvailable(name) {
+    return (name !== 'browser' || state.browser_proxy != null) &&
+        (name !== 'invites' || state.operator === true);
+}
+
 function setTab(next) {
     const changed = tab !== next;
     tab = next;
-    for (const item of document.querySelectorAll('#tabs button')) {
-        if (item.dataset.tab === tab) item.setAttribute('aria-current', 'page');
-        else item.removeAttribute('aria-current');
-    }
     render(changed);
+    if (changed) {
+        window.scrollTo(0, 0);
+        content.focus({preventScroll: true});
+    }
+}
+
+function returnToSettings() {
+    const destination = tab;
+    setTab('settings');
+    [...content.querySelectorAll('[data-tab]')]
+        .find(item => item.dataset.tab === destination)?.focus({preventScroll: true});
 }
 
 function render(animate = false) {
     if (!state) return;
+    const mainTab = Object.hasOwn(mainTabs, tab) ? tab : 'settings';
+    for (const item of tabs.querySelectorAll('button')) {
+        if (item.dataset.tab === mainTab) item.setAttribute('aria-current', 'page');
+        else item.removeAttribute('aria-current');
+    }
+    footer.hidden = tab !== 'settings';
+    content.setAttribute('aria-label', mainTabs[mainTab]);
     content.replaceChildren();
-    ({home, agents, memories, connectors, mail, browser, schedules, audit, invites, model, settingsHistory})[tab](state);
+    if (mainTab !== tab) {
+        backButton?.show?.();
+        const back = button('Back to settings', returnToSettings, true);
+        back.classList.add('back-link');
+        content.append(back);
+    } else backButton?.hide?.();
+    ({home, agents, audit, settings, memories, connectors, mail, browser, schedules, invites, model, settingsHistory})[tab](state);
     if (animate && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
         content.getAnimations?.().forEach(animation => animation.cancel());
-        content.animate?.([{opacity: 0, transform: 'translateY(6px)'}, {opacity: 1, transform: 'translateY(0)'}],
-            {duration: 180, easing: 'ease-out'});
+        content.animate?.([{opacity: 0, transform: 'translateY(4px)'}, {opacity: 1, transform: 'translateY(0)'}],
+            {duration: 160, easing: 'ease-out'});
     }
+}
+
+function settings() {
+    const panel = node('div', undefined, 'settings-hub');
+    panel.append(node('h2', 'Settings', 'page-title'));
+    for (const [title, destinations] of settingsGroups) {
+        const group = node('section', undefined, 'settings-group');
+        group.append(node('h3', title, 'settings-group-title'));
+        const list = node('div', undefined, 'settings-menu');
+        for (const [id, label, description] of destinations) {
+            if (!tabAvailable(id)) continue;
+            const control = button('', () => setTab(id));
+            control.dataset.tab = id;
+            control.classList.add('settings-destination');
+            control.setAttribute('aria-label', label);
+            const text = node('span', undefined, 'settings-destination-text');
+            text.append(node('strong', label), node('small', description));
+            const chevron = node('span', undefined, 'disclosure-chevron');
+            chevron.setAttribute('aria-hidden', 'true');
+            control.append(text, chevron);
+            list.append(control);
+        }
+        group.append(list);
+        panel.append(group);
+    }
+    content.append(panel);
 }
 
 function home() {
@@ -371,11 +441,12 @@ sourceLink.addEventListener('click', event => {
     telegram.openLink(sourceLink.href);
     event.preventDefault();
 });
-for (const item of document.querySelectorAll('#tabs button')) {
-    if (item.dataset.tab === tab) item.setAttribute('aria-current', 'page');
-    else item.removeAttribute('aria-current');
+for (const item of tabs.querySelectorAll('button')) {
     item.addEventListener('click', () => setTab(item.dataset.tab));
 }
+backButton?.onClick?.(() => {
+    if (state && !formId && !Object.hasOwn(mainTabs, tab)) returnToSettings();
+});
 syncColorScheme();
 telegram?.onEvent?.('themeChanged', syncColorScheme);
 if (telegram?.isVersionAtLeast?.('6.1')) {

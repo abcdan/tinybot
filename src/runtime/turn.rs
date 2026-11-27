@@ -209,7 +209,6 @@ async fn run_turn(
                     ))
         })
         .collect();
-    let mut definitions = tool_definitions(&tools);
     let latest_request: Option<(i64, String, Option<i64>)> = sqlx::query_as(
         "SELECT id,body,telegram_message_id FROM events WHERE task=? AND role='user' ORDER BY id DESC LIMIT 1",
     )
@@ -219,6 +218,15 @@ async fn run_turn(
     let request = latest_request
         .as_ref()
         .map_or("", |(_, text, _)| text.as_str());
+    let document_format = tools
+        .iter()
+        .any(|tool| tool.name() == super::output::CREATE_DOCUMENT)
+        .then(|| super::output::requested_native_format(request))
+        .flatten();
+    if document_format.is_some() {
+        tools.retain(|tool| tool.name() != "send_task_file");
+    }
+    let mut definitions = tool_definitions(&tools);
     let memory = if paired {
         store::shared_memory::context(&app.db, task).await?
     } else {
@@ -258,6 +266,7 @@ async fn run_turn(
     let mut goal_saved = false;
     let mut repeated_goal = false;
     let mut asked_for_step = false;
+    let mut corrected_document = false;
     let mut recovery: Option<String> = None;
     loop {
         let progress = loop_guard::check(app, task, request).await?;
@@ -275,6 +284,17 @@ async fn run_turn(
             _ => None,
         };
         let records = store::history(&app.db, &task.id).await?;
+        let missing_document = document_format.filter(|format| {
+            latest_request.as_ref().is_some_and(|(event, _, _)| {
+                !records
+                    .iter()
+                    .rev()
+                    .take_while(|(id, _, _)| id > event)
+                    .any(|(_, role, body)| {
+                        role == "tool" && super::output::queued_document(body, format)
+                    })
+            })
+        });
         if !goal_saved
             && latest_request.as_ref().is_some_and(|(event, _, _)| {
                 records
@@ -328,6 +348,9 @@ async fn run_turn(
             "connectors":if automatic_mail || paired || inbox_routine { Vec::new() } else { connector_context(&ctx) },
             "email":incoming_mail,"mail_accounts":mail_accounts
         });
+        if let Some(format) = missing_document {
+            input["requested_document_format"] = json!(format);
+        }
         let routine_progress = if routine.is_some() {
             schedules::progress(&app.db, task).await?
         } else {
@@ -352,6 +375,9 @@ async fn run_turn(
             input["verified_reads"] = json!(reads.evidence);
         }
         if finish_turn || stop_reason.is_some() {
+            if let Some(format) = missing_document {
+                return super::output::missing_document(&ctx, format).await;
+            }
             if let Some(page) = &opened_page {
                 input["opened_page"] = page.clone();
             }
@@ -393,6 +419,13 @@ async fn run_turn(
                     };
                     match next {
                         Ok(Some(step)) => Ok(Some(step)),
+                        Ok(None) if missing_document.is_some() => {
+                            return super::output::missing_document(
+                                &ctx,
+                                missing_document.unwrap(),
+                            )
+                            .await;
+                        }
                         Ok(None) => match limit
                             .finish(app, task, feedback, &*model, &input, error)
                             .await
@@ -436,6 +469,9 @@ async fn run_turn(
                     && provider_failure(&error)
                         .is_none_or(|failure| failure == ProviderFailure::Incomplete)
                 {
+                    if let Some(format) = missing_document {
+                        return super::output::missing_document(&ctx, format).await;
+                    }
                     return finish_from_context(app, task, feedback, &*model, &input, None).await;
                 }
                 return Err(error);
@@ -443,6 +479,28 @@ async fn run_turn(
         };
         if !store::current(&app.db, task).await? {
             return store::settle(&app.db, task, "idle", None).await;
+        }
+        if let Some(format) = missing_document
+            && match &step {
+                Step::Reply { text, .. } => !super::output::document_question(text),
+                Step::Tool { name, args } => {
+                    matches!(name.as_str(), "send_task_file" | "send_reply" | "send_card")
+                        || (name == super::output::CREATE_DOCUMENT && args["format"] != format)
+                }
+            }
+        {
+            if corrected_document {
+                return super::output::missing_document(&ctx, format).await;
+            }
+            corrected_document = true;
+            store::append(
+                &app.db,
+                &task.id,
+                "tool",
+                &super::output::document_correction(format),
+            )
+            .await?;
+            continue;
         }
         match step {
             Step::Reply {

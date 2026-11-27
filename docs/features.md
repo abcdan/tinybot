@@ -5,7 +5,7 @@ asks for missing details, and comes back to you when it has a result or needs a
 decision. Use `/settings` for the Mini App and `/panel` for the controls you can open
 from chat.
 
-Under **Model**, choose a tool-capable OpenRouter model or pair an eligible ChatGPT
+Under **Settings → Model**, choose a tool-capable OpenRouter model or pair an eligible ChatGPT
 account for Codex. A saved OpenRouter key also enables voice transcription and Mercury 3
 forms when Codex handles tasks. [Connect a model](setup.md).
 
@@ -63,7 +63,7 @@ triggers the saved routine before the meeting.
   audit log to explain the last confirmed step and what it tried. If the request can
   safely run again before any tools or actions started, tap **Retry** or send
   `/retry` to retry the saved message. If TinyBot asks you to reconnect or choose
-  a model, you can send `/retry` after updating **Settings & forms → Model**.
+  a model, you can send `/retry` after updating **Settings → Model** in the Mini App.
 - If TinyBot says it lost confirmation of an external action, check the destination and
   send `/reconcile` to continue. TinyBot holds uncertain work so it can resume without
   automatically repeating the action.
@@ -113,10 +113,10 @@ Send a public HTTPS link or a search request. The Chief can browse pages, look f
 relevant sources, and give you links to open in Telegram. A site can still require
 verification before its contents are available.
 
-Under **Model → OpenRouter tools**, toggle **Web search**, **Web fetch**, **Date and
+Under **Settings → Model → OpenRouter tools**, toggle **Web search**, **Web fetch**, **Date and
 time**, and **Search models**. These options are on by default when OpenRouter is the
 active task provider. For the local browser, operators can configure direct access or a
-public SOCKS5 or HTTP CONNECT proxy in **Browser**. Configuring a proxy routes local
+public SOCKS5 or HTTP CONNECT proxy in **Settings → Browser**. Configuring a proxy routes local
 browser traffic through it and disables hosted Web search and Web fetch. A configured
 Brave Search API key uses a separate connection. See [setup](setup.md) for proxy and
 search settings.
@@ -134,11 +134,23 @@ cookie dialog. Ask to include the dialog if you want it visible in the capture.
 Ask for an image from a description, or attach a PNG, JPEG, or WebP
 and describe the edit you want. You can also reply to an earlier upload in the
 same task. Image generation and editing use your connected OpenRouter account.
-Gemini Nano Banana 2 is the default. To switch, open **Settings & forms → Model →
+Gemini Nano Banana 2 is the default. To switch, open **Settings → Model →
 Image model**.
 
 TinyBot sends the result in Telegram and removes the locally queued media after
 Telegram confirms delivery.
+
+## Create documents and presentations
+
+> Turn the comparison above into a PDF with the table and sources.
+>
+> Make a PowerPoint with a slide per option.
+
+Ask for a PDF, editable Word document, PowerPoint presentation, or Excel workbook
+in private chat. TinyBot can use information already discussed in the task and
+includes headings, lists, and tables where appropriate. It sends the requested
+file directly in Telegram. The local upload payload is cleared after Telegram
+confirms delivery.
 
 ## Take a voice note or read a file
 
@@ -237,7 +249,7 @@ until you remove them.
 ## Invite someone
 
 The bot operator can send `/invite` to get a shareable Telegram link or create an
-invitation under **Invites** to copy a sign-up command. Each invitation works once
+invitation under **Settings → Invites** to copy a sign-up command. Each invitation works once
 and expires after 24 hours. The guest accepts in Telegram and sets up their own
 Chief, model, and connections. The operator can revoke unused invitations, suspend
 guest access, or restore it.
@@ -313,7 +325,7 @@ and connections are available in private chat only.
 
 ## See how a run unfolded
 
-Open **Audit** in the Mini App to see model calls, tool calls, review decisions, and
+Open **Activity** in the Mini App to see model calls, tool calls, review decisions, and
 outcome summaries for the past seven days. Open a run for its activity and reported
 token usage and costs. **Usage breakdown** groups reported values by provider and model.
 Missing usage is marked **Not reported**.
