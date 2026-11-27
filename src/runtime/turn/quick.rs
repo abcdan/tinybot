@@ -43,6 +43,9 @@ pub(super) async fn try_reply(
     let Some((request, original)) = eligible_telegram_request(app, task).await? else {
         return Ok(Attempt::Defer);
     };
+    if super::super::output::requested_native_format(&request).is_some() {
+        return Ok(Attempt::Defer);
+    }
     if let Some(text) = super::task_list::reply(app, task, &request).await? {
         return deliver(app, task, feedback, &text).await;
     }

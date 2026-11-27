@@ -109,6 +109,28 @@ impl Workers {
     pub async fn python(&self, body: &Value) -> Result<Value> {
         call(&self.python, "run", body).await
     }
+
+    pub(crate) async fn render_document(&self, mime: &str, body: &Value) -> Result<Vec<u8>> {
+        let response = request(&self.python, "render-document", body).await?;
+        if !response.status().is_success() {
+            let result: Value = serde_json::from_slice(&net::body(response, 4096).await?)?;
+            return Err(anyhow!(
+                "{}",
+                result["error"]
+                    .as_str()
+                    .unwrap_or("The document could not be rendered.")
+            ));
+        }
+        ensure!(
+            response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                == Some(mime),
+            "The worker returned a different document format."
+        );
+        net::body(response, crate::store::outputs::MAX_DOCUMENT_BYTES).await
+    }
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]

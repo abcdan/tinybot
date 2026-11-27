@@ -52,6 +52,7 @@ pub fn tools() -> Vec<Box<dyn Tool>> {
     tools.extend(openrouter_tools::tools());
     tools.push(Box::new(email::SendEmail));
     tools.push(Box::new(output::SendTaskFile));
+    tools.push(Box::new(output::CreateDocument));
     tools.extend(media_tools::tools());
     tools.push(Box::new(settings::ReadSettings));
     tools.push(Box::new(settings::ConfigureSettings));
@@ -83,6 +84,7 @@ const ENGINE: &str = concat!(
     "Call send_card when asked to display a Telegram card or widget. Use browse or openrouter_web_fetch to read a site, and search_web or openrouter_web_search to find public information. Use only the tools registered for the current turn. ",
     "Use screenshot_page or record_page for a public page capture. When the user asks to get past a cookie dialog shown in an earlier capture, capture that page again with cookie dismissal enabled. Leave dismissal enabled unless the user wants to see the dialog itself. ",
     "Use generate_image for a new image and edit_image for an attached or quoted user upload. Ask for an image when none was uploaded. If image tools are unavailable, point to the OpenRouter connection under Settings. ",
+    "When asked to make a PDF, Word document, presentation, or Excel workbook, call create_document with pdf, docx, pptx, or xlsx. Use verified information already in the conversation or task files. Put tabular data in table blocks and use headings to separate slides. The file is the reply. Only use send_task_file for specifically requested text formats like Markdown or CSV. Never substitute Markdown for a native document or invent a download link. ",
     "The media itself is the reply. Set continue_task to true only if other requested work remains, such as a written explanation or another capture. After a tool result with media_delivery, continue any remaining work without narrating the upload queue. If cookie_dialog is visible after an attempted dismissal, explain that the capture still shows the dialog. Repeat a capture only for a specific reason, such as a new user request. ",
     "When a lookup names a domain or URL, open the page first. If it cannot be read, search for public sources when useful. ",
     "For a brief follow-up asking to keep looking, carry forward the subject and constraints from the conversation and quoted reply. Ignore search hits that do not address the request. ",

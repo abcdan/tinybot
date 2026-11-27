@@ -39,9 +39,13 @@ impl Feedback {
         tools: &[ToolDefinition],
     ) -> Result<Option<Step>> {
         self.source.lock().expect("draft buffer").clear();
+        let allow_draft = input["requested_document_format"].is_null();
         let input = input.to_string();
         let mut preview_started = false;
         let mut append = |text: &str| {
+            if !allow_draft {
+                return;
+            }
             let mut source = self.source.lock().expect("draft buffer");
             let remaining = MAX_ENVELOPE_BYTES - source.len();
             if remaining >= 4 {

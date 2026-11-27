@@ -33,10 +33,42 @@ fn media(tool: &'static str, format: MediaFormat, bytes: &[u8]) -> MediaDelivery
     MediaDelivery {
         tool,
         format,
+        filename: None,
         bytes: bytes.into(),
         finish_turn: false,
         cookie_dialog: None,
     }
+}
+
+fn office_fixture(main_part: &[u8]) -> Vec<u8> {
+    let mut archive = Vec::new();
+    let mut directory = Vec::new();
+    for name in [b"[Content_Types].xml".as_slice(), main_part] {
+        let mut record = [0u8; 46];
+        record[..4].copy_from_slice(b"PK\x01\x02");
+        record[4..6].copy_from_slice(&20u16.to_le_bytes());
+        record[6..8].copy_from_slice(&20u16.to_le_bytes());
+        record[28..30].copy_from_slice(&(name.len() as u16).to_le_bytes());
+        record[42..46].copy_from_slice(&(archive.len() as u32).to_le_bytes());
+        directory.extend_from_slice(&record);
+        directory.extend_from_slice(name);
+
+        let mut header = [0u8; 30];
+        header[..4].copy_from_slice(b"PK\x03\x04");
+        header[4..6].copy_from_slice(&20u16.to_le_bytes());
+        header[26..28].copy_from_slice(&(name.len() as u16).to_le_bytes());
+        archive.extend_from_slice(&header);
+        archive.extend_from_slice(name);
+    }
+    let mut footer = [0u8; 22];
+    footer[..4].copy_from_slice(b"PK\x05\x06");
+    footer[8..10].copy_from_slice(&2u16.to_le_bytes());
+    footer[10..12].copy_from_slice(&2u16.to_le_bytes());
+    footer[12..16].copy_from_slice(&(directory.len() as u32).to_le_bytes());
+    footer[16..20].copy_from_slice(&(archive.len() as u32).to_le_bytes());
+    archive.extend_from_slice(&directory);
+    archive.extend_from_slice(&footer);
+    archive
 }
 
 async fn due_progress(db: &SqlitePool) {
@@ -322,6 +354,135 @@ async fn delivers_ephemeral_media_with_retry_then_removes_the_ciphertext() {
             .unwrap(),
         0
     );
+    worker.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn sends_native_documents_as_requested_and_requires_a_telegram_receipt() {
+    let db = fixture().await;
+    let app = Arc::new(app_with_model(&db, Arc::new(QueueOnlyChief)));
+    store::ingest_telegram(
+        &db,
+        "1",
+        1,
+        "1",
+        "Send the comparison as four native files.",
+        28,
+    )
+    .await
+    .unwrap();
+    let task = store::claim(&db).await.unwrap().unwrap();
+    let session = audit::sessions(&db, "1", None).await.unwrap()["sessions"][0]["id"]
+        .as_i64()
+        .unwrap();
+    let mut expected = VecDeque::new();
+    for (index, (format, filename, mime, bytes)) in [
+        (
+            MediaFormat::Pdf,
+            "comparison.pdf",
+            "application/pdf",
+            b"%PDF-1.4\nfixture\n%%EOF\n".to_vec(),
+        ),
+        (
+            MediaFormat::Docx,
+            "comparison.docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            office_fixture(b"word/document.xml"),
+        ),
+        (
+            MediaFormat::Pptx,
+            "comparison.pptx",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            office_fixture(b"ppt/presentation.xml"),
+        ),
+        (
+            MediaFormat::Xlsx,
+            "comparison.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            office_fixture(b"xl/workbook.xml"),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let action = format!("document-{index}");
+        start(&db, &task, &action).await;
+        let mut file = media("create_document", format, &bytes);
+        file.filename = Some("comparison.md".into());
+        assert!(
+            outputs::queue_media(&db, &app.vault, &task, &action, &file)
+                .await
+                .is_err()
+        );
+        file.filename = Some(filename.into());
+        file.finish_turn = index == 3;
+        let native = std::mem::replace(&mut file.bytes, b"# Markdown".to_vec());
+        assert!(
+            outputs::queue_media(&db, &app.vault, &task, &action, &file)
+                .await
+                .is_err()
+        );
+        file.bytes = native;
+        assert!(
+            outputs::queue_media(&db, &app.vault, &task, &action, &file)
+                .await
+                .unwrap()
+        );
+        expected.push_back((filename, mime, bytes, 80 + index as i64));
+    }
+    assert_eq!(task_for(&db, &task.id).await.state, "idle");
+    assert!(!MediaFormat::Docx.valid(&office_fixture(b"ppt/presentation.xml")));
+
+    let expected = Arc::new(Mutex::new(expected));
+    let replies = expected.clone();
+    let router = Router::new().route(
+        "/botTEST/sendDocument",
+        post(move |body: Bytes| {
+            let replies = replies.clone();
+            async move {
+                let (filename, mime, bytes, message) = replies.lock().await.pop_front().unwrap();
+                let part = format!(
+                    "name=\"document\"; filename=\"{filename}\"\r\nContent-Type: {mime}\r\n\r\n"
+                );
+                assert!(
+                    body.windows(part.len())
+                        .any(|window| window == part.as_bytes())
+                );
+                assert!(body.windows(bytes.len()).any(|window| window == bytes));
+                assert!(String::from_utf8_lossy(&body).contains("\"message_id\":28"));
+                axum::Json(json!({"ok":true,"result":{"message_id":message}}))
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let telegram = Arc::new(Telegram::fixture(format!(
+        "http://{}/botTEST",
+        listener.local_addr().unwrap()
+    )));
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let worker = tokio::spawn(crate::channel::outbox(app, telegram));
+    let receipts = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let sent = sqlx::query_as::<_, (i64, Option<String>)>(
+                "SELECT o.telegram_message_id,f.ciphertext FROM outbox o
+                 JOIN telegram_outputs f ON f.outbox=o.id WHERE o.state='sent' ORDER BY o.id",
+            )
+            .fetch_all(&db)
+            .await
+            .unwrap();
+            if sent.len() == 4 {
+                break sent;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(receipts, [(80, None), (81, None), (82, None), (83, None)]);
+    assert!(expected.lock().await.is_empty());
+    let export = audit::export(&db, "1", session).await.unwrap();
+    assert_eq!(export["delivery"]["timing"]["result_status"], "delivered");
     worker.abort();
     server.abort();
 }

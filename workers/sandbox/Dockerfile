@@ -29,11 +29,14 @@ RUN python /opt/tinybot/wasm_runtime.py /bundle/python.wasm /bundle/python.cwasm
 FROM python:3.14-slim-bookworm
 ARG WASMTIME_VERSION
 ARG TINYBOT_RELEASE_SHA
-RUN pip install --no-cache-dir "wasmtime==${WASMTIME_VERSION}" \
+RUN apt-get update && apt-get install -y --no-install-recommends fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir "wasmtime==${WASMTIME_VERSION}" \
+        "reportlab==5.1.2" "python-docx==1.2.0" "python-pptx==1.0.2" "openpyxl==3.1.5" \
     && mkdir -p /sandbox /work \
     && chown 1000:1000 /sandbox /work
 COPY --from=build /bundle /opt/python-wasi
-COPY server.py wasm_runtime.py /opt/tinybot/
+COPY server.py wasm_runtime.py documents.py office.py pdf_document.py /opt/tinybot/
 ENV PYTHONDONTWRITEBYTECODE=1 TINYBOT_RELEASE_SHA=${TINYBOT_RELEASE_SHA}
 USER 1000:1000
 RUN python /opt/tinybot/server.py --self-test

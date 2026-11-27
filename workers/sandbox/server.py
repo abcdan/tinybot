@@ -1,4 +1,4 @@
-"""Run CPython WASI jobs through a private Unix socket."""
+"""Run sandbox jobs and render documents through a private Unix socket."""
 import http.client
 import http.server
 import itertools
@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 
+from documents import InvalidDocument, REQUEST_LIMIT as DOCUMENT_REQUEST_LIMIT, render_document
 from wasm_runtime import FILE_LIMIT, JOB_FILE, guest
 
 SOCKET = "/sandbox/sandbox.sock"
@@ -116,6 +117,9 @@ class Worker(http.server.BaseHTTPRequestHandler):
             self.send_json(404, {"error": "Unknown sandbox operation."})
 
     def do_POST(self):
+        if self.path == "/render-document":
+            self.send_document()
+            return
         if self.path != "/run":
             self.send_json(404, {"error": "Unknown sandbox operation."})
             return
@@ -131,6 +135,29 @@ class Worker(http.server.BaseHTTPRequestHandler):
             self.send_json(503, {"error": "The Python worker could not complete this job."})
         else:
             self.send_json(200, result)
+
+    def send_document(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= DOCUMENT_REQUEST_LIMIT:
+                raise InvalidDocument("The document request exceeds its size limit.")
+            body = self.rfile.read(length)
+            if len(body) != length:
+                raise InvalidDocument("The document request is incomplete.")
+            content_type, output = render_document(body)
+        except InvalidDocument as error:
+            self.send_json(422, {"error": str(error)})
+        except (ValueError, UnicodeError, RecursionError):
+            self.send_json(422, {"error": "Invalid document request."})
+        except Exception:
+            self.send_json(503, {"error": "The worker could not render the document."})
+        else:
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(output)))
+            self.end_headers()
+            self.wfile.write(output)
 
 
 class Server(socketserver.UnixStreamServer):
