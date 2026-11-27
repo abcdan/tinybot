@@ -247,7 +247,9 @@ async fn run_turn(
     let mut opened_page = reads.evidence.iter().find_map(lookup::opened_page);
     let mut consulted_helper = false;
     let mut repeated_lookup = false;
-    let mut finish_lookup = false;
+    let mut finish_turn = false;
+    let mut goal_saved = false;
+    let mut repeated_goal = false;
     let mut asked_for_step = false;
     let mut recovery: Option<String> = None;
     loop {
@@ -266,6 +268,24 @@ async fn run_turn(
             _ => None,
         };
         let records = store::history(&app.db, &task.id).await?;
+        if !goal_saved
+            && latest_request.as_ref().is_some_and(|(event, _, _)| {
+                records
+                    .iter()
+                    .rev()
+                    .take_while(|(id, _, _)| id > event)
+                    .any(|(_, role, body)| {
+                        role == "tool"
+                            && serde_json::from_str::<Value>(body).is_ok_and(|result| {
+                                result["tool"] == "set_goal" && result["saved"] == true
+                            })
+                    })
+            })
+        {
+            goal_saved = true;
+            tools.retain(|tool| tool.name() != "set_goal");
+            definitions = tool_definitions(&tools);
+        }
         if let Some((event, _, _)) = &latest_request {
             consulted_helper |= records
                 .iter()
@@ -324,7 +344,7 @@ async fn run_turn(
         if !reads.evidence.is_empty() {
             input["verified_reads"] = json!(reads.evidence);
         }
-        if finish_lookup || stop_reason.is_some() {
+        if finish_turn || stop_reason.is_some() {
             if let Some(page) = &opened_page {
                 input["opened_page"] = page.clone();
             }
@@ -466,6 +486,29 @@ async fn run_turn(
                 return super::routine_reply::send(app, task, &text, &suggestions, feedback).await;
             }
             Step::Tool { mut name, mut args } => {
+                if name == "set_goal" && goal_saved {
+                    audit::record(
+                        "tool",
+                        "set_goal",
+                        "skipped",
+                        json!({"category":"goal_already_saved"}),
+                    )
+                    .await;
+                    if repeated_goal {
+                        finish_turn = true;
+                    } else {
+                        repeated_goal = true;
+                        store::append(
+                            &app.db,
+                            &task.id,
+                            "tool",
+                            "The task goal is already saved. Continue the requested work.",
+                        )
+                        .await?;
+                    }
+                    continue;
+                }
+                repeated_goal = false;
                 if let Some(url) = lookup::supplied_url_query(&name, &args, request)
                     && tools.iter().any(|tool| tool.name() == "browse")
                     && tools.iter().any(|tool| tool.name() == name)
@@ -543,7 +586,7 @@ async fn run_turn(
                     )
                     .await;
                     if repeated_lookup {
-                        finish_lookup = true;
+                        finish_turn = true;
                     } else {
                         repeated_lookup = true;
                         store::append(&app.db, &task.id, "tool",

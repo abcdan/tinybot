@@ -25,13 +25,13 @@ pub(super) async fn execute(tool: Builtin, ctx: &ToolContext<'_>, args: Value) -
         Builtin::RecallMemory => super::memory::recall(ctx, &args).await?,
         Builtin::SetGoal => {
             let text = string(&args, "text", 1500)?;
-            sqlx::query("UPDATE tasks SET goal=? WHERE id=? AND revision=?")
+            sqlx::query("UPDATE tasks SET goal=?1 WHERE id=?2 AND revision=?3 AND goal<>?1")
                 .bind(text)
                 .bind(&task.id)
                 .bind(task.revision)
                 .execute(&app.db)
                 .await?;
-            json!({"saved":true})
+            json!({"saved":true,"tool":"set_goal"})
         }
         Builtin::Schedule => {
             let schedule =

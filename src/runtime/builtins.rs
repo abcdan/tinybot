@@ -106,7 +106,9 @@ impl Tool for Builtin {
             Self::RecallMemory => {
                 "Search durable memory with a short keyword or phrase. Includes group notes where authorized. The Chief can supply an owned agent ID to search that agent's private notes."
             }
-            Self::SetGoal => "Record the current task goal. Args: text.",
+            Self::SetGoal => {
+                "Save a revised task goal at the user's request. The initial task goal is already recorded."
+            }
             Self::Delegate => {
                 "Ask another agent to carry out a self-contained brief and return findings to you. Choose a matching saved agent by ID when available. Write the handoff as one short, casual sentence in the user's language saying who will do what. Name the selected helper. Speak as yourself or make the helper the subject. Skip the detailed plan and any promise to report back. In Dutch, for example, 'Ik ga het via de research bot opzoeken' or 'Research gaat de vacatures uitzoeken'."
             }
