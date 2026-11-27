@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {access} from 'node:fs/promises';
 import {test} from 'node:test';
+import {setTimeout as delay} from 'node:timers/promises';
 import {chromium, errors} from 'playwright';
 import {captureViewport, dismissCookieDialog, recordingOptions} from './capture.mjs';
 import {describe,populate,publicUrl} from './forms.mjs';
@@ -43,6 +44,52 @@ test('reading a website preserves its client-side route', async () => {
         assert.equal(await page.locator('p').innerText(), '#/documentation');
         assert.throws(() => publicUrl(url.href));
         assert.throws(() => readableUrl('https://user@fixture.example/#/documentation'));
+    } finally {
+        await browser.close();
+    }
+});
+
+test('readable articles skip slow assets and application shells still load', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    const article = 'A fixture article with enough text to read from the first render. '.repeat(5);
+    let unrelatedScriptFinished = false;
+    const fixture = {
+        async newContext(settings) {
+            const context = await browser.newContext(settings);
+            const newPage = context.newPage.bind(context);
+            context.newPage = async () => {
+                const page = await newPage();
+                await page.route('https://fixture.example/**', async route => {
+                    const path = new URL(route.request().url()).pathname;
+                    if (path === '/slow.js') {
+                        await delay(1800, undefined, {ref: false});
+                        if (page.isClosed()) return;
+                        unrelatedScriptFinished = true;
+                        return route.fulfill({contentType: 'text/javascript', body: ''});
+                    }
+                    if (path === '/render.js') {
+                        await delay(150);
+                        return route.fulfill({contentType: 'text/javascript', body:
+                            'document.querySelector("main").textContent = "Hydrated primary content";',
+                        });
+                    }
+                    const body = path === '/static'
+                        ? '<main>' + article + '</main><script async src="/slow.js"></script>'
+                        : '<main aria-busy="true">' + 'Loading placeholder. '.repeat(15) +
+                            '</main><script async src="/render.js"></script>';
+                    return route.fulfill({contentType: 'text/html', body});
+                });
+                return page;
+            };
+            return context;
+        },
+    };
+    try {
+        const page = await operate(fixture, '/browse', {url: 'https://fixture.example/static'});
+        assert.equal(page.text.trim(), article.trim());
+        assert.equal(unrelatedScriptFinished, false);
+        const hydrated = await operate(fixture, '/browse', {url: 'https://fixture.example/client'});
+        assert.equal(hydrated.text, 'Hydrated primary content');
     } finally {
         await browser.close();
     }

@@ -194,9 +194,8 @@ async function operatePage(context, route, data, capture, signal) {
     if (render) {
         await visit(page, capture?.url ?? readableUrl(data.url), {waitUntil: 'commit', validate: readableUrl});
         await page.waitForLoadState('domcontentloaded');
-        try { await page.waitForLoadState('load', {timeout: 3000}); }
-        catch (error) { if (!(error instanceof errors.TimeoutError)) throw error; }
         if (capture) {
+            await waitForPageLoad(page);
             const destination = readableUrl(page.url());
             const cookieDialog = await prepareCookieDialog(page, capture.dismissCookieDialog, signal);
             requireInput(page.url() === destination.href, 'The page navigated away while checking the cookie dialog.');
@@ -204,6 +203,14 @@ async function operatePage(context, route, data, capture, signal) {
             readableUrl(page.url());
             return {bytes, cookieDialog};
         }
+        // An already-rendered article can be read while unrelated resources are still loading.
+        const readable = await page.locator('main, article, [role="main"]').evaluateAll(regions =>
+            regions.slice(0, 8).some(region =>
+                !region.closest('[aria-busy="true"]') &&
+                !region.querySelector('[aria-busy="true"]') &&
+                region.checkVisibility({opacityProperty: true, visibilityProperty: true}) &&
+                region.innerText?.trim().length >= 200));
+        if (!readable) await waitForPageLoad(page);
         const content = await page.locator('body').evaluate(body => ({
             title: document.title.slice(0, 200),
             text: body.innerText.slice(0, 6900),
@@ -233,6 +240,11 @@ async function operatePage(context, route, data, capture, signal) {
     requireInput(posted && postStatus >= 200 && postStatus < 400,
         'The site did not confirm the submission request.');
     return {submitted: true, http_status: postStatus};
+}
+
+async function waitForPageLoad(page) {
+    try { await page.waitForLoadState('load', {timeout: 3000}); }
+    catch (error) { if (!(error instanceof errors.TimeoutError)) throw error; }
 }
 
 async function readJson(request) {
