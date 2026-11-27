@@ -1,4 +1,4 @@
-import { api, content } from './mini.js';
+import { api, content, telegram } from './mini.js';
 import { fileShelf } from './mini-artifacts.js';
 import { focusedAudit } from './mini-audit.js';
 import { saveToDocblock } from './mini-docblock-save.js';
@@ -24,17 +24,23 @@ export function tasks(state, requestCard, openModel) {
     });
     const date = timestamp => dateFormat.format(new Date(timestamp * 1000));
     const telegramTask = state.telegram_task || state.tasks.find(task => task.id === state.active_task);
+    const openItems = state.tasks.filter(task => !['completed', 'cancelled'].includes(task.state));
 
-    function taskDates(task) {
+    function taskDates(task, detailed = true) {
         const dates = [];
-        if (Number.isFinite(task.created_at)) dates.push(`Started ${date(task.created_at)}`);
-        if (Number.isFinite(task.updated) && task.updated !== task.created_at) dates.push(`Updated ${date(task.updated)}`);
+        const updated = Number.isFinite(task.updated) && task.updated !== task.created_at;
+        if (Number.isFinite(task.created_at) && (detailed || !updated)) dates.push(`Started ${date(task.created_at)}`);
+        if (updated) dates.push(`Updated ${date(task.updated)}`);
         return dates.length ? node('p', dates.join(' · '), 'meta') : '';
     }
 
-    function startNew(task) {
-        return action('Start new task', 'start-new-task', {task: task.id, revision: task.revision},
+    function startNew(task, label = 'Start new task') {
+        return action(label, 'start-new-task', {task: task.id, revision: task.revision},
             'Send a message in Telegram to start your new task.');
+    }
+
+    function emptyState(message) {
+        return node('p', message, 'task-empty');
     }
 
     function select(taskId) {
@@ -52,17 +58,35 @@ export function tasks(state, requestCard, openModel) {
             void detail(selectedTask);
             return;
         }
-        panel.append(node('h2', 'Tasks'));
-        if (telegramTask && Number.isSafeInteger(telegramTask.revision)) {
-            const selected = card('Your next Telegram message continues', telegramTask.title);
-            selected.append(taskDates(telegramTask), node('p', 'Replies to earlier TinyBot messages follow those tasks.', 'meta'), row(
-                startNew(telegramTask),
-                button('Open selected task', () => select(telegramTask.id), true)
-            ));
+        const heading = node('div', undefined, 'task-heading');
+        const hasTelegramTask = telegramTask && Number.isSafeInteger(telegramTask.revision);
+        const create = hasTelegramTask ? startNew(telegramTask, 'New task')
+            : button('New task', () => telegram?.close?.());
+        const plus = node('span', '+', 'new-task-icon');
+        plus.setAttribute('aria-hidden', 'true');
+        create.classList.add('new-task');
+        create.prepend(plus);
+        heading.append(node('h2', 'Tasks', 'page-title'), create);
+        panel.append(heading);
+        let continuation;
+        if (hasTelegramTask) {
+            const selected = button('', () => select(telegramTask.id));
+            selected.classList.add('task-continuation');
+            selected.setAttribute('aria-description', telegramTask.title);
+            selected.hidden = view === 'open' && openItems.some(task => task.id === telegramTask.id);
+            continuation = selected;
+            selected.setAttribute('aria-label', 'Open selected task');
+            const text = node('span', undefined, 'task-continuation-text');
+            text.append(node('span', 'Next in Telegram', 'task-continuation-label'),
+                node('strong', telegramTask.title));
+            const chevron = node('span', undefined, 'disclosure-chevron');
+            chevron.setAttribute('aria-hidden', 'true');
+            selected.append(text, chevron);
             panel.append(selected);
         }
-        const views = row(...[
-            ['open', 'Open'], ['needs-you', 'Needs you'], ['completed', 'Completed tasks'],
+        const views = node('div');
+        views.append(...[
+            ['open', 'Open'], ['needs-you', 'Needs you'], ['completed', 'Completed'],
         ].map(([id, label]) => {
             const control = button(label, () => {
                 view = id;
@@ -85,10 +109,10 @@ export function tasks(state, requestCard, openModel) {
         panel.append(views);
         if (view === 'needs-you') inbox();
         else if (view === 'completed') completed();
-        else openTasks();
+        else openTasks(continuation);
     }
 
-    function openTasks() {
+    function openTasks(continuation) {
         const results = node('div');
         let generation = 0;
         async function search(query, offset = 0) {
@@ -96,15 +120,23 @@ export function tasks(state, requestCard, openModel) {
             const page = await api('search-tasks', {query, offset});
             if (sequence !== generation || !results.isConnected) return;
             if (!offset) results.replaceChildren();
+            if (continuation && (!offset || page.items.some(task => task.id === telegramTask.id))) {
+                continuation.hidden = page.items.some(task => task.id === telegramTask.id);
+            }
             taskPage(results, page, next => search(query, next), !offset && 'No matching tasks.');
         }
         const finder = form('Search tasks', [field('query', 'Search retained messages and tasks', {
             max: 200, required: false, type: 'search'
         })], ({query}) => search(query.trim()));
-        const tasks = state.tasks.filter(task => !['completed', 'cancelled'].includes(task.state));
-        if (!tasks.length) results.append(card(null, state.tasks.length ? 'No open tasks.' :
-            'Send a message to your Chief in Telegram to start a task.'));
-        results.append(...tasks.map(taskCard));
+        finder.classList.add('task-search');
+        finder.querySelector('input').placeholder = 'Search tasks and messages';
+        const submit = finder.querySelector('button');
+        submit.setAttribute('aria-label', 'Search tasks');
+        submit.title = 'Search tasks';
+        submit.textContent = '';
+        if (!openItems.length) results.append(emptyState(state.tasks.length ? 'No open tasks.' :
+            'Send a message in Telegram to start a task.'));
+        results.append(...openItems.map(taskCard));
         panel.append(finder, results);
     }
 
@@ -131,7 +163,7 @@ export function tasks(state, requestCard, openModel) {
     }
 
     function taskPage(results, page, load, empty) {
-        if (!page.items.length && empty) results.append(card(null, empty));
+        if (!page.items.length && empty) results.append(emptyState(empty));
         results.append(...page.items.map(taskCard));
         if (page.next_offset != null) {
             const more = button('Load more tasks', async () => {
@@ -145,7 +177,7 @@ export function tasks(state, requestCard, openModel) {
     function inbox() {
         const pending = new Set(state.requests.map(request => request.task));
         const tasks = state.tasks.filter(task => needsYou.includes(task.state) && !pending.has(task.id));
-        if (!state.requests.length && !tasks.length) panel.append(card(null, 'You’re all caught up.'));
+        if (!state.requests.length && !tasks.length) panel.append(emptyState('You’re all caught up.'));
         for (const request of state.requests) {
             const task = state.tasks.find(task => task.id === request.task);
             panel.append(review(request, task));
@@ -163,11 +195,18 @@ export function tasks(state, requestCard, openModel) {
     }
 
     function taskCard(task) {
-        const item = card(task.title, labels[task.state] || task.state);
+        const item = card();
         item.classList.add('task-card');
-        item.append(taskDates(task));
-        if (task.recent_reply) item.append(node('p', `Last reply · ${task.recent_reply}`, 'meta'));
-        if (task.id === state.active_task) item.append(node('span', 'Current Chief task', 'meta'));
+        const status = node('span', labels[task.state] || task.state, 'task-status');
+        status.dataset.state = task.state;
+        item.append(node('h3', task.title), status, taskDates(task, false));
+        if (task.id === telegramTask?.id) {
+            item.setAttribute('aria-current', 'true');
+            if (view === 'open' || !Number.isSafeInteger(telegramTask.revision)) {
+                item.append(node('span', 'Next in Telegram', 'task-route meta'));
+            }
+        }
+        if (task.recent_reply) item.append(node('p', task.recent_reply, 'task-preview'));
         item.append(row(button(task.state === 'waiting' ? 'Review requests' : 'Open task', () => select(task.id), true), ...controls(task)));
         return item;
     }
