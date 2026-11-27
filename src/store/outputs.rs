@@ -8,6 +8,7 @@ use sqlx::{Sqlite, SqlitePool, Transaction};
 pub const BUTTON: &str = "telegram-output";
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_VIDEO_BYTES: usize = 20 * 1024 * 1024;
+pub(crate) const MAX_DOCUMENT_BYTES: usize = 8 * 1024 * 1024;
 const MEDIA_TTL_SECONDS: i64 = 15 * 60;
 
 #[derive(Clone, Copy)]
@@ -16,27 +17,68 @@ pub(crate) enum MediaFormat {
     Jpeg,
     Webp,
     Mp4,
+    Pdf,
+    Docx,
+    Pptx,
+    Xlsx,
 }
 
 impl MediaFormat {
-    fn extension(self) -> &'static str {
+    pub(crate) fn from_extension(extension: &str) -> Option<Self> {
+        Some(match extension {
+            "png" => Self::Png,
+            "jpeg" => Self::Jpeg,
+            "webp" => Self::Webp,
+            "mp4" => Self::Mp4,
+            "pdf" => Self::Pdf,
+            "docx" => Self::Docx,
+            "pptx" => Self::Pptx,
+            "xlsx" => Self::Xlsx,
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn extension(self) -> &'static str {
         match self {
             Self::Png => "png",
             Self::Jpeg => "jpeg",
             Self::Webp => "webp",
             Self::Mp4 => "mp4",
+            Self::Pdf => "pdf",
+            Self::Docx => "docx",
+            Self::Pptx => "pptx",
+            Self::Xlsx => "xlsx",
         }
     }
 
-    fn is_video(self) -> bool {
-        matches!(self, Self::Mp4)
+    pub(crate) fn mime(self) -> &'static str {
+        match self {
+            Self::Png => "image/png",
+            Self::Jpeg => "image/jpeg",
+            Self::Webp => "image/webp",
+            Self::Mp4 => "video/mp4",
+            Self::Pdf => "application/pdf",
+            Self::Docx => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            Self::Pptx => {
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            }
+            Self::Xlsx => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        }
     }
 
-    fn valid(self, bytes: &[u8]) -> bool {
-        let limit = if self.is_video() {
-            MAX_VIDEO_BYTES
-        } else {
-            MAX_IMAGE_BYTES
+    fn default_basename(self) -> &'static str {
+        match self {
+            Self::Png | Self::Jpeg | Self::Webp => "image",
+            Self::Mp4 => "recording",
+            Self::Pdf | Self::Docx | Self::Pptx | Self::Xlsx => "document",
+        }
+    }
+
+    pub(crate) fn valid(self, bytes: &[u8]) -> bool {
+        let limit = match self {
+            Self::Png | Self::Jpeg | Self::Webp => MAX_IMAGE_BYTES,
+            Self::Mp4 => MAX_VIDEO_BYTES,
+            Self::Pdf | Self::Docx | Self::Pptx | Self::Xlsx => MAX_DOCUMENT_BYTES,
         };
         bytes.len() <= limit
             && match self {
@@ -44,8 +86,55 @@ impl MediaFormat {
                 Self::Jpeg => bytes.starts_with(b"\xff\xd8\xff"),
                 Self::Webp => bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"),
                 Self::Mp4 => bytes.get(4..8) == Some(b"ftyp") && bytes.len() >= 16,
+                Self::Pdf => {
+                    bytes.starts_with(b"%PDF-") && bytes.trim_ascii_end().ends_with(b"%%EOF")
+                }
+                Self::Docx => office_package(bytes, b"word/document.xml"),
+                Self::Pptx => office_package(bytes, b"ppt/presentation.xml"),
+                Self::Xlsx => office_package(bytes, b"xl/workbook.xml"),
             }
     }
+}
+
+// The local renderer emits ordinary, single-disk ZIP archives without a comment.
+// Check their central directory for the actual Office part before naming a file.
+fn office_package(bytes: &[u8], required: &[u8]) -> bool {
+    let Some(footer_offset) = bytes.len().checked_sub(22) else {
+        return false;
+    };
+    let footer = &bytes[footer_offset..];
+    if !bytes.starts_with(b"PK\x03\x04") || !footer.starts_with(b"PK\x05\x06") {
+        return false;
+    }
+    let offset = u32::from_le_bytes(footer[16..20].try_into().expect("ZIP directory offset"));
+    let size = u32::from_le_bytes(footer[12..16].try_into().expect("ZIP directory size"));
+    let Some(mut directory) = bytes.get(offset as usize..footer_offset) else {
+        return false;
+    };
+    if size as usize != directory.len() {
+        return false;
+    }
+    let mut content_types = false;
+    let mut document = false;
+    while !directory.is_empty() {
+        let Some(header) = directory
+            .get(..46)
+            .filter(|header| header.starts_with(b"PK\x01\x02"))
+        else {
+            return false;
+        };
+        let name_len = u16::from_le_bytes([header[28], header[29]]) as usize;
+        let extra_len = u16::from_le_bytes([header[30], header[31]]) as usize;
+        let comment_len = u16::from_le_bytes([header[32], header[33]]) as usize;
+        let Some(entry) = directory.get(..46 + name_len + extra_len + comment_len) else {
+            return false;
+        };
+        let name = &entry[46..46 + name_len];
+        content_types |= name == b"[Content_Types].xml";
+        document |= name == required;
+        directory = &directory[entry.len()..];
+    }
+    content_types && document
 }
 
 pub(crate) struct Output {
@@ -59,6 +148,7 @@ pub(crate) struct Output {
 pub(crate) struct MediaDelivery {
     pub(crate) tool: &'static str,
     pub(crate) format: MediaFormat,
+    pub(crate) filename: Option<String>,
     pub(crate) bytes: Vec<u8>,
     pub(crate) finish_turn: bool,
     pub(crate) cookie_dialog: Option<&'static str>,
@@ -75,6 +165,25 @@ pub(crate) async fn queue_media(
         media.format.valid(&media.bytes),
         "invalid or oversized output media"
     );
+    let default_filename;
+    let extension = media.format.extension();
+    let name = if let Some(name) = media.filename.as_deref() {
+        ensure!(
+            name.len() <= 96
+                && !name.starts_with('.')
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+                && name
+                    .rsplit_once('.')
+                    .is_some_and(|(_, suffix)| suffix == extension),
+            "invalid output filename for {extension}"
+        );
+        name
+    } else {
+        default_filename = format!("{}.{extension}", media.format.default_basename());
+        &default_filename
+    };
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     let (reply,): (Option<i64>,) = sqlx::query_as(
         "SELECT (SELECT e.telegram_message_id FROM events e WHERE e.task=t.id
@@ -90,11 +199,6 @@ pub(crate) async fn queue_media(
     .fetch_optional(&mut *tx)
     .await?
     .context("private task is unavailable")?;
-    let label = if media.format.is_video() {
-        "recording"
-    } else {
-        "image"
-    };
     let queued = queue(
         &mut tx,
         vault,
@@ -102,7 +206,7 @@ pub(crate) async fn queue_media(
         &task.id,
         task.revision,
         "document",
-        &format!("{label}.{}", media.format.extension()),
+        name,
         &media.bytes,
         reply,
         None,
@@ -113,6 +217,9 @@ pub(crate) async fn queue_media(
         super::acknowledgements::skip_unwritten(&mut tx, task).await?;
     }
     let mut result = json!({"queued":queued,"media_delivery":media.tool});
+    if media.filename.is_some() {
+        result["filename"] = json!(name);
+    }
     if let Some(cookie_dialog) = media.cookie_dialog {
         result["cookie_dialog"] = json!(cookie_dialog);
     }

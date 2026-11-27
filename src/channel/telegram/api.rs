@@ -61,14 +61,20 @@ impl Telegram {
                     .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte)),
             "invalid upload filename"
         );
+        use crate::store::outputs::MediaFormat;
         let (mut method, mut field, mime) = match kind {
             "document" => ("sendDocument", "document", "application/octet-stream"),
             "voice" => ("sendVoice", "voice", "audio/mpeg"),
-            "png" => ("sendPhoto", "photo", "image/png"),
-            "jpeg" => ("sendPhoto", "photo", "image/jpeg"),
-            "webp" => ("sendDocument", "document", "image/webp"),
-            "mp4" => ("sendVideo", "video", "video/mp4"),
-            _ => anyhow::bail!("unknown file type"),
+            extension => {
+                let format = MediaFormat::from_extension(extension)
+                    .ok_or_else(|| anyhow::anyhow!("unknown file type"))?;
+                let (method, field) = match format {
+                    MediaFormat::Png | MediaFormat::Jpeg => ("sendPhoto", "photo"),
+                    MediaFormat::Mp4 => ("sendVideo", "video"),
+                    _ => ("sendDocument", "document"),
+                };
+                (method, field, format.mime())
+            }
         };
         if method == "sendPhoto" && bytes.len() > MAX_PHOTO_BYTES {
             (method, field) = ("sendDocument", "document");

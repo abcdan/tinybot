@@ -115,6 +115,18 @@ Image model**.
 TinyBot sends the result in Telegram and removes the locally queued media after
 Telegram confirms delivery.
 
+## Create documents and presentations
+
+> Turn the comparison above into a PDF with the table and sources.
+>
+> Make a PowerPoint with a slide per option.
+
+Ask for a PDF, editable Word document, PowerPoint presentation, or Excel workbook
+in private chat. TinyBot can use information already discussed in the task and
+includes headings, lists, and tables where appropriate. It sends the requested
+file directly in Telegram. The local upload payload is cleared after Telegram
+confirms delivery.
+
 ## Take a voice note or read a file
 
 > I’ve attached the minutes. Pull out decisions and give me three action items.

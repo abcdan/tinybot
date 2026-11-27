@@ -199,6 +199,7 @@ pub(super) fn replan_input(input: &Value) -> Value {
     // Tool schemas are supplied separately. Keep the data needed to pick their arguments.
     for field in [
         "latest_request",
+        "requested_document_format",
         "connectors",
         "saved_agents",
         "mail_accounts",
