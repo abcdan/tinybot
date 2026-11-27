@@ -8,7 +8,7 @@ const maxFolders = 12;
 export function mail(state) {
     const heading = node('h2', 'Email');
     heading.tabIndex = -1;
-    const overview = card(null, 'Choose which folders your Chief can handle automatically. For other watched folders, open the Telegram notice with Read more or reply to it to share the email with your Chief. Sending email always needs your approval.');
+    const overview = card(null, 'Choose which folders your Chief can handle automatically. For other watched folders, open the Telegram notice with Read more or reply to it to share the email with your Chief. Ask your Chief to send mail automatically or review each send.');
     const accounts = state.mail_accounts ?? [];
     if (accounts.length < maxAccounts) overview.append(button('Add email account', () => editAccount(state)));
     content.append(heading, overview);
@@ -76,7 +76,13 @@ function editAccount(state, account) {
         };
         if (!config.imap && !config.smtp) throw new Error('Turn on IMAP, SMTP, or both.');
         for (const input of element.querySelectorAll('input[type=password]')) input.value = '';
-        await api('save-mail-account', account ? {id: account.id, config} : {config});
+        const url = new URL(window.location.href);
+        const request = url.searchParams.get('connect') === 'mail' && url.searchParams.get('request');
+        await api('save-mail-account', {config, ...(account && {id: account.id}), ...(request && {request})});
+        if (request) {
+            url.searchParams.delete('request');
+            window.history.replaceState(null, '', url);
+        }
         await refresh();
         show('Email account saved.');
     });

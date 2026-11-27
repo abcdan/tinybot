@@ -135,32 +135,154 @@ pub async fn smtp_connection(
     })
 }
 
+#[cfg(test)]
 pub async fn save_account(
     db: &SqlitePool,
     vault: &Vault,
     owner: &str,
     account: Option<&str>,
+    config: MailConfig,
+) -> Result<String> {
+    save_for_task(db, vault, owner, account, config, None).await
+}
+
+pub(crate) async fn save_for_task(
+    db: &SqlitePool,
+    vault: &Vault,
+    owner: &str,
+    account: Option<&str>,
     mut config: MailConfig,
+    request: Option<&str>,
 ) -> Result<String> {
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+    let id = save_account_in(&mut tx, vault, owner, account, &mut config).await?;
+    if let Some(request) = request {
+        let (task,revision,capability):(String,i64,String)=sqlx::query_as("SELECT p.task,p.revision,json_extract(p.payload,'$.capability') FROM pending p JOIN tasks t ON t.id=p.task AND t.user=p.user AND t.revision=p.revision
+          WHERE p.id=? AND p.user=? AND p.kind='mail-setup' AND p.state='waiting' AND p.expires>=? AND t.state='waiting'").bind(request).bind(owner).bind(now()).fetch_optional(&mut *tx).await?.context("This mail setup request expired or changed.")?;
+        ensure!(
+            match capability.as_str() {
+                "smtp" => config.smtp.is_some(),
+                "imap" => config.imap.is_some(),
+                _ => false,
+            },
+            "Enable the requested mail protocol."
+        );
+        sqlx::query("UPDATE pending SET state='done' WHERE id=?")
+            .bind(request)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT INTO events(task,role,body) VALUES(?,'tool',?)")
+            .bind(&task)
+            .bind(format!(
+                "Mail account {id} is ready for {capability}. Continue the original instruction."
+            ))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE tasks SET state='queued',updated=? WHERE id=? AND revision=?")
+            .bind(now())
+            .bind(task)
+            .bind(revision)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(id)
+}
+
+pub(crate) async fn pause_folder(
+    app: &crate::App,
+    owner: &str,
+    account: &str,
+    name: &str,
+    paused: bool,
+) -> Result<()> {
+    let mut tx = app.db.begin_with("BEGIN IMMEDIATE").await?;
+    let encrypted: String =
+        sqlx::query_scalar("SELECT encrypted FROM mail_accounts WHERE owner=? AND id=?")
+            .bind(owner)
+            .bind(account)
+            .fetch_one(&mut *tx)
+            .await?;
+    let mut config = open_config(&app.vault, owner, account, &encrypted)?;
+    let folder = config
+        .folders
+        .iter_mut()
+        .find(|f| f.name == name)
+        .context("Folder rule unavailable")?;
+    folder.automate = !paused;
+    save_account_in(&mut tx, &app.vault, owner, Some(account), &mut config).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(crate) async fn configure_folder(
+    app: &crate::App,
+    owner: &str,
+    account: &str,
+    folder: FolderConfig,
+    remove: bool,
+    receipt: Option<(&str, i64, &str, bool)>,
+) -> Result<()> {
+    let mut tx = app.db.begin_with("BEGIN IMMEDIATE").await?;
+    let encrypted: String =
+        sqlx::query_scalar("SELECT encrypted FROM mail_accounts WHERE owner=? AND id=?")
+            .bind(owner)
+            .bind(account)
+            .fetch_one(&mut *tx)
+            .await?;
+    let mut config = open_config(&app.vault, owner, account, &encrypted)?;
+    ensure!(
+        config.imap.is_some(),
+        "This account has no connected inbox."
+    );
+    let name = folder.name.clone();
+    config
+        .folders
+        .retain(|existing| existing.name != folder.name);
+    if !remove {
+        config.folders.push(folder);
+    }
+    save_account_in(&mut tx, &app.vault, owner, Some(account), &mut config).await?;
+    sqlx::query("DELETE FROM receipt_rules WHERE account=? AND folder=?")
+        .bind(account)
+        .bind(&name)
+        .execute(&mut *tx)
+        .await?;
+    if let Some((connector, epoch, workspace, quiet)) = receipt {
+        let added=sqlx::query("INSERT INTO receipt_rules(account,folder,connector,connector_epoch,workspace,failures_only)
+            SELECT ?,?,id,approval_epoch,?,? FROM connectors WHERE id=? AND owner=? AND approval_epoch=?")
+            .bind(account).bind(name).bind(workspace).bind(quiet).bind(connector).bind(owner).bind(epoch).execute(&mut *tx).await?.rows_affected();
+        ensure!(added == 1, "The Docblock connection changed.");
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn save_account_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    vault: &Vault,
+    owner: &str,
+    account: Option<&str>,
+    config: &mut MailConfig,
+) -> Result<String> {
     let previous = if let Some(account) = account {
         let encrypted: String =
             sqlx::query_scalar("SELECT encrypted FROM mail_accounts WHERE id=? AND owner=?")
                 .bind(account)
                 .bind(owner)
-                .fetch_optional(&mut *tx)
+                .fetch_optional(&mut **tx)
                 .await?
                 .context("Mail account unavailable")?;
         Some(open_config(vault, owner, account, &encrypted)?)
     } else {
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mail_accounts WHERE owner=?")
             .bind(owner)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?;
         ensure!(count < 10, "Too many mail accounts");
         None
     };
-    normalize(&mut config, previous.as_ref())?;
+    normalize(config, previous.as_ref())?;
     let reset_cursor = previous
         .as_ref()
         .is_some_and(|old| !same_mailbox(old.imap.as_ref(), config.imap.as_ref()));
@@ -169,11 +291,11 @@ pub async fn save_account(
     if account.is_some() {
         sqlx::query("UPDATE mail_accounts SET label=?,address=?,epoch=epoch+1,can_send=?,encrypted=? WHERE id=? AND owner=?")
             .bind(&config.label).bind(&config.address).bind(config.smtp.is_some()).bind(encrypted)
-            .bind(&id).bind(owner).execute(&mut *tx).await?;
+            .bind(&id).bind(owner).execute(&mut **tx).await?;
     } else {
         sqlx::query("INSERT INTO mail_accounts(id,owner,label,address,can_send,encrypted) VALUES(?,?,?,?,?,?)")
             .bind(&id).bind(owner).bind(&config.label).bind(&config.address).bind(config.smtp.is_some()).bind(encrypted)
-            .execute(&mut *tx).await?;
+            .execute(&mut **tx).await?;
     }
     let names: Vec<String> = config
         .folders
@@ -185,9 +307,20 @@ pub async fn save_account(
     )
     .bind(&id)
     .bind(serde_json::to_string(&names)?)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     for folder in &config.folders {
+        if previous
+            .as_ref()
+            .and_then(|old| old.folders.iter().find(|f| f.name == folder.name))
+            .is_some_and(|old| old.instruction != folder.instruction)
+        {
+            sqlx::query("DELETE FROM receipt_rules WHERE account=? AND folder=?")
+                .bind(&id)
+                .bind(&folder.name)
+                .execute(&mut **tx)
+                .await?;
+        }
         sqlx::query(
             "INSERT INTO mail_folders(account,name,automate) VALUES(?,?,?)
                      ON CONFLICT(account,name) DO UPDATE SET automate=excluded.automate,next_poll=0,
@@ -199,10 +332,9 @@ pub async fn save_account(
         .bind(folder.automate)
         .bind(reset_cursor)
         .bind(reset_cursor)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
-    tx.commit().await?;
     Ok(id)
 }
 

@@ -43,7 +43,7 @@ same private Telegram chat.
 ## Tools and approvals
 
 The model proposes a tool call. TinyBot checks the current task, connection,
-and permissions before acting. When a tool needs approval, the task waits
+and permissions before acting. Automatic connections compare the proposed effect with the private owner instruction or the versioned standing rule. The worker claims a durable authorized action and rechecks its scope before execution. When a tool needs approval, the task waits
 and TinyBot shows what the operation will do. An approval applies to the
 request you reviewed. A newer message can replace a waiting request.
 
@@ -51,8 +51,8 @@ request you reviewed. A newer message can replace a waiting request.
 | --- | --- |
 | Browse or search the web | The local browser worker reads public HTTPS pages. Enabled OpenRouter tools can also search and fetch through OpenRouter. A configured browser proxy routes browser traffic through that proxy. |
 | Call MCP | TinyBot sends the tool arguments to the connected server. For AnythingMCP, the gateway forwards the request to the underlying service. TinyBot can approve a read automatically through its configured read policy and Jev. Other calls can ask you to approve once, always approve the exact tool on that connection, or deny. |
-| Submit a website form | The Mini App sends your entries directly to TinyBot. TinyBot keeps the private values in memory until use or expiry and shows a masked preview. The browser worker submits the values after approval. |
-| Send email | TinyBot shows the exact sender, recipients, subject, and body. Every SMTP send requires approval of that draft. The email server receives the approved message. |
+| Submit a website form | The Mini App sends your entries directly to TinyBot. TinyBot keeps the private values in memory until use or expiry and offers an optional masked preview. The browser worker submits the values after approval. |
+| Send email | TinyBot shows the exact sender, recipients, subject, and body. A matching owner instruction authorizes a send on an automatic connection. A review-mode connection opens the exact draft for approval. The email server receives the approved message. |
 | Run Python on task files | TinyBot gives the files needed for that job to an offline worker and returns the output to the task. |
 
 If TinyBot restarts after an approved action starts, it may be unable to

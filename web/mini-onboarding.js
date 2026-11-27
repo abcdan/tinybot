@@ -39,7 +39,7 @@ export function onboarding(view, state, { api, finish, cancel, openLink }) {
     }
 
     function profile(focus = false) {
-        const page = screen('Profile', 'Set up TinyBot', 'Name your Chief and connect OpenRouter.');
+        const page = screen('Profile', 'Set up TinyBot', 'Name your Chief and connect OpenRouter. New service connections can act on your chat instructions and saved rules.');
         const name = field('display_name', 'Your name', {value: displayName, max: 128});
         const chief = field('chief_name', 'Agent name', {value: chiefName, max: 128});
         const secret = field('key', 'OpenRouter API key', {type: 'password', max: 8192});

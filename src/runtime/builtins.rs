@@ -122,7 +122,9 @@ impl Tool for Builtin {
             Self::ListMcp => {
                 "Get available MCP tool names and schemas. Args: connector, optional search."
             }
-            Self::CallMcp => "Call a connector tool. Args: connector, tool, arguments object.",
+            Self::CallMcp => {
+                "Call a connector tool. Args: connector, tool, arguments object. Set execute=true for a requested action."
+            }
             Self::Browse => {
                 "Read visible text and links from a public website. Args: url (an HTTPS URL or a website domain)."
             }
@@ -193,7 +195,7 @@ impl Tool for Builtin {
             Self::ConnectDocblock => (json!({"write":{"type":"boolean"}}), &[]),
             Self::ListMcp => (json!({"connector":text,"search":text}), &["connector"]),
             Self::CallMcp => (
-                json!({"connector":text,"tool":text,"arguments":{"type":"object"}}),
+                json!({"connector":text,"tool":text,"arguments":{"type":"object"},"execute":{"type":"boolean"}}),
                 &["connector", "tool", "arguments"],
             ),
             Self::Browse => (json!({"url":text}), &["url"]),

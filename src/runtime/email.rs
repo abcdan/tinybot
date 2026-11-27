@@ -37,12 +37,12 @@ impl Tool for SendEmail {
     }
 
     fn describe(&self) -> &'static str {
-        "Prepare a plain-text email for this user's explicit approval. Use account from mail_accounts if needed. Set reply_to_current to reply in the current email thread."
+        "Send a plain-text email when instructed using execute=true. Omit execute for a review. Use account from mail_accounts if needed. Set reply_to_current to reply in the current email thread."
     }
 
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{
-            "account":{"type":"string","maxLength":64},
+            "execute":{"type":"boolean"},"account":{"type":"string","maxLength":64},
             "to":{"type":"array","maxItems":5,"items":{"type":"string","maxLength":254}},
             "subject":{"type":"string","maxLength":180},
             "body":{"type":"string","maxLength":2400},
@@ -172,11 +172,17 @@ pub(crate) async fn edit_draft(
     Ok(next)
 }
 
+pub(super) enum Disposition {
+    Queued,
+    Review,
+    AlreadyHandled,
+}
+
 pub(super) async fn request(
     ctx: &ToolContext<'_>,
     args: &Value,
     email: Option<&MailTaskContext>,
-) -> Result<bool> {
+) -> Result<Disposition> {
     ensure!(
         ctx.still_allows("send_email").await?,
         "Task changed before email approval."
@@ -260,7 +266,7 @@ pub(super) async fn request(
             "This exact email was already handled or declined in this turn. Do not send it again.",
         )
         .await?;
-        return Ok(false);
+        return Ok(Disposition::AlreadyHandled);
     }
     let approval = Approval {
         account: account.id.clone(),
@@ -271,18 +277,33 @@ pub(super) async fn request(
             .vault
             .seal(&binding(user, &request_id), &serde_json::to_vec(&draft)?)?,
     };
+    let payload = json!({"smtp_approval":approval});
+    if args["execute"] == true
+        && super::automatic::queue(
+            ctx,
+            super::automatic::Connection::Mail(&account.id, account.epoch),
+            "send_email",
+            &serde_json::to_value(&draft)?,
+            KIND,
+            &payload,
+            &request_id,
+        )
+        .await?
+    {
+        return Ok(Disposition::Queued);
+    }
     store::pause(
         db,
         ctx.task,
         KIND,
-        &json!({"smtp_approval":approval}),
+        &payload,
         "Review the email draft before sending.",
         Some(&format!("mail-send/{request_id}")),
         900,
         &request_id,
     )
     .await?;
-    Ok(true)
+    Ok(Disposition::Review)
 }
 
 pub(super) async fn resume(

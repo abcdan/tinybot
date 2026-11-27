@@ -38,7 +38,9 @@ pub(super) async fn get_form(app: &App, user: &str, data: &Value) -> Result<Valu
 pub(super) async fn submit_form(app: &App, user: &str, data: &Value) -> Result<()> {
     let request = text(data, "id", 64)?;
     let values: BTreeMap<String, String> = serde_json::from_value(data["values"].clone())?;
-    app.forms.receive(&app.db, user, request, values).await
+    app.forms
+        .receive(&app.db, user, request, values, data["send"] == true)
+        .await
 }
 
 pub(super) async fn answer_form(app: &App, user: &str, data: &Value) -> Result<()> {

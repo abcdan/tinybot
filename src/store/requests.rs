@@ -74,6 +74,7 @@ pub(super) async fn pause_in(
     .rows_affected();
     ensure!(updated == 1, "task changed before request could be created");
     crate::audit::mark_task(tx, task, "waiting").await?;
+    crate::audit::request_changed(tx, &task.id, task.revision, kind, "waiting").await?;
     sqlx::query(
         "INSERT INTO pending(id,user,task,revision,kind,payload,expires) VALUES(?,?,?,?,?,?,?)",
     )
@@ -454,6 +455,13 @@ async fn claim_next_outbox(db: &SqlitePool, order_delivery: bool) -> Result<Opti
 pub async fn can_deliver(db: &SqlitePool, item: &Outbound) -> Result<bool> {
     if !has_access(db, &item.user, item.agent.as_deref()).await? {
         return Ok(false);
+    }
+    if let Some(request) = item
+        .button
+        .as_deref()
+        .and_then(|button| button.strip_prefix("mail-setup/"))
+    {
+        return Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pending p JOIN tasks t ON t.id=p.task AND t.user=p.user AND t.revision=p.revision WHERE p.id=? AND p.task=? AND p.user=? AND p.kind='mail-setup' AND p.state='waiting' AND p.expires>=? AND t.state='waiting')").bind(request).bind(&item.task).bind(&item.user).bind(now()).fetch_one(db).await?);
     }
     if let Some(request) = item.button.as_deref().and_then(|button| {
         button

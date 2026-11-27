@@ -43,6 +43,13 @@ export function audit(state) {
                         ['Runs finished', numbers.format(measured.completed_runs)],
                         ['Tasks checked off', numbers.format(measured.checked_off_tasks)],
                         ['Results confirmed', numbers.format(measured.delivered_runs)],
+                        ...(measured.automatic_runs_finished == null ? [] : [
+                            ['Automatic runs finished without review', numbers.format(measured.automatic_runs_finished)],
+                            ['Runs needing input', numbers.format(measured.clarification_runs)],
+                            ['Runs needing a connection', numbers.format(measured.connection_setup_runs)],
+                            ['Runs with a provider failure', numbers.format(measured.provider_failure_runs)],
+                            ['Uncertain deliveries', numbers.format(measured.uncertain_deliveries)],
+                        ]),
                         ['Average time to first feedback', formatDuration(measured.average_first_feedback_ms)],
                         ['Average time to result', formatDuration(measured.average_result_delivery_ms)],
                     ]));

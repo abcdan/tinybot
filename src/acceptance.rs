@@ -16,6 +16,7 @@ mod agent_memory;
 mod anything_mcp;
 mod attachments;
 mod audit_log;
+mod automatic;
 mod browser_settings;
 #[cfg(unix)]
 mod browsing;
@@ -652,21 +653,26 @@ async fn mini_app_form_keeps_approved_values_in_memory_and_scopes_the_request() 
     let values = BTreeMap::from([("contact".into(), "private@example.net".into())]);
     assert!(
         forms
-            .receive(&db, "2", &request, values.clone())
+            .receive(&db, "2", &request, values.clone(), false)
             .await
             .is_err()
     );
     assert!(
         forms
-            .receive(&db, "1", &request, BTreeMap::new())
+            .receive(&db, "1", &request, BTreeMap::new(), false)
             .await
             .is_err()
     );
     forms
-        .receive(&db, "1", &request, values.clone())
+        .receive(&db, "1", &request, values.clone(), false)
         .await
         .unwrap();
-    assert!(forms.receive(&db, "1", &request, values).await.is_err());
+    assert!(
+        forms
+            .receive(&db, "1", &request, values, false)
+            .await
+            .is_err()
+    );
     let approval = pending_id(&db, &task, "form-submit").await;
     let persisted:Vec<String>=sqlx::query_scalar("SELECT payload FROM pending UNION ALL SELECT body FROM events UNION ALL SELECT body FROM outbox")
         .fetch_all(&db).await.unwrap();

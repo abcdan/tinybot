@@ -105,13 +105,13 @@ impl Tool for DraftEvent {
     }
 
     fn describe(&self) -> &'static str {
-        "Prepare one dated event on the selected calendar for exact review and approval. Confirm guest names, email addresses and notification choice with the user if unclear. A draft does not create an event."
+        "Create a requested calendar event using execute=true. Omit execute to show a draft. Confirm guest names, email addresses and notification choice with the user if unclear. A draft does not create an event."
     }
 
     fn input_schema(&self) -> Value {
         json!({"type":"object","additionalProperties":false,
             "properties":{
-                "title":{"type":"string","maxLength":160},
+                "execute":{"type":"boolean"},"title":{"type":"string","maxLength":160},
                 "start":{"type":"string","format":"date-time"},
                 "end":{"type":"string","format":"date-time"},
                 "attendees":{"type":"array","maxItems":12,"items":{
@@ -162,11 +162,29 @@ impl Tool for DraftEvent {
             &Draft::binding(&ctx.task.user, &id),
             &serde_json::to_vec(&draft)?,
         )?;
+        let payload = json!({"calendar_event":true,"sealed":sealed});
+        if args["execute"] == true
+            && crate::runtime::automatic::queue(
+                ctx,
+                crate::runtime::automatic::Connection::Mcp(
+                    &draft.profile.connector,
+                    draft.profile.approval_epoch,
+                ),
+                "create_calendar_event",
+                &serde_json::to_value(&draft)?,
+                "approve",
+                &payload,
+                &id,
+            )
+            .await?
+        {
+            return Ok(Outcome::Pause);
+        }
         store::pause(
             &ctx.app.db,
             ctx.task,
             "approve",
-            &json!({"calendar_event":true,"sealed":sealed}),
+            &payload,
             "Review the calendar event, guests and invitations in Settings & forms.",
             Some("mini"),
             900,

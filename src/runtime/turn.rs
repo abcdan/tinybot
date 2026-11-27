@@ -89,6 +89,9 @@ async fn run_turn(
         ApprovalProgress::Settle => return store::settle(&app.db, task, "idle", None).await,
         ApprovalProgress::Finished => return Ok(()),
     }
+    if super::receipts::run(&ctx).await? {
+        return Ok(());
+    }
     let saved: Vec<(String, String, Option<String>)> = sqlx::query_as(
         "SELECT a.id,a.name,CASE WHEN a.owner=? THEN a.instructions END FROM agents a
          WHERE (a.owner=? OR EXISTS(SELECT 1 FROM grants g WHERE g.agent=a.id AND g.member=?))
@@ -150,7 +153,7 @@ async fn run_turn(
         super::openrouter_tools::available(&ctx).await?
     };
     let personal_settings = super::settings::available(&ctx).await?;
-    let calendar = if personal_settings {
+    let calendar = if personal_settings || routine.is_some() || automatic_mail {
         super::calendar::model_context(app, &task.user).await?
     } else {
         None
@@ -198,7 +201,11 @@ async fn run_turn(
                 && (!automatic_mail
                     || matches!(
                         tool.name(),
-                        "send_reply" | "send_card" | "request_input" | "send_email"
+                        "send_reply"
+                            | "send_card"
+                            | "request_input"
+                            | "send_email"
+                            | super::calendar::CALENDAR_READ
                     ))
         })
         .collect();
@@ -598,12 +605,13 @@ async fn run_turn(
                 repeated_lookup = false;
                 if name == "send_email" {
                     match email::request(&ctx, &args, incoming_mail.as_ref()).await {
-                        Ok(true) => {
+                        Ok(email::Disposition::Queued) => return Ok(()),
+                        Ok(email::Disposition::Review) => {
                             audit::record("tool", tool.name(), "waiting_approval", Value::Null)
                                 .await;
                             return Ok(());
                         }
-                        Ok(false) => {}
+                        Ok(email::Disposition::AlreadyHandled) => {}
                         Err(error) => {
                             if !store::current(&app.db, task).await? {
                                 return store::settle(&app.db, task, "idle", None).await;
@@ -682,6 +690,23 @@ async fn run_turn(
                         }
                         tool.inspect(&ctx, &call.args).await?;
                         let action = id();
+                        if call.args["execute"] == true {
+                            let payload = json!({"call":call,"mcp_approval":scope});
+                            let effect = json!({"connection":ctx.connector(&call.args)?.name,"tool":scope.tool,"arguments":call.args["arguments"]});
+                            if super::automatic::queue(
+                                &ctx,
+                                super::automatic::Connection::Mcp(&scope.connector, scope.epoch),
+                                "mcp_call",
+                                &effect,
+                                "approve",
+                                &payload,
+                                &action,
+                            )
+                            .await?
+                            {
+                                return Ok(());
+                            }
+                        }
                         if store::start_remembered_mcp(&app.db, task, &action, &scope).await? {
                             audit::record(
                                 "approval",
@@ -732,6 +757,7 @@ async fn run_turn(
                 }
                 // These operations manage their own durable task state.
                 if task_plan::is_tool(&name)
+                    || (name == "manage_account" && args["action"] == "connect-mail")
                     || matches!(
                         name.as_str(),
                         "request_form"
@@ -779,7 +805,15 @@ async fn run_turn(
                     continue;
                 }
                 let action = id();
-                if !store::start_action(&app.db, task, &action).await? {
+                if name == "manage_account" {
+                    if !super::management::reserve(&ctx, &args, &action).await? {
+                        if !store::current(&app.db, task).await? {
+                            return Ok(());
+                        }
+                        store::append(&app.db,&task.id,"tool","This account operation already ran in this turn. Use the recorded result.").await?;
+                        continue;
+                    }
+                } else if !store::start_action(&app.db, task, &action).await? {
                     return store::settle(&app.db, task, "idle", None).await;
                 }
                 audit::tool_started(tool.name(), &args).await;

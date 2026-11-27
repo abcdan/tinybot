@@ -139,7 +139,7 @@ pub(super) async fn model_context(app: &App, user: &str) -> Result<Option<Value>
             "workflow":concat!(
                 "Use calendar_availability and draft_calendar_event for this calendar. ",
                 "If the user asked for a different calendar, explain which calendar is selected. ",
-                "Resolve relative dates using local_time and time_zone. A draft needs explicit approval. ",
+                "Resolve relative dates using local_time and time_zone. Use execute=true when instructed to create the event. ",
                 "TinyBot sends its own confirmation after creation. Continue with the remaining work if requested."
             ),
         })
@@ -152,7 +152,9 @@ pub(super) async fn require_review_path(
     tool: &str,
 ) -> Result<()> {
     if tool == CREATE
-        && super::settings::available(ctx).await?
+        && ctx.owner
+        && ctx.parent_task.is_none()
+        && ctx.task.agent.is_none()
         && selection(ctx.app, &ctx.task.user)
             .await?
             .is_some_and(|profile| profile.connector == connector.id)
@@ -166,8 +168,13 @@ pub(super) async fn require_review_path(
 
 async fn connection(ctx: &ToolContext<'_>) -> Result<(Selection, Connector)> {
     ensure!(
-        super::settings::available(ctx).await?,
-        "Calendar requests require a private chat."
+        ctx.owner
+            && ctx.parent_task.is_none()
+            && ctx.task.agent.is_none()
+            && ctx.task.shared_memory_pair.is_none()
+            && !store::groups::is_group_task(&ctx.app.db, &ctx.task.id).await?
+            && store::current(&ctx.app.db, ctx.task).await?,
+        "Calendar requests require a private task."
     );
     let profile = selection(ctx.app, &ctx.task.user)
         .await?
@@ -225,7 +232,11 @@ struct Event {
 
 impl Event {
     fn parse(args: &Value) -> Result<Self> {
-        let event: Self = serde_json::from_value(args.clone()).map_err(|_| {
+        let mut fields = args.clone();
+        if let Some(obj) = fields.as_object_mut() {
+            obj.remove("execute");
+        }
+        let event: Self = serde_json::from_value(fields).map_err(|_| {
             anyhow::anyhow!("Provide the title, full dates, guests and invitation choice.")
         })?;
         Range {

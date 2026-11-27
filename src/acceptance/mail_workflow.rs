@@ -17,7 +17,10 @@ struct MailChief;
 
 #[async_trait]
 impl ModelProvider for MailChief {
-    async fn complete(&self, _: &str, _: &str) -> Result<String> {
+    async fn complete(&self, system: &str, _: &str) -> Result<String> {
+        if system.starts_with("Return JSON with authorized") {
+            return Ok(json!({"authorized":true}).to_string());
+        }
         Ok(json!({"text":"Nothing was sent."}).to_string())
     }
 
@@ -38,7 +41,7 @@ impl ModelProvider for MailChief {
             // Repeat the draft after denial to verify the runtime still blocks it.
             json!({"kind":"tool","name":"send_email","args":{
                 "account":context["mail_accounts"][0]["id"],
-                "to":[RECIPIENT],"subject":"Customer update","body":BODY
+                "to":[RECIPIENT],"subject":"Customer update","body":BODY,"execute":context["latest_request"].as_str().is_some_and(|s|s.contains("directly"))
             }})
         };
         Ok(response.to_string())
@@ -220,4 +223,102 @@ async fn editing_a_draft_requires_its_owner_and_a_fresh_approval_for_exact_mail(
     assert!(formatted.contains("\r\n\r\nNew draft text.\r\nSecond line."));
     assert!(!formatted.contains(BODY) && !formatted.contains(RECIPIENT));
     server.abort();
+}
+
+#[tokio::test]
+async fn saving_mail_for_a_task_resumes_only_the_signed_owners_waiting_revision() {
+    let db = fixture().await;
+    let app = app_with_model(&db, Arc::new(MailChief));
+    message(&db, 91, "1", "Connect my work sender and send the update").await;
+    let task = store::claim(&db).await.unwrap().unwrap();
+    let id = crate::security::id();
+    store::pause(
+        &db,
+        &task,
+        "mail-setup",
+        &json!({"capability":"smtp"}),
+        "Connect mail",
+        Some(&format!("mail-setup/{id}")),
+        900,
+        &id,
+    )
+    .await
+    .unwrap();
+    assert!(
+        mail::save_for_task(
+            &db,
+            &app.vault,
+            "2",
+            None,
+            account_config("Work"),
+            Some(&id)
+        )
+        .await
+        .is_err()
+    );
+    assert!(mail::smtp_accounts(&db, "2").await.unwrap().is_empty());
+    let account = mail::save_for_task(
+        &db,
+        &app.vault,
+        "1",
+        None,
+        account_config("Work"),
+        Some(&id),
+    )
+    .await
+    .unwrap();
+    assert!(
+        mail::save_for_task(
+            &db,
+            &app.vault,
+            "1",
+            None,
+            account_config("Work"),
+            Some(&id)
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(mail::smtp_accounts(&db, "1").await.unwrap().len(), 1);
+    let resumed = store::claim(&db).await.unwrap().unwrap();
+    assert_eq!(resumed.id, task.id);
+    assert!(
+        store::history(&db, &task.id)
+            .await
+            .unwrap()
+            .last()
+            .unwrap()
+            .2
+            .contains(&account)
+    );
+}
+
+#[tokio::test]
+async fn sending_directly_stops_if_the_owner_turns_review_back_on() {
+    let db = fixture().await;
+    let app = app_with_model(&db, Arc::new(MailChief));
+    let account = mail::save_account(&db, &app.vault, "1", None, account_config("Work"))
+        .await
+        .unwrap();
+    store::ingest_telegram(
+        &db,
+        "1",
+        51,
+        "1",
+        "Send directly to recipient@example.net",
+        51,
+    )
+    .await
+    .unwrap();
+    let task = store::claim(&db).await.unwrap().unwrap();
+    runtime::work(&app, &task).await.unwrap();
+    assert!(store::list_requests(&db, "1").await.unwrap().is_empty());
+    sqlx::query("UPDATE mail_accounts SET automatic_actions=0 WHERE id=?")
+        .bind(account)
+        .execute(&db)
+        .await
+        .unwrap();
+    let resumed = store::claim(&db).await.unwrap().unwrap();
+    runtime::work(&app, &resumed).await.unwrap();
+    assert!(store::history(&db,&task.id).await.unwrap().iter().any(|(_,role,body)| role=="tool" && body.contains("policy or instruction changed")));
 }
