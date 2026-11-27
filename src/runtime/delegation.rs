@@ -239,11 +239,13 @@ pub(super) async fn delegate(ctx: &ToolContext<'_>, args: &Value) -> Result<Valu
                 }
                 let intent = match tool.inspect(&worker, &args).await {
                     Ok(intent)
-                        if matches!(intent.risk, Risk::Read | Risk::PublicRead)
-                            || (matches!(
-                                tool.name(),
-                                "task_files" | "remember" | "recall_memory"
-                            ) && intent.risk == Risk::Local) =>
+                        if matches!(
+                            intent.risk,
+                            Risk::Read | Risk::PublicRead | Risk::ConnectorCatalog
+                        ) || (matches!(
+                            tool.name(),
+                            "task_files" | "remember" | "recall_memory"
+                        ) && intent.risk == Risk::Local) =>
                     {
                         intent
                     }
@@ -290,7 +292,7 @@ pub(super) async fn delegate(ctx: &ToolContext<'_>, args: &Value) -> Result<Valu
                 tool.inspect(&worker, &args).await?;
                 audit::tool_started(tool.name(), &args).await;
                 let execution = tool.execute(&worker, args);
-                let outcome = if intent.risk == Risk::PublicRead {
+                let outcome = if matches!(intent.risk, Risk::PublicRead | Risk::ConnectorCatalog) {
                     tokio::time::timeout_at(deadline, execution)
                         .await
                         .unwrap_or_else(|_| {

@@ -7,6 +7,7 @@ use sqlx::{FromRow, SqlitePool};
 
 pub const INTERVAL: i64 = 10;
 pub const LIMIT: i64 = 100;
+const CATALOG_LIMIT: i64 = 4;
 
 // The ledger belongs to the current task revision, even when a helper invokes the tool.
 const CURRENT: &str = "t.id=?1 AND t.user=?2 AND t.revision=?3 AND t.agent IS ?4 AND t.state='running'
@@ -50,12 +51,7 @@ pub async fn record(
                 .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte)),
         "invalid tool name"
     );
-    let mut normalized = args.clone();
-    normalized.sort_all_objects();
-    let fingerprint = hash(&format!(
-        "{}:{}:{tool}:{normalized}",
-        task.id, task.revision
-    ));
+    let fingerprint = fingerprint(task, tool, args);
     let statement = format!(
         "WITH progress AS (
             SELECT COALESCE(MAX(position),0) AS calls FROM task_tool_attempts WHERE task=?1 AND revision=?3
@@ -78,6 +74,31 @@ pub async fn record(
         .execute(db)
         .await?;
     Ok(attempts.rows_affected() == 1)
+}
+
+fn fingerprint(task: &Task, tool: &str, args: &Value) -> String {
+    let mut normalized = args.clone();
+    normalized.sort_all_objects();
+    hash(&format!(
+        "{}:{}:{tool}:{normalized}",
+        task.id, task.revision
+    ))
+}
+
+pub(crate) async fn catalog_exhausted(db: &SqlitePool, task: &Task, args: &Value) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT count(*)>=? OR coalesce(max(a.args_fingerprint=?),0)
+         FROM task_tool_attempts a JOIN tasks t ON t.id=a.task AND t.revision=a.revision
+         WHERE t.user=? AND a.task=? AND a.revision=? AND t.state='running'
+           AND a.actor='chief' AND a.tool='list_mcp_tools'",
+    )
+    .bind(CATALOG_LIMIT)
+    .bind(fingerprint(task, "list_mcp_tools", args))
+    .bind(&task.user)
+    .bind(&task.id)
+    .bind(task.revision)
+    .fetch_one(db)
+    .await?)
 }
 
 pub async fn progress(db: &SqlitePool, task: &Task) -> Result<Option<Progress>> {

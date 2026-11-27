@@ -142,6 +142,7 @@ pub struct Call {
 pub enum Risk {
     Local,
     PublicRead,
+    ConnectorCatalog,
     Read,
     Write,
 }

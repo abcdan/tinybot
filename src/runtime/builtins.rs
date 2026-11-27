@@ -120,7 +120,7 @@ impl Tool for Builtin {
                 "Open Docblock sign-in when the user requests Docblock and no usable connection exists. Args: optional write=true when direct write access is needed."
             }
             Self::ListMcp => {
-                "Get available MCP tool names and schemas. Args: connector, optional search."
+                "Get MCP tool names and schemas for an authorized connector. Args: connector, optional search of its tool names or descriptions. Search by exact tool name if its schema is missing."
             }
             Self::CallMcp => {
                 "Call a connector tool. Args: connector, tool, arguments object. Set execute=true for a requested action."
@@ -316,7 +316,7 @@ impl Tool for Builtin {
                     |url| url.origin().ascii_serialization(),
                 );
                 if matches!(self, Self::ListMcp) {
-                    Risk::Read
+                    Risk::ConnectorCatalog
                 } else {
                     let tool = string(args, "tool", 128)?;
                     ensure!(

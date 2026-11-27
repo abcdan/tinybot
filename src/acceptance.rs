@@ -29,6 +29,7 @@ mod latency;
 mod mail_settings;
 mod mail_workflow;
 mod mcp_approvals;
+mod mcp_catalog_loop;
 mod model_backup;
 mod model_settings;
 #[cfg(unix)]

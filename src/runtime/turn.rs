@@ -267,6 +267,7 @@ async fn run_turn(
     let mut repeated_goal = false;
     let mut asked_for_step = false;
     let mut corrected_document = false;
+    let mut redirected_catalog = false;
     let mut recovery: Option<String> = None;
     loop {
         let progress = loop_guard::check(app, task, request).await?;
@@ -551,6 +552,37 @@ async fn run_turn(
                 return super::routine_reply::send(app, task, &text, &suggestions, feedback).await;
             }
             Step::Tool { mut name, mut args } => {
+                if name == "list_mcp_tools" && tools.iter().any(|tool| tool.name() == name) {
+                    if let Ok((connector, search)) = super::effects::catalog_identity(&ctx, &args) {
+                        args = json!({"connector":connector.id,"search":search});
+                    }
+                    if store::tool_budget::catalog_exhausted(&app.db, task, &args).await? {
+                        audit::record(
+                            "tool",
+                            "list_mcp_tools",
+                            "skipped",
+                            json!({"category":"catalog_already_inspected_or_limit"}),
+                        )
+                        .await;
+                        if redirected_catalog {
+                            if let Some(format) = missing_document {
+                                return super::output::missing_document(&ctx, format).await;
+                            }
+                            return finish_from_context(
+                                app, task, feedback, &*model, &input,
+                                Some("Connector discovery has stopped. Tool listings describe capabilities, and do not contain the user's records. Explain which requested information you could actually read."),
+                            ).await;
+                        }
+                        redirected_catalog = true;
+                        store::append(
+                            &app.db,
+                            &task.id,
+                            "tool",
+                            "Use the previously returned schemas to call the relevant connector tool. A tool listing contains no records. If no suitable read tool is available, explain that limitation.",
+                        ).await?;
+                        continue;
+                    }
+                }
                 if name == "set_goal" && goal_saved {
                     audit::record(
                         "tool",
