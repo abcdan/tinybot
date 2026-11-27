@@ -12,24 +12,19 @@
   <main class="shell">
     <header class="masthead">
       <span class="mark" aria-hidden="true"><i></i><i></i></span>
-      <div><h1>TinyBot</h1><p id="chief-label">Your Chief</p></div>
-      <button id="refresh" class="quiet" type="button" hidden>Refresh</button>
+      <div class="brand"><h1>TinyBot</h1><p id="chief-label" hidden></p></div>
+      <button id="refresh" class="quiet refresh-control" type="button" aria-label="Refresh" title="Refresh" hidden>
+        <span aria-hidden="true">↻</span>
+      </button>
     </header>
-    <nav aria-label="TinyBot settings" id="tabs" hidden>
-      <button type="button" data-tab="home" aria-current="page">Overview</button>
-      <button type="button" data-tab="agents">Helpers</button>
-      <button type="button" data-tab="memories">Memory</button>
-      <button type="button" data-tab="connectors">Connections</button>
-      <button type="button" data-tab="mail">Email</button>
-      <button type="button" data-tab="browser" hidden>Browser</button>
-      <button type="button" data-tab="schedules">Schedules</button>
-      <button type="button" data-tab="audit">Audit</button>
-      <button type="button" data-tab="invites" hidden>Invites</button>
-      <button type="button" data-tab="model">Model</button>
-      <button type="button" data-tab="settingsHistory">Settings history</button>
+    <nav aria-label="TinyBot" id="tabs" hidden>
+      <button type="button" data-tab="home" aria-current="page"><span class="nav-icon icon-tasks" aria-hidden="true"></span>Tasks</button>
+      <button type="button" data-tab="agents"><span class="nav-icon icon-helpers" aria-hidden="true"></span>Helpers</button>
+      <button type="button" data-tab="audit"><span class="nav-icon icon-activity" aria-hidden="true"></span>Activity</button>
+      <button type="button" data-tab="settings"><span class="nav-icon icon-settings" aria-hidden="true">⚙︎</span>Settings</button>
     </nav>
     <div id="status" class="notice" role="status" aria-live="polite" hidden></div>
-    <section id="view" aria-label="Settings"><p>Opening TinyBot…</p></section>
+    <section id="view" aria-label="TinyBot workspace" tabindex="-1"><p>Opening TinyBot…</p></section>
     <footer class="app-footer" hidden>
       <a id="source-link" href="https://github.com/abcdan/tinybot" target="_blank" rel="noopener noreferrer">
         Source on GitHub <span aria-hidden="true">↗</span>

@@ -22,6 +22,13 @@ async function mockMiniApp(context, respond, bridge) {
     });
 }
 
+const mainNavigation = page => page.getByRole('navigation', {name: 'TinyBot', exact: true});
+
+async function openSettings(page, destination) {
+    await mainNavigation(page).getByRole('button', {name: 'Settings', exact: true}).click();
+    if (destination) await page.getByRole('button', {name: destination, exact: true}).click();
+}
+
 test('schedules edit instructions, pause and run a saved routine', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
     try {
@@ -86,7 +93,7 @@ test('schedules edit instructions, pause and run a saved routine', async () => {
             assert.fail(`Unexpected Mini App action ${action}`);
         });
         await page.goto('https://tinybot.test/');
-        await page.getByRole('button', {name: 'Schedules'}).click();
+        await openSettings(page, 'Schedules');
         await page.getByText('Edit schedule', {exact: true}).click();
         await page.getByLabel('Instructions', {exact: true}).fill('Prepare a concise review.');
         await page.getByRole('button', {name: 'Save changes'}).click();
@@ -144,12 +151,12 @@ test('a routine webhook reveals its signing key only during setup', async () => 
             assert.fail(`Unexpected Mini App action ${action}`);
         });
         await page.goto('https://tinybot.test/');
-        await page.getByRole('button', {name:'Schedules'}).click();
+        await openSettings(page, 'Schedules');
         await page.getByText('Webhook', {exact:true}).click();
         await page.getByRole('button', {name:'Enable webhook'}).click();
         await page.getByText('fixture-signing-value', {exact:true}).waitFor();
         await page.reload();
-        await page.getByRole('button', {name:'Schedules'}).click();
+        await openSettings(page, 'Schedules');
         await page.getByText('Webhook', {exact:true}).click();
         await page.getByText(endpoint, {exact:true}).waitFor();
         assert.equal(await page.getByText('fixture-signing-value', {exact:true}).count(), 0);
@@ -238,14 +245,14 @@ test('completing a task moves it to paginated history and reopening selects it a
         await page.getByRole('heading', {name: followUp.title}).locator('..')
             .getByText('Ready for a follow-up', {exact: true}).waitFor();
 
-        await page.getByText('Completed tasks', {exact: true}).click();
+        await page.getByText('Completed', {exact: true}).click();
         await task.getByText('Completed', {exact: true}).waitFor();
         await page.getByRole('button', {name: 'Load more tasks', exact: true}).click();
         await page.getByRole('heading', {name: archived.title}).waitFor();
         await task.getByRole('button', {name: 'Reopen', exact: true}).click();
         await page.getByText('Task reopened. Send your next message in Telegram.').waitFor();
         await page.getByRole('button', {name: 'Open', exact: true}).click();
-        await task.getByText('Current Chief task', {exact: true}).waitFor();
+        await task.getByText('Next in Telegram', {exact: true}).waitFor();
         await page.getByLabel('Search retained messages and tasks').fill('older plan');
         await page.getByRole('button', {name: 'Search tasks', exact: true}).click();
         await page.getByRole('heading', {name: archived.title}).locator('..')
@@ -482,7 +489,7 @@ test('first-run setup checks one key, searches tool models and opens the named C
         }};`);
         await page.goto('https://tinybot.test/');
         await page.getByRole('heading', {name: 'Set up TinyBot'}).waitFor();
-        assert.equal(await page.getByRole('navigation', {name: 'TinyBot settings'}).count(), 0);
+        assert.equal(await page.getByRole('navigation', {name: 'TinyBot', exact: true}).count(), 0);
         assert.equal(await page.locator('.onboarding-screen').evaluate(element => getComputedStyle(element).animationName), 'none');
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
         await page.getByRole('link', {name: 'Get an OpenRouter API key'}).click();
@@ -585,7 +592,7 @@ test('MCP approvals show a plain explanation and can be revoked for the exact co
         assert.equal(await page.getByRole('button', {name: 'Deny', exact: true}).count(), 1);
         await page.getByRole('button', {name: 'Always approve', exact: true}).click();
         await page.getByText('Approval saved for this tool.', {exact: true}).waitFor();
-        await page.getByRole('button', {name: 'Connections', exact: true}).click();
+        await openSettings(page, 'Connections');
         await page.getByRole('heading', {name: 'Always approved tools', exact: true}).waitFor();
         await page.getByRole('button', {name: 'Revoke approval for search_and_read', exact: true}).click();
         await page.getByText('Approval revoked.', {exact: true}).waitFor();
@@ -617,7 +624,7 @@ test('a paired Codex model becomes the backup only after enabling it', async () 
             assert.fail(action);
         });
         await page.goto('https://tinybot.test/mini');
-        await page.locator('[data-tab="model"]').click();
+        await openSettings(page, 'Model');
         const backup = page.locator('section').filter({has: page.getByRole('heading', {name: 'Backup model', exact: true})});
         await backup.getByText('Off', {exact: true}).waitFor();
         await backup.getByRole('button', {name: 'Use Codex as backup'}).click();
@@ -650,7 +657,7 @@ test('the image model is saved independently of the task model', async () => {
             assert.fail(action);
         });
         await page.goto('https://tinybot.test/mini');
-        await page.locator('[data-tab="model"]').click();
+        await openSettings(page, 'Model');
         const picker = page.getByLabel('Image generation and editing model');
         assert.equal(await picker.inputValue(), gemini.id);
         await picker.selectOption(pro.id);
@@ -764,7 +771,7 @@ test('a self-hosted AnythingMCP gateway signs in from Connections and lists its 
             initData: 'fixture', ready() {}, openLink(url) { window.openedLink = url; },
         }};`);
         await page.goto('https://tinybot.test/');
-        await page.getByRole('button', {name: 'Connections', exact: true}).click();
+        await openSettings(page, 'Connections');
         await page.getByRole('heading', {name: 'Connect AnythingMCP'}).waitFor();
         const url = page.getByLabel('Gateway MCP URL', {exact: true});
         assert.equal(await url.inputValue(), 'https://mcp.example.test/mcp');
@@ -822,7 +829,7 @@ test('AnythingMCP API keys reuse the connection and empty the password field aft
             return route.fallback();
         });
         await page.goto('https://tinybot.test/');
-        await page.getByRole('button', {name: 'Connections', exact: true}).click();
+        await openSettings(page, 'Connections');
         const card = page.locator('#connection-gateway');
         await card.getByText('Use an MCP API key', {exact: true}).click();
         const key = card.getByLabel('MCP API key', {exact: true});
@@ -905,7 +912,7 @@ test('a launch without accepted Telegram data shows instructions and leaves sett
             }
             await page.goto('https://tinybot.test/');
             await page.getByText('Open TinyBot from its Telegram profile', {exact: false}).waitFor();
-            assert.equal(await page.getByRole('navigation', {name: 'TinyBot settings'}).count(), 0);
+            assert.equal(await page.getByRole('navigation', {name: 'TinyBot', exact: true}).count(), 0);
             assert.equal(await page.getByRole('button', {name: 'Refresh', exact: true}).count(), 0);
             assert.equal(await page.evaluate(() => window.expanded), undefined);
             await context.close();
@@ -925,6 +932,11 @@ test('settings follow live Telegram colors and open the GitHub source in Telegra
         window.Telegram = {WebApp: {
             initData: 'fixture',
             ready() {},
+            BackButton: {
+                show() { window.nativeBackVisible = true; },
+                hide() { window.nativeBackVisible = false; },
+                onClick(callback) { window.nativeBackClick = callback; },
+            },
             isVersionAtLeast(version) { return version === '6.1'; },
             onEvent(name, callback) { if (name === 'themeChanged') themeChanged = callback; },
             setHeaderColor(color) { window.headerColor = color; },
@@ -948,7 +960,7 @@ test('settings follow live Telegram colors and open the GitHub source in Telegra
         await page.getByRole('heading', {name: 'Tasks', exact: true}).waitFor();
         const colors = () => page.evaluate(() => ({
             bodyBackground: getComputedStyle(document.body).backgroundColor,
-            cardBackground: getComputedStyle(document.querySelector('.card')).backgroundColor,
+            cardBackground: getComputedStyle(document.querySelector('#tabs')).backgroundColor,
             selectedBackground: getComputedStyle(document.querySelector('nav button[aria-current]')).backgroundColor,
             browserScheme: getComputedStyle(document.documentElement).colorScheme,
         }));
@@ -973,6 +985,17 @@ test('settings follow live Telegram colors and open the GitHub source in Telegra
             'secondary_bg_color', 'secondary_bg_color',
         ]);
         const source = page.getByRole('link', {name: 'Source on GitHub', exact: true});
+        assert.equal(await source.isVisible(), false);
+        const nav = mainNavigation(page);
+        assert.equal(await nav.getByRole('button').count(), 4);
+        assert.equal(await nav.evaluate(element => element.scrollWidth <= element.clientWidth), true);
+        await nav.getByRole('button', {name: 'Settings', exact: true}).press('Enter');
+        assert.equal(await page.evaluate(() => window.nativeBackVisible), false);
+        await page.getByRole('button', {name: 'Model', exact: true}).press('Enter');
+        assert.equal(await page.evaluate(() => window.nativeBackVisible), true);
+        await page.evaluate(() => window.nativeBackClick());
+        assert.equal(await page.evaluate(() => window.nativeBackVisible), false);
+        assert.equal(await page.evaluate(() => document.activeElement.dataset.tab), 'model');
         assert.equal(await source.getAttribute('href'), 'https://github.com/abcdan/tinybot');
         assert.equal(await source.evaluate(element => getComputedStyle(element).color), 'rgb(169, 221, 255)');
         await source.click();
@@ -1036,6 +1059,7 @@ test('browser proxy settings are operator only and clear the private URL after s
     try {
         await page.goto('https://tinybot.test/mini');
         await page.getByRole('heading', {name: 'Tasks', exact: true}).waitFor();
+        await openSettings(page);
         const tab = page.getByRole('button', {name: 'Browser', exact: true});
         assert.equal(await tab.count(), 0);
         const refresh = page.getByRole('button', {name: 'Refresh', exact: true});
@@ -1116,7 +1140,7 @@ test('Email settings keep inbox handling opt-in and passwords out of the loaded 
             assert.fail(`Unexpected Mini App action ${action}`);
         });
         await page.goto('https://tinybot.test/mini');
-        await page.getByRole('button', {name: 'Email', exact: true}).click();
+        await openSettings(page, 'Email');
         await page.getByRole('button', {name: 'Add email account'}).click();
         await page.getByLabel('Account name').fill('Work');
         await page.getByLabel('From email').fill('user@example.com');
@@ -1241,7 +1265,7 @@ test('memory settings page by scope and manage group notes with the signed API',
     });
     try {
         await page.goto('https://tinybot.test/mini');
-        await page.getByRole('button', {name: 'Memory', exact: true}).click();
+        await openSettings(page, 'Memory');
         const scope = page.getByRole('combobox', {name: 'Memory scope'});
         await page.getByText('Chief preferences', {exact: true}).waitFor();
         await page.getByRole('button', {name: 'Load older memories'}).click();
@@ -1326,7 +1350,7 @@ test('a generated focused form submits text and a selected option from Telegram'
     try {
         await page.goto('https://tinybot.test/mini?form=form-1');
         await page.getByRole('heading', {name: 'Answer a few questions', exact: true}).waitFor();
-        assert.equal(await page.getByRole('navigation', {name: 'TinyBot settings'}).isVisible(), false);
+        assert.equal(await page.getByRole('navigation', {name: 'TinyBot', exact: true}).isVisible(), false);
         assert.equal(await page.getByRole('link', {name: 'Source on GitHub'}).isVisible(), false);
         await page.getByRole('textbox', {name: 'Project name'}).fill('Weekend plans');
         await page.getByRole('combobox', {name: 'Priority'}).selectOption('High');
@@ -1433,7 +1457,7 @@ test('settings history reuses the exact signed review before restoring a change'
             assert.fail(action);
         });
         await page.goto('https://tinybot.test/mini');
-        await page.getByRole('button', {name: 'Settings history', exact: true}).click();
+        await openSettings(page, 'Settings history');
         await page.getByRole('heading', {name: 'Approved settings change'}).waitFor();
         await page.getByRole('button', {name: 'Review restore'}).click();
         const review = page.locator('.settings-review');
@@ -1509,7 +1533,7 @@ test('helpers can be managed while only Chief tasks can be selected in chat', as
         await page.getByRole('heading', {name: 'Chief task in a shared workspace'}).waitFor();
         await page.locator('.card').filter({has: page.getByRole('heading', {name: 'Chief research task'})})
             .getByRole('button', {name: 'Continue', exact: true}).click();
-        await page.getByText('Current Chief task', {exact: true}).waitFor();
+        await page.getByText('Next in Telegram', {exact: true}).waitFor();
         await page.getByRole('button', {name: 'Helpers', exact: true}).click();
         await page.getByRole('heading', {name: 'Research helper', exact: true}).waitFor();
         assert.equal(await page.getByRole('heading', {name: 'Shared writing helper'}).count(), 1);
@@ -1567,7 +1591,7 @@ test('one OpenRouter key lists task models while retaining Codex pairing', async
     });
     try {
         await page.goto('https://tinybot.test/mini');
-        await page.getByRole('button', {name: 'Model', exact: true}).click();
+        await openSettings(page, 'Model');
         const password = page.getByLabel('OpenRouter API key');
         await password.waitFor();
         assert.equal(await page.locator('input[type=password]').count(), 1);
@@ -1645,7 +1669,7 @@ test('audit log retries, pages by message, and reveals chronological calls and r
     });
     try {
         await page.goto('https://tinybot.test/mini');
-        await page.getByRole('button', {name: 'Audit', exact: true}).click();
+        await page.getByRole('button', {name: 'Activity', exact: true}).click();
         await page.getByText('Audit log unavailable.', {exact: true}).waitFor();
         await page.getByRole('button', {name: 'Retry loading audit log'}).click();
         await page.getByText('Find the weather', {exact: true}).waitFor();
@@ -1723,7 +1747,7 @@ test('audit JSON export downloads the whole run and offers a fallback for restri
             return route.fallback();
         });
         await page.goto('https://tinybot.test/mini');
-        await page.getByRole('button', {name: 'Audit', exact: true}).click();
+        await page.getByRole('button', {name: 'Activity', exact: true}).click();
         const summary = page.getByText(run.message, {exact: true});
         await summary.click();
         await page.getByText('fixture/model', {exact: true}).waitFor();
@@ -1798,7 +1822,7 @@ test('audit usage shows provider, model and run totals without treating missing 
     const values = group => group.locator('.audit-metrics').first().locator('dd').allTextContents();
     try {
         await page.goto('https://tinybot.test/mini');
-        await page.getByRole('button', {name: 'Audit', exact: true}).click();
+        await page.getByRole('button', {name: 'Activity', exact: true}).click();
         const panel = page.locator('.audit-usage');
         await panel.getByRole('heading', {name: 'Last 7 days'}).waitFor();
         assert.deepEqual(await values(panel), ['$0.001234', '1,299', '4']);
@@ -1870,7 +1894,7 @@ test('OpenRouter server tool toggles save independently and restore on rejection
             return route.fulfill({status: 503, json: {error: 'Could not save this setting.'}});
         });
         await page.goto('https://tinybot.test/mini');
-        await page.getByRole('button', {name: 'Model', exact: true}).click();
+        await openSettings(page, 'Model');
         const search = page.getByRole('checkbox', {name: 'Web search', exact: true});
         const fetch = page.getByRole('checkbox', {name: 'Web fetch', exact: true});
         await search.uncheck();
@@ -1882,7 +1906,7 @@ test('OpenRouter server tool toggles save independently and restore on rejection
         assert.equal(await page.getByRole('checkbox', {name: 'Date and time'}).isChecked(), true);
         assert.equal(await page.getByRole('checkbox', {name: 'Search models'}).isChecked(), true);
         await page.reload();
-        await page.getByRole('button', {name: 'Model', exact: true}).click();
+        await openSettings(page, 'Model');
         assert.equal(await search.isChecked(), false);
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
     } finally {
@@ -1911,7 +1935,7 @@ test('operator invitations and guest shared memory respect the signed account vi
         });
         const owner = await ownerContext.newPage();
         await owner.goto('https://tinybot.test/mini');
-        await owner.getByRole('button', {name: 'Invites', exact: true}).click();
+        await openSettings(owner, 'Invites');
         await owner.getByRole('heading', {name: 'Guest Sample'}).waitFor();
         assert.equal(await owner.getByText('Not reported', {exact: true}).count(), 1);
         await owner.getByText('Delivered', {exact: true}).waitFor();
@@ -1948,12 +1972,13 @@ test('operator invitations and guest shared memory respect the signed account vi
         });
         const guest = await guestContext.newPage();
         await guest.goto('https://tinybot.test/mini');
-        await guest.getByRole('button', {name: 'Memory', exact: true}).click();
+        await openSettings(guest);
         assert.equal(await guest.getByRole('button', {name: 'Invites', exact: true}).count(), 0);
+        await guest.getByRole('button', {name: 'Memory', exact: true}).click();
         await guest.getByRole('button', {name: 'Join shared memory'}).click();
         await guest.getByText('A published reference.', {exact: true}).waitFor();
         assert.equal(await guest.getByRole('button', {name: 'Remove shared note'}).count(), 0);
-        await guest.getByRole('button', {name: 'Audit', exact: true}).click();
+        await guest.getByRole('button', {name: 'Activity', exact: true}).click();
         await guest.getByText('Setup and spend alerts', {exact: true}).click();
         await guest.getByText('First result delivered', {exact: true}).waitFor();
         await guest.getByText('Reported this week: Not reported', {exact: true}).waitFor();
@@ -2010,7 +2035,7 @@ test('project publication reviews the audience and version before sharing', asyn
             assert.fail(`Unexpected Mini App action ${action}`);
         });
         await page.goto('https://tinybot.test/');
-        await page.getByRole('button', {name: 'Memory', exact: true}).click();
+        await openSettings(page, 'Memory');
         await page.getByText('Project spaces', {exact: true}).click();
         await page.getByRole('button', {name: 'Open project'}).click();
         await page.getByText('Publish to project', {exact: true}).click();
@@ -2067,7 +2092,7 @@ test('calendar settings select a connection and exact guest details appear befor
         assert.equal(await page.getByRole('button', {name: 'Always approve'}).count(), 0);
         await page.getByRole('button', {name: 'Approve', exact: true}).click();
         await page.getByText('Approved. TinyBot will continue.').waitFor();
-        await page.getByRole('button', {name: 'Connections', exact: true}).click();
+        await openSettings(page, 'Connections');
         await page.getByRole('button', {name: 'Calendar setup'}).click();
         await page.getByLabel('Connected account alias').fill('work');
         await page.getByLabel('Calendar ID', {exact: true}).fill('team@example.test');
@@ -2108,18 +2133,24 @@ test('starting a fresh Telegram task clears only the selected continuation', asy
             return {ok: true};
         });
         await page.goto('https://tinybot.test/');
-        const current = page.locator('section.card').filter({has: page.getByRole('heading', {name: 'Your next Telegram message continues'})});
+        const current = page.getByRole('button', {name: 'Open selected task', exact: true});
+        await page.getByRole('button', {name: 'Needs you', exact: true}).click();
         await current.getByText('Duplicate task title', {exact: true}).waitFor();
+        assert.equal(await current.getAttribute('aria-description'), first.title);
+        await page.getByRole('button', {name: 'Open', exact: true}).click();
+        await current.waitFor({state: 'hidden'});
         const firstCard = page.locator('.task-card').filter({hasText: first.recent_reply});
         const secondCard = page.locator('.task-card').filter({hasText: second.recent_reply});
-        assert.notEqual(await firstCard.getByText(/^Started /).textContent(), await secondCard.getByText(/^Started /).textContent());
-        await current.getByRole('button', {name: 'Start new task'}).click();
+        assert.notEqual(await firstCard.getByText(/^(Started|Updated) /).textContent(), await secondCard.getByText(/^(Started|Updated) /).textContent());
+        await page.getByRole('button', {name: 'New task', exact: true}).click();
         await page.getByText('Send a message in Telegram to start your new task.').waitFor();
         await current.waitFor({state: 'hidden'});
         await firstCard.getByText('Working', {exact: true}).waitFor();
         await secondCard.getByRole('button', {name: 'Continue', exact: true}).click();
+        await secondCard.getByText('Next in Telegram', {exact: true}).waitFor();
+        assert.equal(await secondCard.getAttribute('aria-current'), 'true');
+        await page.getByRole('button', {name: 'Needs you', exact: true}).click();
         await current.waitFor();
-        await secondCard.getByText('Current Chief task', {exact: true}).waitFor();
         assert.deepEqual(posted.map(entry => entry.action), ['start-new-task', 'select-task']);
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
     } finally {
