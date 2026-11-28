@@ -6,11 +6,10 @@ use crate::{
 };
 use anyhow::{Result, ensure};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 
 #[derive(Deserialize)]
 struct Update {
-    update_id: i64,
     message: Option<Message>,
     message_reaction: Option<ReactionUpdate>,
     widget_query: Option<widget::Query>,
@@ -178,7 +177,7 @@ impl Chat {
 
 impl Telegram {
     pub(super) async fn receive_updates(&self, offset: i64) -> Result<(Vec<Inbound>, i64)> {
-        let output = self
+        let mut output = self
             .call(
                 "getUpdates",
                 json!({"offset":offset,"timeout":25,"allowed_updates":["message","message_reaction","widget_query","callback_query"]}),
@@ -188,54 +187,116 @@ impl Telegram {
             output["ok"] == true,
             "Telegram polling failed. Check the bot token and webhook configuration."
         );
-        let updates: Vec<Update> = serde_json::from_value(output["result"].clone())?;
-        let offset = updates.last().map_or(offset, |last| last.update_id + 1);
-        let messages = updates
-            .into_iter()
-            .filter_map(|update| {
-                if let Some(query) = update.widget_query {
-                    return query.is_private().then_some(Inbound::Widget(query));
-                }
-                if let Some(query) = update.callback_query {
-                    return query.is_private().then_some(Inbound::Callback(query));
-                }
-                if let Some(reaction) = update.message_reaction {
-                    return reaction.receive(update.update_id);
-                }
-                let message = update.message?;
-                let user = message.from.as_ref()?;
-                if !message.chat.is_private_with(user) {
-                    return message.group(update.update_id);
-                }
-                let reply = message.reply_context();
-                if let Some(note) = message.voice {
-                    return Some(Inbound::Voice(voice::Received::new(
-                        update.update_id,
-                        user.id.to_string(),
-                        message.message_id,
-                        note,
-                        reply,
-                    )));
-                }
-                if let Some(source) = attachment::Source::select(message.photo, message.document) {
-                    return Some(Inbound::Attachment(attachment::Received {
-                        external_id: update.update_id,
-                        user: user.id.to_string(),
-                        message_id: message.message_id,
-                        input: message.caption.unwrap_or_default(),
-                        source,
-                        reply,
-                    }));
-                }
-                Some(Inbound::Message {
-                    external_id: update.update_id,
-                    user: user.id.to_string(),
-                    text: message.text.unwrap_or_default(),
-                    telegram_message_id: Some(message.message_id),
+        decode_updates(output["result"].take(), offset)
+    }
+}
+
+fn decode_updates(result: Value, offset: i64) -> Result<(Vec<Inbound>, i64)> {
+    let Value::Array(updates) = result else {
+        anyhow::bail!("Telegram polling result is missing its update list.");
+    };
+    let is_empty = updates.is_empty();
+    let mut next: Option<i64> = None;
+    let messages = updates
+        .into_iter()
+        .filter_map(|value| {
+            let id = value["update_id"].as_i64().filter(|id| *id > 0)?;
+            let after = id.checked_add(1)?;
+            next = Some(next.map_or(after, |latest| latest.max(after)));
+            let Ok(update) = serde_json::from_value::<Update>(value) else {
+                tracing::debug!(update_id = id, "Telegram update payload could not be read");
+                return None;
+            };
+            if let Some(query) = update.widget_query {
+                return query.is_private().then_some(Inbound::Widget(query));
+            }
+            if let Some(query) = update.callback_query {
+                return query.is_private().then_some(Inbound::Callback(query));
+            }
+            if let Some(reaction) = update.message_reaction {
+                return reaction.receive(id);
+            }
+            let message = update.message?;
+            let user = message.from.as_ref()?;
+            if !message.chat.is_private_with(user) {
+                return message.group(id);
+            }
+            let reply = message.reply_context();
+            if let Some(note) = message.voice {
+                return Some(Inbound::Voice(voice::Received::new(
+                    id,
+                    user.id.to_string(),
+                    message.message_id,
+                    note,
                     reply,
-                })
+                )));
+            }
+            if let Some(source) = attachment::Source::select(message.photo, message.document) {
+                return Some(Inbound::Attachment(attachment::Received {
+                    external_id: id,
+                    user: user.id.to_string(),
+                    message_id: message.message_id,
+                    input: message.caption.unwrap_or_default(),
+                    source,
+                    reply,
+                }));
+            }
+            Some(Inbound::Message {
+                external_id: id,
+                user: user.id.to_string(),
+                text: message.text.unwrap_or_default(),
+                telegram_message_id: Some(message.message_id),
+                reply,
             })
-            .collect();
-        Ok((messages, offset))
+        })
+        .collect();
+    ensure!(
+        is_empty || next.is_some(),
+        "Telegram polling result has no valid update IDs."
+    );
+    Ok((messages, next.unwrap_or(offset)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malformed_updates_do_not_block_valid_messages_or_trailing_offsets() {
+        let message = |id| {
+            json!({"update_id":id,"message":{
+                "message_id":51,"chat":{"id":42,"type":"private"},
+                "from":{"id":42,"is_bot":false},"text":"Hello"
+            }})
+        };
+        let (messages, next) = decode_updates(
+            json!([
+                message(11),
+                {"update_id":12,"message":{"message_id":"invalid"}},
+                {"update_id":13,"widget_query":{}},
+                {"update_id":15,"message_reaction":{}},
+                message(14),
+                {"update_id":"invalid","message":{}}
+            ]),
+            11,
+        )
+        .unwrap();
+        assert_eq!(next, 16);
+        let [
+            Inbound::Message {
+                external_id: 11, ..
+            },
+            Inbound::Message {
+                external_id: 14, ..
+            },
+        ] = messages.as_slice()
+        else {
+            panic!("expected both valid messages");
+        };
+        assert_eq!(decode_updates(json!([]), 16).unwrap().1, 16);
+        assert!(decode_updates(json!([{"update_id":i64::MAX}]), 16).is_err());
+        assert!(decode_updates(json!([{"update_id":-1}]), 16).is_err());
+        assert_eq!(decode_updates(json!([message(5)]), 16).unwrap().1, 6);
+        assert!(decode_updates(json!({}), 16).is_err());
     }
 }
