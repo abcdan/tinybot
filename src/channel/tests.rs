@@ -865,6 +865,7 @@ async fn sends_formatted_replies_and_keeps_original_reply_buttons_on_rejection()
         VecDeque::from([
             accepted.clone(),
             json!({"ok":false,"error_code":400,"description":"Bad Request: can't parse entities"}),
+            json!({"ok":false,"error_code":400,"description":"Bad Request: BUTTON_URL_INVALID"}),
             accepted.clone(),
             json!({"ok":false,"error_code":400,"description":"Bad Request: BUTTON_URL_INVALID"}),
             accepted,
@@ -911,7 +912,7 @@ async fn sends_formatted_replies_and_keeps_original_reply_buttons_on_rejection()
 
     let mock = mock.lock().await;
     let calls = &mock.0;
-    assert_eq!(calls.len(), 7);
+    assert_eq!(calls.len(), 8);
     assert!(calls.iter().all(|(method, _)| method == "sendMessage"));
     let first = &calls[0].1;
     assert_eq!(first["text"], "😀 Gevonden.\n\nBronnen: Documentatie");
@@ -938,8 +939,14 @@ async fn sends_formatted_replies_and_keeps_original_reply_buttons_on_rejection()
     assert_eq!(keyboard[1][0], source);
     assert_eq!(calls[2].1["reply_markup"], with_suggestions["reply_markup"]);
     assert!(calls[2].1.get("entities").is_none());
-    assert_eq!(calls[4].1["entities"], with_suggestions["entities"]);
-    assert_eq!(calls[4].1["reply_markup"], suggested_keyboard(&replies));
+    assert!(calls[3].1.get("entities").is_none());
+    assert_eq!(calls[3].1["reply_markup"], suggested_keyboard(&replies));
+    assert_eq!(
+        calls[3].1["reply_parameters"],
+        with_suggestions["reply_parameters"]
+    );
+    assert_eq!(calls[5].1["entities"], with_suggestions["entities"]);
+    assert_eq!(calls[5].1["reply_markup"], suggested_keyboard(&replies));
     server.abort();
 }
 
