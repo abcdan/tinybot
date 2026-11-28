@@ -54,7 +54,9 @@ def _docx(title, blocks, output):
             table.style = "Light Shading Accent 1"
             table.rows[0]._tr.get_or_add_trPr().append(OxmlElement("w:tblHeader"))
             for index, values in enumerate(rows):
-                for cell, value in zip(table.rows[index].cells, values):
+                row = table.rows[index]
+                row._tr.get_or_add_trPr().append(OxmlElement("w:cantSplit"))
+                for cell, value in zip(row.cells, values):
                     cell.text = _cell_text(value)
                     paragraph = cell.paragraphs[0]
                     paragraph.paragraph_format.space_after = Pt(4)

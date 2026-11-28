@@ -46,6 +46,8 @@ def main():
     assert word.paragraphs[2].text == "Compare price & portions."
     assert word.paragraphs[3].style.name == "List Bullet"
     assert word.tables[0].cell(2, 1).text == "€5,19"
+    assert word.tables[0].rows[0]._tr.xpath("./w:trPr/w:tblHeader")
+    assert all(row._tr.xpath("./w:trPr/w:cantSplit") for row in word.tables[0].rows)
 
     rows = [["Meal", "Price"]] + [[f"Meal {number}", number] for number in range(100)]
     presentation = Presentation(checked_bytes("pptx", BLOCKS + [{"type": "table", "rows": rows}]))
