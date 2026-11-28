@@ -116,6 +116,66 @@ async fn telegram_ingress_and_delivery_wake_workers_before_their_fallback_polls(
     );
 }
 
+struct RateLimitedTelegram {
+    attempted_at: OnceLock<i64>,
+}
+
+#[async_trait]
+impl ChannelAdapter for RateLimitedTelegram {
+    fn name(&self) -> &'static str {
+        "telegram"
+    }
+
+    async fn receive(&self, offset: i64) -> Result<(Vec<Inbound>, i64)> {
+        Ok((vec![], offset))
+    }
+
+    async fn send(
+        &self,
+        _: &str,
+        _: &str,
+        _: Option<&str>,
+        _: Option<i64>,
+    ) -> Result<MessageDelivery> {
+        self.attempted_at.set(crate::security::now()).unwrap();
+        Ok(MessageDelivery::Retry(12))
+    }
+}
+
+#[tokio::test]
+async fn a_flood_wait_keeps_the_reply_queued_for_the_full_delay() {
+    let db = fixture().await;
+    let app = Arc::new(app_with_model(&db, Arc::new(BriefReply)));
+    let telegram = Arc::new(RateLimitedTelegram {
+        attempted_at: OnceLock::new(),
+    });
+    store::notify(&db, "1", "Try sending this reply.", None)
+        .await
+        .unwrap();
+    let worker = tokio::spawn(channel::outbox(app, telegram.clone()));
+    let persisted = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let row: Option<(i64, String)> = sqlx::query_as(
+                "SELECT retry_at,body FROM outbox WHERE user='1' AND state='queued' AND retry_at>0",
+            )
+            .fetch_optional(&db)
+            .await
+            .unwrap();
+            if let Some(row) = row {
+                break row;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    worker.abort();
+
+    let (retry_at, body) = persisted.unwrap();
+    let attempted_at = *telegram.attempted_at.get().unwrap();
+    assert!(retry_at >= attempted_at + 13);
+    assert_eq!(body, "Try sending this reply.");
+}
+
 #[derive(Default)]
 struct ResearchReply {
     started: tokio::sync::Notify,

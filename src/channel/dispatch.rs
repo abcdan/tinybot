@@ -266,7 +266,7 @@ async fn deliver(app: &crate::App, adapter: &dyn ChannelAdapter, item: &store::O
     let dispatch = match store::can_deliver(db, item).await {
         Ok(true) => match send_item(app, adapter, item).await {
             Ok(MessageDelivery::Sent(id)) => Dispatch::Sent(id),
-            Ok(MessageDelivery::Retry(delay)) => Dispatch::Retry(now() + delay),
+            Ok(MessageDelivery::Retry(delay)) => Dispatch::Retry(delay),
             Ok(MessageDelivery::Skipped) => Dispatch::Skipped,
             Err(error)
                 if error.is::<super::UploadUncertain>()
@@ -277,12 +277,13 @@ async fn deliver(app: &crate::App, adapter: &dyn ChannelAdapter, item: &store::O
             Err(_) => Dispatch::Failed,
         },
         Ok(false) => Dispatch::Skipped,
-        Err(_) => Dispatch::Retry(now() + 2),
+        Err(_) => Dispatch::Retry(2),
     };
     let (state, retry, message_id) = match dispatch {
         Dispatch::Sent(message_id) => ("sent", 0, message_id),
         Dispatch::Retry(_) if progress => ("skipped", 0, None),
-        Dispatch::Retry(retry) => ("queued", retry, None),
+        // Round the deadline up because the outbox clock has whole-second precision.
+        Dispatch::Retry(delay) => ("queued", now() + delay + 1, None),
         Dispatch::Failed => ("failed", 0, None),
         Dispatch::Uncertain => ("uncertain", 0, None),
         Dispatch::Skipped => ("skipped", 0, None),
