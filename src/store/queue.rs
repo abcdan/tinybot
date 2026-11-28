@@ -58,9 +58,15 @@ pub async fn recover(db: &SqlitePool) -> Result<()> {
     sqlx::query("UPDATE tasks SET state='queued' WHERE state='running'")
         .execute(&mut *tx)
         .await?;
+    // A message interrupted by a restart might already be visible in Telegram.
     sqlx::query(
-        "UPDATE outbox SET state=CASE WHEN reaction_event IS NULL THEN 'uncertain' ELSE 'queued' END
-         WHERE state='sending'",
+        "UPDATE outbox SET state='uncertain',body='',button=NULL,widget=NULL,retry_at=0
+         WHERE state='sending' AND reaction_event IS NULL",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE outbox SET state='queued' WHERE state='sending' AND reaction_event IS NOT NULL",
     )
     .execute(&mut *tx)
     .await?;
@@ -414,6 +420,80 @@ pub async fn compact(
 mod tests {
     use super::*;
     use crate::store;
+
+    #[tokio::test]
+    async fn restart_clears_an_uncertain_send_and_keeps_a_retryable_reaction() {
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!().run(&db).await.unwrap();
+        for user in ["42", "43"] {
+            store::seed(&db, user).await.unwrap();
+            sqlx::query("UPDATE users SET provider='codex' WHERE id=?")
+                .bind(user)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+
+        store::ingest_telegram(&db, "42", 1, "42", "Show my report.", 51)
+            .await
+            .unwrap();
+        let task = claim(&db).await.unwrap().unwrap();
+        let report = crate::channel::Card::new("Report", "Private fixture result.", &[]).unwrap();
+        settle_widget(&db, &task, &report, &[]).await.unwrap();
+        store::ingest_telegram(&db, "42", 2, "43", "Acknowledge this.", 52)
+            .await
+            .unwrap();
+        let reaction_task = claim(&db).await.unwrap().unwrap();
+        assert!(
+            store::queue_reaction(&db, &reaction_task, "👍")
+                .await
+                .unwrap()
+        );
+        settle(&db, &reaction_task, "idle", None).await.unwrap();
+
+        let message = store::claim_delivery(&db).await.unwrap().unwrap();
+        assert_eq!(message.user, "42");
+        assert!(message.widget.is_some());
+        let reaction = store::claim_delivery(&db).await.unwrap().unwrap();
+        assert_eq!(reaction.user, "43");
+        assert!(reaction.reaction_event.is_some());
+        recover(&db).await.unwrap();
+
+        let saved: (String, String, Option<String>, Option<String>) =
+            sqlx::query_as("SELECT state,body,button,widget FROM outbox WHERE id=?")
+                .bind(message.id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(saved, ("uncertain".into(), String::new(), None, None));
+        let receipt: String =
+            sqlx::query_scalar("SELECT state FROM audit_deliveries WHERE outbox=?")
+                .bind(message.id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(receipt, "uncertain");
+        let history = history(&db, &task.id).await.unwrap();
+        assert!(
+            history
+                .iter()
+                .any(|(_, role, text)| role == "assistant"
+                    && text.contains("Private fixture result."))
+        );
+
+        let retried = store::claim_delivery(&db).await.unwrap().unwrap();
+        assert_eq!(retried.id, reaction.id);
+        assert_eq!(retried.body, "👍");
+        assert_eq!(
+            store::reaction_target(&db, &retried).await.unwrap(),
+            Some(52)
+        );
+        assert!(store::claim_delivery(&db).await.unwrap().is_none());
+    }
 
     #[tokio::test]
     async fn compaction_waits_at_the_earliest_undelivered_reply() {
