@@ -109,7 +109,8 @@ struct Event {
 }
 
 pub(crate) enum Delivery {
-    Accepted,
+    Queued,
+    Duplicate,
     Unauthorized,
     Busy,
     Invalid,
@@ -185,14 +186,14 @@ pub(crate) async fn receive(
     .await?;
     if duplicate {
         tx.commit().await?;
-        return Ok(Delivery::Accepted);
+        return Ok(Delivery::Duplicate);
     }
     let started = enqueue(&mut tx, &schedule, time, Some(&request))
         .await?
         .is_some();
     tx.commit().await?;
     Ok(if started {
-        Delivery::Accepted
+        Delivery::Queued
     } else {
         Delivery::Busy
     })

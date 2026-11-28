@@ -185,7 +185,7 @@ async fn main() -> Result<()> {
     tokio::spawn(channel::outbox(app.clone(), telegram.clone()));
     tokio::spawn(mail::run(app.clone()));
     tokio::spawn(runtime::run(app.clone(), telegram));
-    tokio::spawn(schedules::run(db));
+    tokio::spawn(schedules::run(app.clone()));
     let address: SocketAddr = env::var("TINYBOT_LISTEN")
         .unwrap_or_else(|_| "0.0.0.0:8080".into())
         .parse()?;

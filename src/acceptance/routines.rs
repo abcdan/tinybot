@@ -283,16 +283,18 @@ async fn a_signed_webhook_queues_one_run_and_cannot_replay_after_revision_change
             .body(Body::from(body.to_owned()))
             .unwrap()
     };
-    for (event, at, signed, expected) in [
-        (body, time, false, StatusCode::UNAUTHORIZED),
-        (body, time - 301, true, StatusCode::UNAUTHORIZED),
-        (body, time, true, StatusCode::ACCEPTED),
-        (body, time, true, StatusCode::ACCEPTED),
+    use futures::FutureExt;
+    for (event, at, signed, expected, queued) in [
+        (body, time, false, StatusCode::UNAUTHORIZED, false),
+        (body, time - 301, true, StatusCode::UNAUTHORIZED, false),
+        (body, time, true, StatusCode::ACCEPTED, true),
+        (body, time, true, StatusCode::ACCEPTED, false),
         (
             r#"{"event_id":"fixture-second"}"#,
             time,
             true,
             StatusCode::CONFLICT,
+            false,
         ),
     ] {
         assert_eq!(
@@ -303,6 +305,11 @@ async fn a_signed_webhook_queues_one_run_and_cannot_replay_after_revision_change
                 .unwrap()
                 .status(),
             expected
+        );
+        assert_eq!(app.task_ready.notified().now_or_never().is_some(), queued);
+        assert_eq!(
+            app.delivery_ready.notified().now_or_never().is_some(),
+            queued
         );
     }
     let runs =

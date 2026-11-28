@@ -107,6 +107,7 @@ pub(super) async fn run_schedule(app: &App, user: &str, data: &Value) -> Result<
         None,
     )
     .await?;
+    app.wake_queues();
     Ok(json!({"task":task}))
 }
 
@@ -121,6 +122,7 @@ pub(super) async fn preview_routine(app: &App, user: &str, data: &Value) -> Resu
         now(),
     )
     .await?;
+    app.wake_queues();
     Ok(json!({"task":task}))
 }
 
