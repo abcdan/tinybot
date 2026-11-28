@@ -277,8 +277,8 @@ impl Telegram {
         if has_entities {
             data["entities"] = json!(reply.entities);
         }
-        let has_links = !reply.links.is_empty();
-        if has_links {
+        let mut has_source_buttons = !reply.links.is_empty();
+        if has_source_buttons {
             let mut markup = keyboard
                 .clone()
                 .unwrap_or_else(|| json!({"inline_keyboard":[]}));
@@ -304,29 +304,36 @@ impl Telegram {
                 return message_result(&response);
             }
         }
-        let response = self.call("sendMessage", data.clone()).await?;
-        if let Some(description) = bad_request(&response) {
-            if has_entities && invalid_entities(&description) {
-                data.as_object_mut()
+        loop {
+            let response = self.call("sendMessage", data.clone()).await?;
+            let Some(description) = bad_request(&response) else {
+                return message_result(&response);
+            };
+            if invalid_entities(&description)
+                && data
+                    .as_object_mut()
                     .expect("message object")
-                    .remove("entities");
-                return self.send_message(data).await;
+                    .remove("entities")
+                    .is_some()
+            {
+                continue;
             }
-            if has_links
+            if has_source_buttons
                 && (description.contains("button_url_invalid")
                     || description.contains("button url"))
             {
-                if let Some(keyboard) = keyboard {
-                    data["reply_markup"] = keyboard;
+                has_source_buttons = false;
+                if let Some(keyboard) = &keyboard {
+                    data["reply_markup"] = keyboard.clone();
                 } else {
                     data.as_object_mut()
                         .expect("message object")
                         .remove("reply_markup");
                 }
-                return self.send_message(data).await;
+                continue;
             }
+            return message_result(&response);
         }
-        message_result(&response)
     }
 }
 
