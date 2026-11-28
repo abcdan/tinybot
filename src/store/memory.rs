@@ -109,7 +109,7 @@ pub async fn remove(db: &SqlitePool, owner: &str, id: &str) -> Result<bool> {
 }
 
 pub async fn chief_context(db: &SqlitePool, task: &Task) -> Result<Vec<String>> {
-    read(db, task, None, "", CONTEXT_LIMIT).await
+    read(db, task, None, "", &[], CONTEXT_LIMIT).await
 }
 
 pub async fn helper_context(
@@ -120,7 +120,7 @@ pub async fn helper_context(
     let Some(helper) = helper else {
         return Ok(Vec::new());
     };
-    read(db, parent, Some(helper), "", CONTEXT_LIMIT).await
+    read(db, parent, Some(helper), "", &[], CONTEXT_LIMIT).await
 }
 
 pub(crate) async fn candidates(
@@ -129,6 +129,10 @@ pub(crate) async fn candidates(
     helper: Option<&str>,
     request: &str,
 ) -> Result<Vec<MemoryCandidate>> {
+    read_notes(db, task, helper, "", &keywords(request), CANDIDATE_LIMIT).await
+}
+
+fn keywords(request: &str) -> Vec<String> {
     let mut keywords = Vec::new();
     for word in request.split(|character: char| !character.is_alphanumeric()) {
         if (3..=64).contains(&word.len()) {
@@ -141,7 +145,7 @@ pub(crate) async fn candidates(
             }
         }
     }
-    read_notes(db, task, helper, "", &keywords, CANDIDATE_LIMIT).await
+    keywords
 }
 
 pub async fn recall(
@@ -155,7 +159,7 @@ pub async fn recall(
         !query.is_empty() && query.len() <= 160,
         "memory search needs a query of up to 160 bytes"
     );
-    read(db, task, helper, query, RECALL_LIMIT).await
+    read(db, task, helper, query, &keywords(query), RECALL_LIMIT).await
 }
 
 pub async fn remember(
@@ -353,9 +357,10 @@ async fn read(
     task: &Task,
     helper: Option<&str>,
     query: &str,
+    keywords: &[String],
     limit: i64,
 ) -> Result<Vec<String>> {
-    Ok(read_notes(db, task, helper, query, &[], limit)
+    Ok(read_notes(db, task, helper, query, keywords, limit)
         .await?
         .into_iter()
         .map(|candidate| candidate.body)
@@ -384,16 +389,21 @@ async fn read_notes(
         Audience::Guest { agent, owner } => (None, Some(*agent), Some(owner.as_str())),
     };
     let notes = sqlx::query_as(
-        "WITH notes AS (
+        "WITH keywords AS (SELECT value FROM json_each(?)), notes AS (
              SELECT id,body,scope,automatic,sequence,0 AS published FROM agent_memory
              WHERE owner=? AND archived_at IS NULL AND ((scope=? AND agent IS ?) OR (? AND scope='group'))
              UNION ALL
              SELECT id,body,NULL,0,rowid,1 AS published FROM memory WHERE owner=? AND agent=?
+         ), matches AS (
+             SELECT *,instr(lower(body),lower(?))>0 AS exact,
+                 (SELECT COUNT(*) FROM keywords WHERE instr(lower(notes.body),value)>0) AS hits
+             FROM notes
          )
-         SELECT id,body,scope,automatic FROM notes WHERE instr(lower(body), lower(?))>0
-         ORDER BY (SELECT COUNT(*) FROM json_each(?) WHERE instr(lower(notes.body), value)>0) DESC,
-                  published, sequence DESC LIMIT ?",
+         SELECT id,body,scope,automatic FROM matches
+         WHERE exact OR (? AND hits=(SELECT COUNT(*) FROM keywords))
+         ORDER BY exact DESC,hits DESC,published,sequence DESC LIMIT ?",
     )
+    .bind(json!(keywords).to_string())
     .bind(&task.user)
     .bind(scope)
     .bind(agent)
@@ -401,7 +411,7 @@ async fn read_notes(
     .bind(published_owner)
     .bind(agent)
     .bind(query)
-    .bind(json!(keywords).to_string())
+    .bind(!query.is_empty() && keywords.len() >= 2)
     .bind(limit)
     .fetch_all(&mut *tx)
     .await?;
