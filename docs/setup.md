@@ -255,10 +255,10 @@ docker compose -f compose.dokploy.yaml config --quiet
 ```
 
 Supply the required deployment variables when checking either Compose file.
-The fixtures in [`tests/`](../tests) exercise Mini App rendering, sandboxed
-Chromium forms, the Python worker, and an operator-configured stdio MCP.
-Mount `tests/browser.test.mjs` at `/opt/tinybot/browser.test.mjs` in the
-browser image and use the Compose seccomp settings for Chromium. Check Python
+GitHub runs the Rust and Chromium suites on pull requests and on `main`.
+Run `sh tests/chromium.sh` locally to exercise the Mini App and browser worker
+in the same container with the Compose seccomp settings. The fixtures use
+synthetic pages and Telegram responses. Check Python
 file mutation, job isolation, and resource limits with
 `docker compose exec -T sandbox python - < tests/python_worker.py`. Live
 Telegram, OAuth, and model-provider checks need accounts and a public hostname.
