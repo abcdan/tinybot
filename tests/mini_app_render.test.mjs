@@ -338,6 +338,49 @@ test('completing a task moves it to paginated history and reopening selects it a
     }
 });
 
+test('completed task search keeps its scope and query on every page', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 640}});
+        const page = await context.newPage();
+        const state = {user: '1', provider: 'codex', tasks: [], requests: []};
+        const first = {id: 'first', title: 'Latest completed digest', state: 'completed', revision: 2};
+        const match = {id: 'match', title: 'Completed supplier digest', state: 'completed', revision: 3};
+        const older = {id: 'older', title: 'Older supplier digest', state: 'completed', revision: 1};
+        const searches = [];
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return state;
+            assert.equal(action, 'search-tasks');
+            assert.equal(data.completed_only, true);
+            searches.push(data);
+            if (!data.query) return {items: [first], next_offset: null};
+            if (data.query === 'supplier') return {items: data.offset ? [older] : [match], next_offset: data.offset ? null : 20};
+            return {items: [], next_offset: null};
+        });
+        await page.goto('https://tinybot.test/mini');
+        await page.getByRole('button', {name: 'Completed', exact: true}).click();
+        await page.getByRole('heading', {name: first.title, exact: true}).waitFor();
+        const search = page.getByRole('searchbox', {name: 'Search completed tasks', exact: true});
+        const submit = page.getByRole('button', {name: 'Search completed tasks', exact: true});
+        await search.fill('supplier');
+        await submit.click();
+        await page.getByRole('heading', {name: match.title, exact: true}).waitFor();
+        await page.getByRole('heading', {name: first.title, exact: true}).waitFor({state: 'hidden'});
+        await page.getByRole('button', {name: 'Load more tasks', exact: true}).click();
+        await page.getByRole('heading', {name: older.title, exact: true}).waitFor();
+        await search.fill('no result');
+        await submit.click();
+        await page.getByText('No matching completed tasks.', {exact: true}).waitFor();
+        await search.clear();
+        await submit.click();
+        await page.getByRole('heading', {name: first.title, exact: true}).waitFor();
+        assert.deepEqual(searches.map(({query, offset}) => [query, offset]),
+            [['', 0], ['supplier', 0], ['supplier', 20], ['no result', 0], ['', 0]]);
+    } finally {
+        await browser.close();
+    }
+});
+
 test('a task deep link shows the latest result and opens the exact pending review and audit', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
     try {

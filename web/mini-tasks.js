@@ -153,16 +153,10 @@ export function tasks(state, requestCard, openModel) {
                 continuation.hidden = page.items.some(task => task.id === telegramTask.id);
             }
             taskPage(results, page, next => search(query, next), !offset && 'No matching tasks.');
+            return true;
         }
-        const finder = form('Search tasks', [field('query', 'Search retained messages and tasks', {
-            max: 200, required: false, type: 'search'
-        })], ({query}) => search(query.trim()));
-        finder.classList.add('task-search');
-        finder.querySelector('input').placeholder = 'Search tasks and messages';
-        const submit = finder.querySelector('button');
-        submit.setAttribute('aria-label', 'Search tasks');
-        submit.title = 'Search tasks';
-        submit.textContent = '';
+        const finder = taskFinder({action: 'Search tasks', label: 'Search retained messages and tasks',
+            placeholder: 'Search tasks and messages'}, search);
         if (!openItems.length) results.append(emptyState(state.tasks.length ? 'No open tasks.' :
             'Send a message in Telegram to start a task.'));
         results.append(...openItems.map(taskCard));
@@ -173,22 +167,53 @@ export function tasks(state, requestCard, openModel) {
         const results = node('div');
         const status = node('p', 'Loading completed tasks…', 'meta');
         status.setAttribute('role', 'status');
-        list.append(status, results);
-        async function load(offset = 0) {
-            const page = await api('search-tasks', {query: '', offset, completed_only: true});
-            if (!results.isConnected) return;
+        let generation = 0;
+        let retryQuery = '';
+        const retry = button('Retry loading completed tasks', () => load(retryQuery), true);
+        retry.hidden = true;
+        const finder = taskFinder({action: 'Search completed tasks', label: 'Search completed tasks',
+            placeholder: 'Search completed tasks'}, load);
+        list.append(finder, status, retry, results);
+
+        async function load(query = '', offset = 0) {
+            const sequence = ++generation;
+            if (!offset) {
+                results.replaceChildren();
+                status.textContent = 'Loading completed tasks…';
+                status.hidden = false;
+                retry.hidden = true;
+            }
+            let page;
+            try {
+                page = await api('search-tasks', {query, offset, completed_only: true});
+            } catch (error) {
+                if (sequence !== generation || !results.isConnected) return;
+                if (offset) throw error;
+                retryQuery = query;
+                status.textContent = error.message;
+                retry.hidden = false;
+                return;
+            }
+            if (sequence !== generation || !results.isConnected) return;
             status.hidden = true;
-            taskPage(results, page, load, !offset && 'No completed tasks yet.');
+            const empty = query ? 'No matching completed tasks.' : 'No completed tasks yet.';
+            taskPage(results, page, next => load(query, next), !offset && empty);
+            return true;
         }
-        load().catch(error => {
-            if (!results.isConnected) return;
-            status.textContent = error.message;
-            const retry = button('Retry loading completed tasks', async () => {
-                await load();
-                retry.remove();
-            }, true);
-            results.append(retry);
-        });
+        void load();
+    }
+
+    function taskFinder({action, label, placeholder}, search) {
+        const finder = form(action, [field('query', label, {
+            max: 200, required: false, type: 'search'
+        })], ({query}) => search(query.trim()));
+        finder.classList.add('task-search');
+        finder.querySelector('input').placeholder = placeholder;
+        const submit = finder.querySelector('button');
+        submit.setAttribute('aria-label', action);
+        submit.title = action;
+        submit.textContent = '';
+        return finder;
     }
 
     function taskPage(results, page, load, empty) {
@@ -196,8 +221,7 @@ export function tasks(state, requestCard, openModel) {
         results.append(...page.items.map(taskCard));
         if (page.next_offset != null) {
             const more = button('Load more tasks', async () => {
-                await load(page.next_offset);
-                more.remove();
+                if (await load(page.next_offset)) more.remove();
             }, true);
             results.append(more);
         }
