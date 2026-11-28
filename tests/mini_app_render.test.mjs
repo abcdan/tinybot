@@ -997,6 +997,51 @@ test('a launch without accepted Telegram data shows instructions and leaves sett
     }
 });
 
+test('a temporary refresh failure keeps the signed view until the next successful refresh', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 640}});
+        const page = await context.newPage();
+        const task = {id: 'read', title: 'Read yesterday’s digest', revision: 2, state: 'running'};
+        const state = {provider: 'codex', requests: [], tasks: [task]};
+        await mockMiniApp(context, ({action}) => {
+            assert.equal(action, 'status');
+            return state;
+        });
+        let response = 'normal';
+        await context.route('https://tinybot.test/api/mini', route => {
+            if (response === 'offline') return route.abort('internetdisconnected');
+            if (response === 'busy') return route.fulfill({status: 503, body: '<h1>Unavailable</h1>'});
+            if (response === 'denied') return route.fulfill({status: 403, body: '<h1>Denied</h1>'});
+            return route.fallback();
+        });
+        await page.goto('https://tinybot.test/mini');
+        const refresh = page.getByRole('button', {name: 'Refresh', exact: true});
+        const card = page.getByRole('heading', {name: task.title}).locator('..');
+        await card.getByText('Working', {exact: true}).waitFor();
+        for (const failure of ['offline', 'busy']) {
+            response = failure;
+            await refresh.click();
+            await page.getByText('Could not refresh TinyBot. Try again in a moment.', {exact: true}).waitFor();
+            await card.getByText('Working', {exact: true}).waitFor();
+            await mainNavigation(page).waitFor();
+        }
+        response = 'normal';
+        task.state = 'completed';
+        await refresh.click();
+        await card.waitFor({state: 'hidden'});
+        await page.getByText('Could not refresh TinyBot. Try again in a moment.', {exact: true}).waitFor({state: 'hidden'});
+
+        response = 'denied';
+        await refresh.click();
+        await page.getByText('Open TinyBot from its Telegram profile or tap Settings & forms in the bot chat.').waitFor();
+        await mainNavigation(page).waitFor({state: 'hidden'});
+        await refresh.waitFor({state: 'hidden'});
+    } finally {
+        await browser.close();
+    }
+});
+
 test('settings follow live Telegram colors and open the GitHub source in Telegram', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
     const context = await browser.newContext({colorScheme: 'light', viewport: {width: 360, height: 720}});
