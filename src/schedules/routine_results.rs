@@ -1,7 +1,9 @@
-use super::{local_iso, owned};
+use super::owned;
 use crate::{security::clip, store::Task};
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
+use chrono::{DateTime, NaiveDate};
 use chrono_tz::Tz;
+use futures::TryStreamExt;
 use serde::Serialize;
 use sqlx::{FromRow, SqlitePool};
 
@@ -30,11 +32,17 @@ pub(crate) struct RetainedResults {
     results: Vec<RunResult>,
 }
 
+pub(crate) struct Query<'a> {
+    pub schedule: Option<&'a str>,
+    pub title: Option<&'a str>,
+    pub date: Option<NaiveDate>,
+    pub limit: i64,
+}
+
 pub(crate) async fn read(
     db: &SqlitePool,
     task: &Task,
-    schedule: Option<&str>,
-    limit: i64,
+    query: Query<'_>,
 ) -> Result<RetainedResults> {
     let mut tx = db.begin().await?;
     let current: bool = sqlx::query_scalar(
@@ -52,7 +60,7 @@ pub(crate) async fn read(
         "This request changed before the routine results could be read."
     );
 
-    let mut routines = match schedule {
+    let mut routines = match query.schedule {
         Some(id) => {
             let selected = owned(&mut *tx, &task.user, id).await?;
             ensure!(selected.kind == "task", "This schedule is a reminder.");
@@ -65,15 +73,17 @@ pub(crate) async fn read(
         None => {
             sqlx::query_as::<_, Routine>(
                 "SELECT s.id,s.title,s.time_zone FROM schedules s
-             WHERE s.owner=? AND s.kind='task'
-               AND EXISTS(SELECT 1 FROM tasks t LEFT JOIN schedule_runs r ON r.task=t.id
+             WHERE s.owner=?1 AND s.kind='task'
+               AND (?2 IS NULL OR trim(s.title)=?2 COLLATE NOCASE)
+               AND (?2 IS NOT NULL OR EXISTS(SELECT 1 FROM tasks t LEFT JOIN schedule_runs r ON r.task=t.id
                  WHERE t.schedule=s.id AND t.user=s.owner
                    AND t.state IN ('idle','completed') AND r.preview_sample IS NULL
                    AND t.chief_chat=1 AND t.agent IS NULL AND t.shared_memory_pair IS NULL
-                   AND NOT EXISTS(SELECT 1 FROM telegram_group_tasks g WHERE g.task=t.id))
-             ORDER BY s.title COLLATE NOCASE,s.id LIMIT ?",
+                   AND NOT EXISTS(SELECT 1 FROM telegram_group_tasks g WHERE g.task=t.id)))
+             ORDER BY s.title COLLATE NOCASE,s.id LIMIT ?3",
             )
             .bind(&task.user)
+            .bind(query.title)
             .bind(CANDIDATE_LIMIT + 1)
             .fetch_all(&mut *tx)
             .await?
@@ -83,7 +93,12 @@ pub(crate) async fn read(
     routines.truncate(CANDIDATE_LIMIT as usize);
     let mut results: Vec<RunResult> = Vec::new();
     if let [routine] = routines.as_slice() {
-        results = sqlx::query_as(
+        let zone = routine.time_zone.parse::<Tz>()?;
+        // The UTC window covers every possible offset, then the local date check handles DST.
+        let midnight = query
+            .date
+            .map(|date| date.and_time(chrono::NaiveTime::MIN).and_utc().timestamp());
+        let mut rows = sqlx::query_as::<_, RunResult>(
             "SELECT t.id AS task,coalesce(r.started_at,t.created_at,t.updated) AS started_at,
                     '' AS local_start,e.body AS text,0 AS truncated
              FROM tasks t LEFT JOIN schedule_runs r ON r.task=t.id
@@ -104,17 +119,37 @@ pub(crate) async fn read(
                AND t.chief_chat=1 AND t.agent IS NULL AND t.shared_memory_pair IS NULL
                AND NOT EXISTS(SELECT 1 FROM telegram_group_tasks g WHERE g.task=t.id)
                AND r.preview_sample IS NULL
-             ORDER BY started_at DESC,e.id DESC LIMIT ?",
+               AND (?3 IS NULL OR coalesce(r.started_at,t.created_at,t.updated)>=?3
+                                AND coalesce(r.started_at,t.created_at,t.updated)<?4)
+             ORDER BY started_at DESC,e.id DESC LIMIT ?5",
         )
         .bind(&routine.id)
         .bind(&task.user)
-        .bind(limit)
-        .fetch_all(&mut *tx)
-        .await?;
-        let zone = routine.time_zone.parse::<Tz>()?;
+        .bind(midnight.map(|time| time - 86_400))
+        .bind(midnight.map(|time| time + 2 * 86_400))
+        .bind(if query.date.is_some() {
+            -1
+        } else {
+            query.limit
+        })
+        .fetch(&mut *tx);
+        while results.len() < query.limit as usize {
+            let Some(mut result) = rows.try_next().await? else {
+                break;
+            };
+            let local_start = DateTime::from_timestamp(result.started_at, 0)
+                .context("Invalid retained run time.")?
+                .with_timezone(&zone);
+            if query
+                .date
+                .is_none_or(|date| local_start.date_naive() == date)
+            {
+                result.local_start = local_start.to_rfc3339();
+                results.push(result);
+            }
+        }
         let text_bytes = 4500 / results.len().max(1);
         for result in &mut results {
-            result.local_start = local_iso(result.started_at, zone);
             result.text.retain(|character| {
                 !character.is_control() || matches!(character, '\n' | '\r' | '\t')
             });
@@ -139,6 +174,15 @@ pub(crate) async fn read(
 mod tests {
     use super::*;
     use crate::{schedules, store};
+
+    fn recent(schedule: Option<&str>, limit: i64) -> Query<'_> {
+        Query {
+            schedule,
+            title: None,
+            date: None,
+            limit,
+        }
+    }
 
     async fn add_routine(db: &SqlitePool, id: &str, user: &str, title: &str) {
         sqlx::query(
@@ -239,7 +283,7 @@ mod tests {
                 .await
                 .unwrap()
         );
-        let retained = read(&db, &request, None, 5).await.unwrap();
+        let retained = read(&db, &request, recent(None, 5)).await.unwrap();
         assert_eq!(retained.routines.len(), 1);
         assert_eq!(retained.routines[0].id, "daily");
         let [today, yesterday] = retained.results.as_slice() else {
@@ -249,9 +293,13 @@ mod tests {
         assert_eq!(today.text, "Today's summary");
         assert_eq!(yesterday.task, old.id);
         assert_eq!(yesterday.text, "Yesterday's summary");
-        assert!(read(&db, &request, Some("private"), 5).await.is_err());
+        assert!(
+            read(&db, &request, recent(Some("private"), 5))
+                .await
+                .is_err()
+        );
         assert_eq!(
-            read(&db, &request, Some("daily"), 1)
+            read(&db, &request, recent(Some("daily"), 1))
                 .await
                 .unwrap()
                 .results
@@ -271,7 +319,7 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
-        let choices = read(&db, &request, None, 5).await.unwrap();
+        let choices = read(&db, &request, recent(None, 5)).await.unwrap();
         let [daily, weekly] = choices.routines.as_slice() else {
             panic!("expected owned routine choices");
         };
@@ -279,11 +327,25 @@ mod tests {
         assert_eq!(weekly.id, "weekly");
         assert!(choices.results.is_empty());
 
+        add_routine(&db, "daily-other", "42", "Daily summary").await;
+        let same_title = read(
+            &db,
+            &request,
+            Query {
+                title: Some("Daily Summary"),
+                ..recent(None, 5)
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(same_title.routines.len(), 2);
+        assert!(same_title.results.is_empty());
+
         sqlx::query("UPDATE tasks SET revision=revision+1 WHERE id=?")
             .bind(&request.id)
             .execute(&db)
             .await
             .unwrap();
-        assert!(read(&db, &request, Some("daily"), 5).await.is_err());
+        assert!(read(&db, &request, recent(Some("daily"), 5)).await.is_err());
     }
 }
