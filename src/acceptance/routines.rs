@@ -418,3 +418,128 @@ async fn a_change_only_routine_compares_against_the_last_delivered_result() {
         }
     }
 }
+
+struct RetainedResultChief;
+
+#[async_trait]
+impl ModelProvider for RetainedResultChief {
+    async fn complete(&self, _: &str, _: &str) -> Result<String> {
+        unreachable!()
+    }
+
+    async fn complete_turn(
+        &self,
+        _: &str,
+        input: &str,
+        tools: &[ToolDefinition],
+        _: Option<&mut TextDelta<'_>>,
+    ) -> Result<String> {
+        let context: Value = serde_json::from_str(input)?;
+        let history = context["history"].as_array().unwrap();
+        let last = history.last().unwrap();
+        if last["role"] == "tool" {
+            let retained: Value = serde_json::from_str(last["text"].as_str().unwrap())?;
+            assert_eq!(retained["routines"].as_array().unwrap().len(), 1);
+            assert_eq!(retained["routines"][0]["title"], "Release watch");
+            let [late, early] = retained["results"].as_array().unwrap().as_slice() else {
+                panic!("expected the two delivered runs for October 25");
+            };
+            assert_eq!(late["local_start"], "2026-10-25T23:55:00+01:00");
+            assert_eq!(late["text"], "Late run");
+            assert_eq!(early["local_start"], "2026-10-25T00:05:00+02:00");
+            assert_eq!(early["text"], "Early run");
+            return Ok(json!({"kind":"reply","text":"Late run and early run"}).to_string());
+        }
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == "read_routine_results")
+            .expect("personal Chief should have the routine results tool");
+        assert_eq!(tool.input_schema["properties"]["date"]["format"], "date");
+        Ok(json!({
+            "kind":"tool","name":tool.name,
+            "args":{"title":" release WATCH ","date":"2026-10-25","limit":2}
+        })
+        .to_string())
+    }
+}
+
+#[tokio::test]
+async fn chief_reads_a_named_routine_on_the_requested_local_date() {
+    let db = fixture().await;
+    sqlx::query("UPDATE users SET time_zone='Europe/Amsterdam' WHERE id='1'")
+        .execute(&db)
+        .await
+        .unwrap();
+    let app = app_with_model(&db, Arc::new(RetainedResultChief));
+    let mut owned = Vec::new();
+    for (title, owner) in [
+        ("Agenda", "1"),
+        ("Release watch", "2"),
+        ("Release watch", "1"),
+    ] {
+        let saved = schedules::save_routine(
+            &db,
+            owner,
+            schedules::RoutineRequest {
+                title: title.into(),
+                input: "Report the release date.".into(),
+                at: None,
+                cron: None,
+                steps: vec![schedules::RoutineStep {
+                    instruction: "Check the release calendar.".into(),
+                    agent: None,
+                }],
+            },
+            None,
+            now(),
+            None,
+        )
+        .await
+        .unwrap();
+        if owner == "1" {
+            owned.push(saved.id);
+        }
+    }
+    let [agenda, release] = owned.as_slice() else {
+        panic!("expected two owned routines");
+    };
+    for (routine, start, text) in [
+        (agenda, "2026-10-25T09:00:00Z", "Unrelated agenda result"),
+        (release, "2026-10-24T20:00:00Z", "Before the requested day"),
+        (release, "2026-10-24T22:05:00Z", "Early run"),
+        (release, "2026-10-25T22:55:00Z", "Late run"),
+        (release, "2026-10-25T23:00:00Z", "After the requested day"),
+    ] {
+        let time = chrono::DateTime::parse_from_rfc3339(start)
+            .unwrap()
+            .timestamp();
+        let run = schedules::run_now(&db, "1", routine, 0, start, time, None)
+            .await
+            .unwrap();
+        let task = store::claim(&db).await.unwrap().unwrap();
+        assert_eq!(task.id, run);
+        store::settle_reply(&db, &task, text, &[]).await.unwrap();
+        let delivery = store::claim_outbox(&db).await.unwrap().unwrap();
+        assert_eq!(delivery.body, text);
+        sqlx::query("UPDATE outbox SET state='sent',body='' WHERE id=?")
+            .bind(delivery.id)
+            .execute(&db)
+            .await
+            .unwrap();
+    }
+
+    store::ingest_telegram(
+        &db,
+        "1",
+        9,
+        "1",
+        "Read the Release watch results for October 25, 2026.",
+        9,
+    )
+    .await
+    .unwrap();
+    let task = store::claim(&db).await.unwrap().unwrap();
+    runtime::work(&app, &task).await.unwrap();
+    let reply = store::claim_outbox(&db).await.unwrap().unwrap();
+    assert_eq!(reply.body, "Late run and early run");
+}

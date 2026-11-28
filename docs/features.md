@@ -220,9 +220,10 @@ For recurring digests, choose **Only when the result changes** under **Timing po
 to skip notifications when the facts and next actions match the last delivered result.
 
 In private chat, ask your Chief to look at your daily summaries or name the
-routine you want to review. It can read recent results that were delivered in
-Telegram. If your summaries are saved in Docblock, name Docblock or the note
-instead.
+routine you want to review. To find an older summary, ask for a date, such as
+**Show me the Daily watch result from November 20.** TinyBot uses the routine’s
+time zone and reads results already delivered in Telegram. If your summaries
+are saved in Docblock, name Docblock or the note.
 
 Open **Webhook** on an active or manual routine to run it from a trusted external
 service. The service sends `POST` with a JSON body containing a unique `event_id`.
