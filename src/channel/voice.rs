@@ -152,7 +152,7 @@ async fn notify(
         received.external_id,
         body,
         button,
-        None,
+        Some(received.telegram_message_id),
     )
     .await
 }
@@ -303,7 +303,8 @@ mod tests {
             })
         );
 
-        let failed = received(11, "42");
+        let mut failed = received(11, "42");
+        failed.telegram_message_id = 52;
         for _ in 0..2 {
             notify(&db, "telegram", &failed, "Connect OpenRouter", Some("mini"))
                 .await
@@ -312,6 +313,7 @@ mod tests {
         let item = store::claim_outbox(&db).await.unwrap().unwrap();
         assert_eq!(item.body, "Connect OpenRouter");
         assert_eq!(item.button.as_deref(), Some("mini"));
+        assert_eq!(item.reply_to_message_id, Some(52));
         assert!(store::claim_outbox(&db).await.unwrap().is_none());
         assert!(!eligible(&db, "telegram", &failed).await.unwrap());
         let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_sessions")
