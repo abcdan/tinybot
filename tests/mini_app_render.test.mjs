@@ -2006,7 +2006,9 @@ test('audit usage shows provider, model and run totals without treating missing 
                 assert.deepEqual(data, {id: 42});
                 return {session: run, next_after: null, usage: runUsage, delivery: {
                     timing: {result_status: 'delivered', queue_wait_ms: 200, first_feedback_ms: 500,
-                        result_delivery_ms: 3100}, receipts: [{kind: 'reply', state: 'sent'}],
+                        result_delivery_ms: 3100, telegram_delivery_ms: 111},
+                    provider_time: {other_calls_ms: 823, review_calls_ms: 251},
+                    receipts: [{kind: 'reply', state: 'sent'}],
                 }, entries: [
                     {id: 1, at: started, kind: 'model_call', name: modelName, status: 'completed',
                         detail: {usage: {...free, reasoning_tokens: 12}}},
@@ -2044,8 +2046,8 @@ test('audit usage shows provider, model and run totals without treating missing 
         await session.getByRole('heading', {name: 'Run usage', exact: true}).waitFor();
         assert.deepEqual(await values(session), ['$0.00', '254', '1']);
         const delivery = page.locator('.audit-delivery-run');
-        await delivery.getByRole('heading', {name: 'Telegram delivery'}).waitFor();
-        assert.deepEqual(await values(delivery), ['Confirmed', '200 ms', '500 ms', '3.1 s']);
+        await delivery.getByRole('heading', {name: 'Run timing'}).waitFor();
+        assert.deepEqual(await values(delivery), ['Confirmed', '200 ms', '823 ms', '251 ms', '111 ms', '500 ms', '3.1 s']);
         const runBreakdown = session.locator('.audit-breakdown');
         await runBreakdown.waitFor({state: 'hidden'});
         await session.getByText('Usage breakdown', {exact: true}).click();

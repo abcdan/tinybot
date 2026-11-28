@@ -41,6 +41,7 @@ pub(crate) async fn handoff_queued(tx: &mut Transaction<'_, Sqlite>, outbox: i64
 const TIMINGS: &str = "
     receipts AS (
         SELECT d.session,MIN(d.finished_at_ms) FILTER (WHERE d.state='sent') AS first_delivery,
+               MIN(d.queued_at_ms) FILTER (WHERE d.kind IN ('reply','reaction')) AS first_result_queued,
                MAX(d.finished_at_ms) FILTER (WHERE d.kind IN ('reply','reaction') AND d.state='sent') AS last_result,
                COUNT(*) FILTER (WHERE d.kind IN ('reply','reaction')) AS results,
                COUNT(*) FILTER (WHERE d.kind IN ('reply','reaction') AND d.state='sent') AS sent,
@@ -56,6 +57,8 @@ const TIMINGS: &str = "
                    -s.received_at_ms) AS first_feedback_ms,
                CASE WHEN r.results>0 AND r.results=r.sent
                     THEN max(0,r.last_result-s.received_at_ms) END AS result_delivery_ms,
+               CASE WHEN r.results>0 AND r.results=r.sent
+                    THEN max(0,r.last_result-r.first_result_queued) END AS telegram_delivery_ms,
                CASE WHEN coalesce(r.results,0)=0 THEN 'none'
                     WHEN r.results=r.sent THEN 'delivered'
                     WHEN r.uncertain>0 THEN 'uncertain'
@@ -124,6 +127,7 @@ struct Timing {
     queue_wait_ms: Option<i64>,
     first_feedback_ms: Option<i64>,
     result_delivery_ms: Option<i64>,
+    telegram_delivery_ms: Option<i64>,
     result_status: String,
 }
 
@@ -140,7 +144,7 @@ struct Receipt {
 pub(super) async fn session(connection: &mut SqliteConnection, id: i64) -> Result<Value> {
     let sql = format!(
         "WITH visible AS (SELECT * FROM audit_sessions s WHERE id=?), {TIMINGS}
-         SELECT queue_wait_ms,first_feedback_ms,result_delivery_ms,result_status FROM timings"
+         SELECT queue_wait_ms,first_feedback_ms,result_delivery_ms,telegram_delivery_ms,result_status FROM timings"
     );
     let timing: Timing = sqlx::query_as(&sql)
         .bind(id)
@@ -151,9 +155,25 @@ pub(super) async fn session(connection: &mut SqliteConnection, id: i64) -> Resul
          FROM audit_deliveries WHERE session=? ORDER BY outbox",
     )
     .bind(id)
-    .fetch_all(connection)
+    .fetch_all(&mut *connection)
     .await?;
-    Ok(json!({"timing":timing,"receipts":receipts}))
+    // The provider-call records avoid double-counting nested model scopes.
+    let (model_ms, review_ms): (Option<i64>, Option<i64>) = sqlx::query_as(
+        "SELECT SUM(duration) FILTER (WHERE NOT is_review),SUM(duration) FILTER (WHERE is_review)
+         FROM (
+            SELECT json_extract(detail,'$.duration_ms') AS duration,
+                   name IN ('action_review','mcp_read_decision','instruction_authorization') AS is_review
+            FROM audit_entries
+            WHERE session=? AND kind='model_call' AND status IN ('completed','failed')
+              AND json_type(detail,'$.duration_ms')='integer'
+         ) WHERE duration>=0",
+    )
+    .bind(id)
+    .fetch_one(connection)
+    .await?;
+    Ok(json!({"timing":timing,"receipts":receipts,"provider_time":{
+        "other_calls_ms":model_ms,"review_calls_ms":review_ms
+    }}))
 }
 
 #[cfg(test)]
@@ -191,7 +211,30 @@ mod tests {
         let task = store::claim(&db).await.unwrap().unwrap();
         let report = audit::sessions(&db, "1", None).await.unwrap();
         let first_run = report["sessions"][0]["id"].as_i64().unwrap();
-        Trace::start(&db, &task).await.unwrap().unwrap();
+        let trace = Trace::start(&db, &task).await.unwrap().unwrap();
+        for (kind, name, status, detail) in [
+            (
+                "model_call",
+                "agent_turn_stream",
+                "completed",
+                json!({"duration_ms":600}),
+            ),
+            (
+                "model",
+                "agent_turn_stream",
+                "completed",
+                json!({"duration_ms":700}),
+            ),
+            (
+                "model_call",
+                "action_review",
+                "failed",
+                json!({"duration_ms":200}),
+            ),
+            ("model_call", "agent_turn_stream", "started", Value::Null),
+        ] {
+            trace.push(kind, name, status, &detail).await.unwrap();
+        }
         sqlx::query("UPDATE audit_sessions SET first_attempt_at_ms=received_at_ms+400 WHERE id=?")
             .bind(first_run)
             .execute(&db)
@@ -229,6 +272,14 @@ mod tests {
             Value::Null
         );
         assert_eq!(pending["delivery"]["timing"]["queue_wait_ms"], 400);
+        assert_eq!(
+            pending["delivery"]["timing"]["telegram_delivery_ms"],
+            Value::Null
+        );
+        assert_eq!(
+            pending["delivery"]["provider_time"],
+            json!({"other_calls_ms":600,"review_calls_ms":200})
+        );
         assert!(pending["delivery"]["timing"]["first_feedback_ms"].is_number());
         assert_eq!(pending["delivery"]["receipts"][1]["deferrals"], 1);
 
@@ -244,6 +295,7 @@ mod tests {
             "delivered"
         );
         assert!(delivered["delivery"]["timing"]["result_delivery_ms"].is_number());
+        assert!(delivered["delivery"]["timing"]["telegram_delivery_ms"].is_number());
         let tally = audit::sessions(&db, "1", None).await.unwrap();
         assert_eq!(tally["delivery"]["runs"], 2);
         assert_eq!(tally["delivery"]["completed_runs"], 1);
