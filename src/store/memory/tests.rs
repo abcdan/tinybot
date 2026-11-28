@@ -44,6 +44,44 @@ async fn running(db: &SqlitePool, user: &str, agent: Option<&str>) -> Task {
 }
 
 #[tokio::test]
+async fn memory_recall_ranks_exact_phrases_then_matches_separate_terms_in_scope() {
+    let db = fixture().await;
+    let chief = running(&db, "owner", None).await;
+    for note in [
+        "Preferred timezone for billing is UTC.",
+        "The timezone for scheduled replies is Europe/Amsterdam, the preferred choice.",
+        "The preferred day for billing is Friday.",
+    ] {
+        remember(&db, &chief, None, false, note).await.unwrap();
+    }
+    remember(
+        &db,
+        &chief,
+        Some("one"),
+        false,
+        "Preferred timezone of helper is Paris.",
+    )
+    .await
+    .unwrap();
+    let guest = running(&db, "guest", Some("one")).await;
+    assert_eq!(
+        recall(&db, &chief, None, "preferred timezone")
+            .await
+            .unwrap(),
+        [
+            "Preferred timezone for billing is UTC.",
+            "The timezone for scheduled replies is Europe/Amsterdam, the preferred choice.",
+        ]
+    );
+    assert!(
+        recall(&db, &guest, Some("one"), "preferred timezone")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn each_owned_role_gets_its_private_memory_and_the_account_group() {
     let db = fixture().await;
     let parent = running(&db, "owner", None).await;
