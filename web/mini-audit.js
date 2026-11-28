@@ -140,17 +140,23 @@ function auditRun(run, dates) {
             updateTitle(result.session);
             usage.update(result.usage);
             const timing = result.delivery?.timing;
-            if (timing && (timing.queue_wait_ms != null || result.delivery.receipts.length)) {
+            const provider = result.delivery?.provider_time;
+            if (timing && (timing.queue_wait_ms != null || result.delivery.receipts.length ||
+                    provider?.other_calls_ms != null || provider?.review_calls_ms != null)) {
                 const disposition = {
                     none: 'No result queued', pending: 'Pending', delivered: 'Confirmed',
                     failed: 'Failed', uncertain: 'Uncertain', skipped: 'Skipped',
                 }[timing.result_status];
-                delivery.replaceChildren(node('h4', 'Telegram delivery'), metrics([
-                    ['Result', disposition],
-                    ['Queue wait', formatDuration(timing.queue_wait_ms)],
-                    ['First feedback', formatDuration(timing.first_feedback_ms)],
-                    ['Result delivered', formatDuration(timing.result_delivery_ms)],
-                ]));
+                const durations = [
+                    ['Queue wait', timing.queue_wait_ms],
+                    ['Model requests', provider?.other_calls_ms],
+                    ['Action reviews', provider?.review_calls_ms],
+                    ['Telegram delivery', timing.telegram_delivery_ms],
+                    ['First feedback', timing.first_feedback_ms],
+                    ['Result delivered', timing.result_delivery_ms],
+                ].filter(([, duration]) => duration != null)
+                    .map(([label, duration]) => [label, formatDuration(duration)]);
+                delivery.replaceChildren(node('h4', 'Run timing'), metrics([['Result', disposition], ...durations]));
                 delivery.hidden = false;
             }
             const entries = result.entries.map(item => auditEntry(item, dates));
