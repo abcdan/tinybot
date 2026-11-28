@@ -77,7 +77,11 @@ pub(crate) async fn read(
                AND (?2 IS NULL OR trim(s.title)=?2 COLLATE NOCASE)
                AND (?2 IS NOT NULL OR EXISTS(SELECT 1 FROM tasks t LEFT JOIN schedule_runs r ON r.task=t.id
                  WHERE t.schedule=s.id AND t.user=s.owner
-                   AND t.state IN ('idle','completed') AND r.preview_sample IS NULL
+                   AND t.state<>'revoked' AND r.preview_sample IS NULL
+                   AND (t.state IN ('idle','completed') OR EXISTS(
+                     SELECT 1 FROM outbox delivered WHERE delivered.task=t.id
+                       AND delivered.user=t.user AND delivered.assistant_event_id IS NOT NULL
+                       AND delivered.state='sent'))
                    AND t.chief_chat=1 AND t.agent IS NULL AND t.shared_memory_pair IS NULL
                    AND NOT EXISTS(SELECT 1 FROM telegram_group_tasks g WHERE g.task=t.id)))
              ORDER BY s.title COLLATE NOCASE,s.id LIMIT ?3",
@@ -115,7 +119,7 @@ pub(crate) async fn read(
                      WHERE o.assistant_event_id=prior.id AND o.state<>'sent')
                  ORDER BY prior.id DESC LIMIT 1
              )
-             WHERE t.schedule=? AND t.user=? AND t.state IN ('idle','completed')
+             WHERE t.schedule=? AND t.user=? AND t.state<>'revoked'
                AND t.chief_chat=1 AND t.agent IS NULL AND t.shared_memory_pair IS NULL
                AND NOT EXISTS(SELECT 1 FROM telegram_group_tasks g WHERE g.task=t.id)
                AND r.preview_sample IS NULL
@@ -273,6 +277,11 @@ mod tests {
             .await
             .unwrap();
         send(&db, &latest, "Unrelated follow-up answer", true).await;
+        sqlx::query("UPDATE tasks SET state='waiting' WHERE id=?")
+            .bind(&latest.id)
+            .execute(&db)
+            .await
+            .unwrap();
 
         store::ingest_telegram(&db, "42", 1, "42", "Look at my daily summaries", 10)
             .await
@@ -293,6 +302,15 @@ mod tests {
         assert_eq!(today.text, "Today's summary");
         assert_eq!(yesterday.task, old.id);
         assert_eq!(yesterday.text, "Yesterday's summary");
+
+        sqlx::query("UPDATE tasks SET state='revoked' WHERE id=?")
+            .bind(&latest.id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let visible = read(&db, &request, recent(Some("daily"), 5)).await.unwrap();
+        assert_eq!(visible.results.len(), 1);
+        assert_eq!(visible.results[0].task, old.id);
         assert!(
             read(&db, &request, recent(Some("private"), 5))
                 .await
