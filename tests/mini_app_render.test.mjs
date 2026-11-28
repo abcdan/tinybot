@@ -126,6 +126,57 @@ test('schedules edit instructions, pause and run a saved routine', async () => {
     }
 });
 
+test('routine time pickers save weekdays and preserve advanced schedules', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 640}});
+        const page = await context.newPage();
+        const schedule = {id: 'custom', title: 'Custom reminder', kind: 'reminder', state: 'active',
+            revision: 2, cron: '*/15 8-16 * * 1,3,5', time_zone: 'Europe/Amsterdam'};
+        const state = {user: '1', provider: 'codex', requests: [], tasks: [], agents: [],
+            schedules: [schedule], time_zone: 'Europe/Amsterdam'};
+        const saved = [];
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return state;
+            if (action === 'schedule-details') return {...schedule, instructions: 'Review the queue.'};
+            if (action === 'create-routine' || action === 'edit-schedule') {
+                saved.push({action, ...data});
+                return {ok: true};
+            }
+            assert.fail(`Unexpected Mini App action ${action}`);
+        });
+        await page.goto('https://tinybot.test/mini');
+        await openSettings(page, 'Schedules');
+        await page.getByRole('button', {name: 'New routine', exact: true}).click();
+        const timing = page.getByLabel('When to run');
+        await timing.selectOption({label: 'Weekdays'});
+        await page.getByLabel('Time of day').fill('08:05');
+        await page.getByLabel('Title', {exact: true}).fill('Morning digest');
+        await page.getByLabel('Instructions', {exact: true}).fill('Write a summary.');
+        await page.getByLabel('Step instructions', {exact: true}).fill('Collect the updates.');
+        assert.equal(await page.getByLabel('Cron expression').isVisible(), false);
+        await page.getByRole('button', {name: 'Save routine', exact: true}).click();
+        await page.getByText('Routine saved.', {exact: true}).waitFor();
+        assert.deepEqual(saved[0], {action: 'create-routine', routine: {
+            title: 'Morning digest', input: 'Write a summary.', steps: [{instruction: 'Collect the updates.', agent: null}],
+            cron: '5 8 * * 1-5',
+        }});
+
+        await page.getByText('Edit schedule', {exact: true}).click();
+        const cron = page.getByLabel('Cron expression');
+        await cron.waitFor();
+        assert.equal(await timing.inputValue(), 'custom');
+        assert.equal(await cron.inputValue(), schedule.cron);
+        await page.getByRole('button', {name: 'Save changes', exact: true}).click();
+        await page.getByText('Schedule updated.', {exact: true}).waitFor();
+        assert.deepEqual(saved[1], {action: 'edit-schedule', id: schedule.id, revision: 2,
+            routine: {title: schedule.title, input: 'Review the queue.', steps: [], cron: schedule.cron}});
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
+    } finally {
+        await browser.close();
+    }
+});
+
 test('a routine webhook reveals its signing key only during setup', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
     try {
