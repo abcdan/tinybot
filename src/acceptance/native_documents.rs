@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use store::outputs::{self, MediaFormat};
 use tokio::net::UnixListener;
 
-const PDF_REQUEST: &str = "Kan je daar een PDFje van maken met informatie?";
+const PDF_REQUEST: &str = "Mag ik dit als PDF’je?";
 const WORD_REQUEST: &str = "Maak daar een Word-document van met dezelfde cijfers.";
 const PRIOR_REPLY: &str = "Tikka Masala kost €4,46 per maaltijd.";
 const PDF: &[u8] = b"%PDF-1.4\nfixture PDF\n%%EOF\n";

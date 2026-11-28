@@ -21,31 +21,45 @@ pub(super) fn requested_native_format(request: &str) -> Option<&'static str> {
         .filter(|word| !word.is_empty())
         .collect();
     let has = |options: &[&str]| words.iter().any(|word| options.contains(word));
-    let bare_format: Vec<_> = words
-        .iter()
-        .copied()
-        .filter(|word| {
-            !matches!(
-                *word,
-                "please" | "graag" | "a" | "an" | "een" | "as" | "als" | "in"
-            )
-        })
-        .collect();
-    let polite_request = has(&["please", "graag"])
-        && matches!(
-            bare_format.as_slice(),
+    let format_phrase = |phrase: &[&str]| {
+        let phrase: Vec<_> = phrase
+            .iter()
+            .copied()
+            .filter(|word| {
+                !matches!(
+                    *word,
+                    "please" | "graag" | "a" | "an" | "een" | "as" | "als" | "in"
+                )
+            })
+            .collect();
+        matches!(
+            phrase.as_slice(),
             ["pdf"
                 | "pdfje"
                 | "docx"
+                | "wordbestand"
                 | "pptx"
                 | "powerpoint"
                 | "xlsx"
                 | "excel"
                 | "presentation"
-                | "presentatie"]
+                | "presentatie"
+                | "slides"
+                | "spreadsheet"
+                | "rekenblad"]
+                | ["pdf", "je"]
                 | ["word", "document" | "bestand"]
                 | ["excel", "workbook" | "spreadsheet" | "bestand"]
-        );
+        )
+    };
+    let polite_request = has(&["please", "graag"]) && format_phrase(&words);
+    let export_question = matches!(
+        words.as_slice(),
+        ["can" | "could" | "may", "i", "get" | "have", ..] | ["mag" | "kan", "ik", ..]
+    ) && words
+        .iter()
+        .rposition(|word| matches!(*word, "as" | "als"))
+        .is_some_and(|index| format_phrase(&words[index + 1..]));
     let creation_requested = has(&[
         "make",
         "create",
@@ -63,7 +77,7 @@ pub(super) fn requested_native_format(request: &str) -> Option<&'static str> {
         "exporteer",
         "omzetten",
     ]);
-    if !(creation_requested || polite_request)
+    if !(creation_requested || polite_request || export_question)
         || lower.contains("don't")
         || has(&[
             "not",
@@ -250,8 +264,23 @@ mod tests {
             requested_native_format("An Excel workbook please"),
             Some("xlsx")
         );
+        assert_eq!(
+            requested_native_format("Could I get that as a PDF?"),
+            Some("pdf")
+        );
+        assert_eq!(
+            requested_native_format("Mag ik dit als PDF’je?"),
+            Some("pdf")
+        );
+        assert_eq!(
+            requested_native_format("Kan ik dit als Word-bestand?"),
+            Some("docx")
+        );
+        assert_eq!(requested_native_format("Slides graag"), Some("pptx"));
         for message in [
             "How do you print a PDF?",
+            "Can I get a lesson about Excel?",
+            "Could I get this as a PDF tutorial?",
             "Don't make a PDF.",
             "Please summarize the attached PDF.",
             "Please read this Excel spreadsheet and tell me the totals.",
