@@ -22,17 +22,22 @@ pub(super) enum Verdict {
 }
 
 pub(super) async fn review(ctx: &ToolContext<'_>, intent: &Intent) -> Result<ActionReview> {
-    if intent.risk == Risk::PublicRead {
-        audit::record(
-            "review",
-            "action_review",
-            "allow",
-            json!({"source":"public_read_policy"}),
-        )
-        .await;
+    let policy = match intent.risk {
+        Risk::PublicRead => Some((
+            "public_read_policy",
+            "This tool reads public web content within fixed network limits.",
+        )),
+        Risk::ConnectorCatalog => Some((
+            "connector_catalog_policy",
+            "This tool lists metadata for an authorized connector.",
+        )),
+        _ => None,
+    };
+    if let Some((source, reason)) = policy {
+        audit::record("review", "action_review", "allow", json!({"source":source})).await;
         return Ok(ActionReview {
             verdict: Verdict::Allow,
-            reason: "This tool reads public web content within fixed network limits.".into(),
+            reason: reason.into(),
         });
     }
     let state = json!({"operation":intent.detail,"destination":intent.destination,
