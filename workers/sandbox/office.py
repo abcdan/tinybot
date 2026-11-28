@@ -213,8 +213,11 @@ def _xlsx(title, blocks, output):
     for column in range(1, columns + 1):
         sheet.column_dimensions[get_column_letter(column)].width = 52 if column == 1 else 22
 
-    def add_row(values, *, heading=False):
+    def add_row(values, *, heading=False, span_report=False):
         sheet.append(values)
+        if span_report and columns > 1:
+            sheet.merge_cells(start_row=sheet.max_row, end_row=sheet.max_row,
+                              start_column=1, end_column=columns)
         for cell in sheet[sheet.max_row][:len(values)]:
             if isinstance(cell.value, str):
                 cell.data_type = "s"
@@ -222,20 +225,21 @@ def _xlsx(title, blocks, output):
             cell.font = Font(name="Calibri", color=WHITE if heading else NAVY, bold=heading)
             if heading:
                 cell.fill = PatternFill("solid", fgColor=BLUE)
+        first_column_width = 50 + (22 * (columns - 1) if span_report else 0)
         lines = max(
-            len(_text_lines(_cell_text(value), 50 if index == 0 else 20))
+            len(_text_lines(_cell_text(value), first_column_width if index == 0 else 20))
             for index, value in enumerate(values)
         )
         sheet.row_dimensions[sheet.max_row].height = min(405, max(20, 16 * lines))
 
-    add_row([title], heading=True)
+    add_row([title], heading=True, span_report=True)
     for block in blocks:
         kind = block["type"]
         if kind in ("heading", "paragraph"):
-            add_row([block["text"]], heading=kind == "heading")
+            add_row([block["text"]], heading=kind == "heading", span_report=True)
         elif kind == "list":
             for item in block["items"]:
-                add_row(["• " + item])
+                add_row(["• " + item], span_report=True)
         elif kind == "table":
             for index, values in enumerate(block["rows"]):
                 add_row(values, heading=index == 0)
