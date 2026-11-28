@@ -7,22 +7,32 @@ const roleNames = {owner: 'Owner', editor: 'Editor', viewer: 'Viewer'};
 export function projectSpaces(state) {
     const section = node('details', undefined, 'card');
     const content = node('div');
+    let generation = 0;
     section.append(node('summary', 'Project spaces'), content);
     section.addEventListener('toggle', () => {
         if (section.open) void list();
-        else content.replaceChildren();
+        else {
+            generation++;
+            content.replaceChildren();
+        }
     });
 
+    const current = request => request === generation && section.open && section.isConnected;
+
     async function list() {
-        content.replaceChildren(node('p', 'Loading projects…', 'meta'));
+        const request = ++generation;
+        const loading = node('p', 'Loading projects…', 'meta');
+        loading.setAttribute('role', 'status');
+        content.replaceChildren(loading);
         try {
             const {projects} = await api('list-projects');
+            if (!current(request)) return;
             content.replaceChildren(
                 node('p', 'Invite people and publish specific notes or task results to your project. Project items are shared with the members you review when publishing.'),
                 node('p', `Your Telegram account ID is ${state.user}.`, 'meta'),
                 form('Create project', [field('title', 'Project title', {max: 120})], async values => {
                     const {project} = await api('create-project', values);
-                    await open(project);
+                    if (current(request)) await open(project);
                 }),
             );
             for (const project of projects) {
@@ -31,24 +41,33 @@ export function projectSpaces(state) {
                 else item.append(row(
                     button('Join project', async () => {
                         await api('project-member', {project: project.id, change: {accept: {member: project.membership, role: project.role}}});
-                        await open(project.id);
+                        if (current(request)) await open(project.id);
                     }),
                     button('Decline invitation', async () => {
                         await api('project-member', {project: project.id, change: {leave: {member: project.membership}}});
-                        await list();
+                        if (current(request)) await list();
                     }, true),
                 ));
                 content.append(item);
             }
         } catch (error) {
-            content.replaceChildren(node('p', error.message), button('Retry loading projects', list, true));
+            if (current(request)) content.replaceChildren(node('p', error.message), button('Retry loading projects', list, true));
         }
     }
 
     async function open(project, offset = 0) {
+        const request = ++generation;
+        const back = button('Back to projects', list, true);
+        const loading = node('p', 'Loading project…', 'meta');
+        loading.setAttribute('role', 'status');
+        const detail = node('div');
+        detail.append(loading);
+        content.replaceChildren(back, detail);
+        back.focus();
         try {
             const {space, members, items, next_offset} = await api('project-detail', {project, offset});
-            const reload = () => open(project);
+            if (!current(request)) return;
+            const reload = () => current(request) && open(project);
             const updateMember = async change => {
                 await api('project-member', {project, change});
                 await reload();
@@ -75,19 +94,20 @@ export function projectSpaces(state) {
                 roster.append(button('Leave project', async () => {
                     if (!window.confirm('Leave this project? Any items you published stay available to their reviewed audience.')) return;
                     await api('project-member', {project, change: {leave: {member: space.membership}}});
-                    await list();
+                    if (current(request)) await list();
                 }, true));
             }
-            content.replaceChildren(button('Back to projects', list, true), node('h2', space.title), roster);
-            if (space.role !== 'viewer') content.append(publisher(space, members, reload));
-            if (items.length === 0) content.append(node('p', 'No items shared with you here yet.', 'meta'));
-            for (const item of items) content.append(projectItem(project, item, reload));
+            detail.replaceChildren(node('h2', space.title), roster);
+            if (space.role !== 'viewer') detail.append(publisher(space, members, reload));
+            if (items.length === 0) detail.append(node('p', 'No items shared with you here yet.', 'meta'));
+            for (const item of items) detail.append(projectItem(project, item, reload));
             const pages = [];
             if (offset > 0) pages.push(button('Newer items', () => open(project, offset - 25), true));
             if (next_offset !== null) pages.push(button('Older items', () => open(project, next_offset), true));
-            if (pages.length) content.append(row(...pages));
+            if (pages.length) detail.append(row(...pages));
         } catch (error) {
-            content.replaceChildren(node('p', error.message), button('Back to projects', list, true));
+            if (current(request)) detail.replaceChildren(node('p', error.message),
+                button('Retry loading project', () => open(project, offset), true));
         }
     }
     return section;

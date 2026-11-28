@@ -2191,6 +2191,54 @@ test('operator invitations and guest shared memory respect the signed account vi
     }
 });
 
+test('a slow project response cannot replace the project opened after going back', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 640}});
+        const page = await context.newPage();
+        const projects = [
+            {id: 'slow', title: 'Old workspace', role: 'viewer', joined: true},
+            {id: 'current', title: 'Current workspace', role: 'viewer', joined: true},
+        ];
+        const state = {user: '1', provider: 'codex', requests: [], tasks: [], agents: [], time_zone: 'UTC'};
+        const detail = space => ({space, members: [], items: [], next_offset: null});
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return state;
+            if (action === 'list-memories') return {entries: [], next_before: null};
+            if (action === 'list-projects') return {projects};
+            if (action === 'project-detail' && data.project === 'current') return detail(projects[1]);
+            assert.fail(`Unexpected Mini App action ${action}`);
+        });
+        let release;
+        const delayed = new Promise(resolve => { release = resolve; });
+        await context.route('https://tinybot.test/api/mini', async route => {
+            const request = route.request().postDataJSON();
+            if (request.action !== 'project-detail' || request.data.project !== 'slow') return route.fallback();
+            assert.equal(request.init, 'fixture');
+            await delayed;
+            return route.fulfill({json: detail(projects[0])});
+        });
+        await page.goto('https://tinybot.test/mini');
+        await openSettings(page, 'Memory');
+        await page.getByText('Project spaces', {exact: true}).click();
+        const projectButton = title => page.getByRole('heading', {name: title, exact: true}).locator('..')
+            .getByRole('button', {name: 'Open project', exact: true});
+        await projectButton(projects[0].title).click();
+        await page.getByText('Loading project…', {exact: true}).waitFor();
+        await page.getByRole('button', {name: 'Back to projects', exact: true}).click();
+        await projectButton(projects[1].title).click();
+        await page.getByRole('heading', {name: projects[1].title, level: 2}).waitFor();
+        const earlier = page.waitForResponse(response => response.request().postDataJSON()?.data?.project === 'slow');
+        release();
+        await (await earlier).finished();
+        await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        assert.equal(await page.getByRole('heading', {name: projects[0].title, level: 2}).count(), 0);
+        assert.ok(await page.getByRole('heading', {name: projects[1].title, level: 2}).isVisible());
+    } finally {
+        await browser.close();
+    }
+});
+
 test('project publication reviews the audience and version before sharing', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
     try {
