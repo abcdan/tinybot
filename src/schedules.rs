@@ -1,4 +1,5 @@
 use crate::{
+    App,
     security::{clip, id, now},
     store::Task,
 };
@@ -8,7 +9,7 @@ use chrono_tz::Tz;
 use croner::Cron;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Sqlite, SqlitePool, Transaction};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 pub(crate) mod notifications;
 mod occurrences;
@@ -507,17 +508,19 @@ pub async fn history(db: &SqlitePool, user: &str, id: &str) -> Result<Vec<Run>> 
     .await?)
 }
 
-pub async fn run(db: SqlitePool) {
+pub async fn run(app: Arc<App>) {
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     loop {
         tick.tick().await;
-        if dispatch(&db, now()).await.is_err() {
-            tracing::warn!("scheduled work dispatch failed");
+        match dispatch(&app.db, now()).await {
+            Ok(true) => app.wake_queues(),
+            Ok(false) => {}
+            Err(_) => tracing::warn!("scheduled work dispatch failed"),
         }
     }
 }
 
-pub async fn dispatch(db: &SqlitePool, time: i64) -> Result<()> {
+pub async fn dispatch(db: &SqlitePool, time: i64) -> Result<bool> {
     occurrences::dispatch(db, time).await
 }
 

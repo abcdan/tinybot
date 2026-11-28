@@ -845,7 +845,8 @@ async fn due_legacy_reminder_delivers_the_saved_text_with_no_model() {
     .execute(&db)
     .await
     .unwrap();
-    schedules::dispatch(&db, time).await.unwrap();
+    assert!(schedules::dispatch(&db, time).await.unwrap());
+    assert!(!schedules::dispatch(&db, time).await.unwrap());
     assert!(store::claim(&db).await.unwrap().is_none());
     let reply = store::claim_outbox(&db).await.unwrap().unwrap();
     assert_eq!(reply.user, "2");

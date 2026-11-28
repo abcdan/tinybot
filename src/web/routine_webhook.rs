@@ -36,7 +36,11 @@ pub(super) async fn receive(
     )
     .await
     {
-        Ok(Delivery::Accepted) => (StatusCode::ACCEPTED, "accepted"),
+        Ok(Delivery::Queued) => {
+            app.wake_queues();
+            (StatusCode::ACCEPTED, "accepted")
+        }
+        Ok(Delivery::Duplicate) => (StatusCode::ACCEPTED, "accepted"),
         Ok(Delivery::Unauthorized) => (StatusCode::UNAUTHORIZED, "webhook unavailable"),
         Ok(Delivery::Busy) => (StatusCode::CONFLICT, "a routine run is already in progress"),
         Ok(Delivery::Invalid) => (StatusCode::BAD_REQUEST, "invalid event"),

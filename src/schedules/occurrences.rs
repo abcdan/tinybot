@@ -122,7 +122,7 @@ pub(crate) async fn occurrences(db: &SqlitePool, user: &str, id: &str) -> Result
     .await?)
 }
 
-pub(super) async fn dispatch(db: &SqlitePool, time: i64) -> Result<()> {
+pub(super) async fn dispatch(db: &SqlitePool, time: i64) -> Result<bool> {
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     let rows: Vec<Schedule> = sqlx::query_as(
         "SELECT s.* FROM schedules s JOIN users u ON u.id=s.owner
@@ -133,18 +133,19 @@ pub(super) async fn dispatch(db: &SqlitePool, time: i64) -> Result<()> {
     .bind(time)
     .fetch_all(&mut *tx)
     .await?;
+    let mut queued = false;
     for schedule in rows {
-        dispatch_one(&mut tx, &schedule, time).await?;
+        queued |= dispatch_one(&mut tx, &schedule, time).await?;
     }
     tx.commit().await?;
-    Ok(())
+    Ok(queued)
 }
 
 async fn dispatch_one(
     tx: &mut Transaction<'_, Sqlite>,
     schedule: &Schedule,
     time: i64,
-) -> Result<()> {
+) -> Result<bool> {
     let first_due = schedule.next_run.context("due schedule has no time")?;
     let local =
         schedule.time_zone.parse::<Tz>().ok().and_then(|zone| {
@@ -176,7 +177,7 @@ async fn dispatch_one(
                 .bind(&schedule.id)
                 .execute(&mut **tx)
                 .await?;
-            return Ok(());
+            return Ok(false);
         }
     }
 
@@ -239,7 +240,7 @@ async fn dispatch_one(
     .bind(&schedule.id)
     .execute(&mut **tx)
     .await?;
-    Ok(())
+    Ok(task.is_some())
 }
 
 fn recent_due(cron: &Cron, local: DateTime<Tz>, first_due: i64) -> Vec<i64> {
