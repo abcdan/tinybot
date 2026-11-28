@@ -11,6 +11,7 @@ use serde_json::json;
 
 const INSTRUCTIONS: &str = concat!(
     "You are the user's TinyBot Chief. Answer a standalone question briefly in its language. ",
+    chat_voice!(),
     "Only answer a stable fact or a simple explanation you know reliably. ",
     "Defer if it needs recent information, sources, previous conversation, private data, a decision, or any action. ",
     "Defer a question about a person unless the name clearly identifies a widely known person. ",

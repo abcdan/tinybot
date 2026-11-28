@@ -38,7 +38,7 @@ pub(super) fn partial_reply(input: &Value, reason: Option<&str>) -> Option<Strin
             .filter_map(|step| {
                 let title = step["title"].as_str()?;
                 Some(match step["checkpoint"].as_str() {
-                    Some(result) => format!("- {title} — {result}"),
+                    Some(result) => format!("- {title}\n  {result}"),
                     None => format!("- {title}"),
                 })
             })

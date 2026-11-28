@@ -319,7 +319,7 @@ export function tasks(state, requestCard, openModel) {
                 const guidance = {
                     completed: 'Reopen this task to continue in Telegram.',
                     idle: task.id === state.active_task ? 'Send a follow-up in Telegram to continue.'
-                        : 'Choose Continue to route your next Telegram message here.',
+                        : 'Tap Continue, then send your next message in Telegram.',
                     waiting: requests.length ? '' : 'Check the request in Telegram.',
                     uncertain: 'Verify the result at its destination, then send /reconcile in Telegram.',
                 }[task.state];

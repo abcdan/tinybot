@@ -16,6 +16,7 @@ const SHORTER_TURN: &str = concat!(
 );
 const FINISH_WITHOUT_TOOLS: &str = concat!(
     "Write a concise, user-facing reply in plain text or as a JSON reply with kind=reply and text. ",
+    chat_voice!(),
     "Answer from the supplied context and saved work. Do not request tools or repeat an action. ",
     "Report only outcomes the saved work confirms. Give the completed result and identify any part ",
     "you cannot finish with the available information. If a routine still has a current step, ",

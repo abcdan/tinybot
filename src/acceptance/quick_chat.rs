@@ -17,6 +17,7 @@ impl ModelProvider for QuickFixture {
     }
 
     async fn complete_brief_reply(&self, instructions: &str, input: &str) -> Result<String> {
+        assert!(instructions.contains("instead of an em dash in your own prose"));
         assert_eq!(
             serde_json::from_str::<Value>(input)?,
             json!({"request":QUESTION})
@@ -38,6 +39,8 @@ impl ModelProvider for QuickFixture {
         tools: &[ToolDefinition],
         _: Option<&mut TextDelta<'_>>,
     ) -> Result<String> {
+        assert!(instructions.contains("instead of an em dash in your own prose"));
+        assert!(instructions.contains("Preserve exact wording and punctuation"));
         assert!(tools.iter().any(|tool| tool.name == "browse"));
         let mut content: Value = serde_json::from_str(input)?;
         assert_eq!(content["latest_request"], QUESTION);
