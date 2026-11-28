@@ -1,4 +1,4 @@
-import { api, content, telegram } from './mini.js';
+import { api, content, setBackAction, telegram } from './mini.js';
 import { fileShelf } from './mini-artifacts.js';
 import { focusedAudit } from './mini-audit.js';
 import { saveToDocblock } from './mini-docblock-save.js';
@@ -18,7 +18,12 @@ const needsYou = ['waiting', 'setup', 'blocked', 'uncertain'];
 export function tasks(state, requestCard, openModel) {
     view ??= state.requests.length && !selectedTask ? 'needs-you' : 'open';
     const panel = node('div', undefined, 'tasks-panel');
+    const list = node('div');
+    const detailView = node('div');
+    panel.append(list, detailView);
     content.append(panel);
+    let listScroll = 0;
+    let opener;
     const dateFormat = new Intl.DateTimeFormat(undefined, {
         dateStyle: 'medium', timeStyle: 'short', timeZone: state.time_zone,
     });
@@ -43,21 +48,43 @@ export function tasks(state, requestCard, openModel) {
         return node('p', message, 'task-empty');
     }
 
-    function select(taskId) {
+    function select(taskId, control) {
+        if (taskId && !selectedTask) {
+            listScroll = window.scrollY;
+            opener = control;
+        }
         selectedTask = taskId;
         const url = new URL(window.location.href);
         if (taskId) url.searchParams.set('task', taskId);
         else url.searchParams.delete('task');
         window.history.replaceState(null, '', url);
-        render();
+        renderSelection();
+        window.scrollTo(0, taskId ? 0 : listScroll);
+        const target = taskId ? detailView.firstElementChild
+            : opener?.isConnected ? opener : list.querySelector('h2');
+        target?.focus({preventScroll: true});
     }
 
-    function render() {
-        panel.replaceChildren();
+    function taskButton(label, id, quiet = true) {
+        const control = button(label, () => select(id, control), quiet);
+        return control;
+    }
+
+    function renderSelection() {
+        list.hidden = Boolean(selectedTask);
+        detailView.hidden = !selectedTask;
+        detailView.replaceChildren();
         if (selectedTask) {
+            setBackAction(() => select(null));
             void detail(selectedTask);
-            return;
+        } else {
+            setBackAction();
+            if (!list.hasChildNodes()) renderList();
         }
+    }
+
+    function renderList() {
+        list.replaceChildren();
         const heading = node('div', undefined, 'task-heading');
         const hasTelegramTask = telegramTask && Number.isSafeInteger(telegramTask.revision);
         const create = hasTelegramTask ? startNew(telegramTask, 'New task')
@@ -66,11 +93,13 @@ export function tasks(state, requestCard, openModel) {
         plus.setAttribute('aria-hidden', 'true');
         create.classList.add('new-task');
         create.prepend(plus);
-        heading.append(node('h2', 'Tasks', 'page-title'), create);
-        panel.append(heading);
+        const title = node('h2', 'Tasks', 'page-title');
+        title.tabIndex = -1;
+        heading.append(title, create);
+        list.append(heading);
         let continuation;
         if (hasTelegramTask) {
-            const selected = button('', () => select(telegramTask.id));
+            const selected = taskButton('', telegramTask.id, false);
             selected.classList.add('task-continuation');
             selected.setAttribute('aria-description', telegramTask.title);
             selected.hidden = view === 'open' && openItems.some(task => task.id === telegramTask.id);
@@ -82,7 +111,7 @@ export function tasks(state, requestCard, openModel) {
             const chevron = node('span', undefined, 'disclosure-chevron');
             chevron.setAttribute('aria-hidden', 'true');
             selected.append(text, chevron);
-            panel.append(selected);
+            list.append(selected);
         }
         const views = node('div');
         views.append(...[
@@ -90,8 +119,8 @@ export function tasks(state, requestCard, openModel) {
         ].map(([id, label]) => {
             const control = button(label, () => {
                 view = id;
-                render();
-                panel.querySelector('[aria-pressed="true"]')?.focus();
+                renderList();
+                list.querySelector('[aria-pressed="true"]')?.focus();
             }, id !== view);
             control.setAttribute('aria-pressed', String(id === view));
             if (id === 'needs-you' && state.requests.length) {
@@ -106,7 +135,7 @@ export function tasks(state, requestCard, openModel) {
         views.classList.add('task-views');
         views.setAttribute('role', 'group');
         views.setAttribute('aria-label', 'Task views');
-        panel.append(views);
+        list.append(views);
         if (view === 'needs-you') inbox();
         else if (view === 'completed') completed();
         else openTasks(continuation);
@@ -137,14 +166,14 @@ export function tasks(state, requestCard, openModel) {
         if (!openItems.length) results.append(emptyState(state.tasks.length ? 'No open tasks.' :
             'Send a message in Telegram to start a task.'));
         results.append(...openItems.map(taskCard));
-        panel.append(finder, results);
+        list.append(finder, results);
     }
 
     function completed() {
         const results = node('div');
         const status = node('p', 'Loading completed tasks…', 'meta');
         status.setAttribute('role', 'status');
-        panel.append(status, results);
+        list.append(status, results);
         async function load(offset = 0) {
             const page = await api('search-tasks', {query: '', offset, completed_only: true});
             if (!results.isConnected) return;
@@ -177,18 +206,18 @@ export function tasks(state, requestCard, openModel) {
     function inbox() {
         const pending = new Set(state.requests.map(request => request.task));
         const tasks = state.tasks.filter(task => needsYou.includes(task.state) && !pending.has(task.id));
-        if (!state.requests.length && !tasks.length) panel.append(emptyState('You’re all caught up.'));
+        if (!state.requests.length && !tasks.length) list.append(emptyState('You’re all caught up.'));
         for (const request of state.requests) {
             const task = state.tasks.find(task => task.id === request.task);
-            panel.append(review(request, task));
+            list.append(review(request, task));
         }
-        panel.append(...tasks.map(taskCard));
+        list.append(...tasks.map(taskCard));
     }
 
     function review(request, task) {
         const item = requestCard(request);
         const metadata = node('div', undefined, 'task-review-meta');
-        if (task) metadata.append(button(task.title, () => select(task.id), true));
+        if (task) metadata.append(taskButton(task.title, task.id));
         if (Number.isFinite(request.expires)) metadata.append(node('span', `Expires ${date(request.expires)}`, 'meta'));
         if (metadata.childElementCount) item.append(metadata);
         return item;
@@ -207,7 +236,7 @@ export function tasks(state, requestCard, openModel) {
             }
         }
         if (task.recent_reply) item.append(node('p', task.recent_reply, 'task-preview'));
-        item.append(row(button(task.state === 'waiting' ? 'Review requests' : 'Open task', () => select(task.id), true), ...controls(task)));
+        item.append(row(taskButton(task.state === 'waiting' ? 'Review requests' : 'Open task', task.id), ...controls(task)));
         return item;
     }
 
@@ -250,7 +279,9 @@ export function tasks(state, requestCard, openModel) {
         loading.setAttribute('role', 'status');
         const body = node('div', undefined, 'task-detail');
         body.append(loading);
-        panel.append(button('Back to tasks', () => select(null), true), body);
+        const back = button('Back to tasks', () => select(null), true);
+        back.classList.add('back-link');
+        detailView.append(back, body);
         try {
             const data = await api('task-detail', {task: id});
             if (!body.isConnected) return;
@@ -273,9 +304,13 @@ export function tasks(state, requestCard, openModel) {
             const buttons = controls(task, data.executing);
             if (task.id === state.active_task && Number.isSafeInteger(task.revision)) buttons.push(startNew(task));
             if (task.state === 'setup') buttons.push(button('Set up model', openModel, true));
-            if (audit) buttons.push(button('View audit', () => focusedAudit(panel, state, {
-                ...audit, message: task.title,
-            }, render), true));
+            if (audit) buttons.push(button('View audit', () => {
+                const backToTask = () => select(task.id);
+                setBackAction(backToTask);
+                focusedAudit(detailView, state, {...audit, message: task.title}, backToTask);
+                window.scrollTo(0, 0);
+                detailView.firstElementChild?.focus({preventScroll: true});
+            }, true));
             if (buttons.length) status.append(row(...buttons));
             body.replaceChildren(status);
             if (requests.length) body.append(node('h2', 'Needs you'), ...requests.map(request => review(request)));
@@ -292,10 +327,10 @@ export function tasks(state, requestCard, openModel) {
         } catch (error) {
             if (!body.isConnected) return;
             const item = card(null, error.message);
-            if (error.status !== 404) item.append(button('Retry loading task', render, true));
+            if (error.status !== 404) item.append(button('Retry loading task', renderSelection, true));
             body.replaceChildren(item);
         }
     }
 
-    render();
+    renderSelection();
 }

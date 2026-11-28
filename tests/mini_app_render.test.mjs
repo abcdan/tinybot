@@ -196,6 +196,73 @@ test('task search stops the specific returned revision', async () => {
     }
 });
 
+test('Telegram Back restores task search, loaded results, scroll and focus', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 640}});
+        const page = await context.newPage();
+        const task = {id: 'archived', title: 'Older release notes', state: 'completed', revision: 3};
+        const audit = {id: 53, status: 'completed', started_at: 1795526400, finished_at: 1795526500};
+        const state = {user: '1', provider: 'openrouter', requests: [], tasks: []};
+        const searches = [];
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return state;
+            if (action === 'search-tasks') {
+                searches.push(data);
+                if (data.offset) return {items: [task], next_offset: null};
+                const items = Array.from({length: 8}, (_, index) => ({
+                    id: `task-${index}`, title: `Release notes ${index + 1}`, state: 'idle', revision: 2,
+                }));
+                return {items, next_offset: items.length};
+            }
+            if (action === 'task-detail') {
+                assert.deepEqual(data, {task: task.id});
+                return {task, audit, requests: [], reply: {event: 9, text: 'The release notes are ready.'}};
+            }
+            if (action === 'audit-session') {
+                assert.deepEqual(data, {id: audit.id});
+                return {session: {...audit, task: task.id}, entries: [], next_after: null};
+            }
+            assert.fail(`Unexpected Mini App action ${action}`);
+        }, `window.Telegram = {WebApp: {initData: 'fixture', ready() {}, BackButton: {
+            show() { window.backVisible = true; }, hide() { window.backVisible = false; },
+            onClick(callback) { window.pressTelegramBack = callback; },
+        }}};`);
+        await page.goto('https://tinybot.test/mini');
+        const search = page.getByLabel('Search retained messages and tasks');
+        await search.fill('release notes');
+        await page.getByRole('button', {name: 'Search tasks', exact: true}).click();
+        await page.getByRole('button', {name: 'Load more tasks', exact: true}).click();
+        const opener = page.getByRole('heading', {name: task.title, exact: true}).locator('..')
+            .getByRole('button', {name: 'Open task', exact: true});
+        await opener.scrollIntoViewIfNeeded();
+        const listScroll = await page.evaluate(() => window.scrollY);
+        assert.ok(listScroll > 0);
+        await opener.click();
+        await page.getByText('The release notes are ready.').waitFor();
+        assert.equal(await page.evaluate(() => window.backVisible), true);
+        assert.equal(await page.evaluate(() => window.scrollY), 0);
+        assert.equal(new URL(page.url()).searchParams.get('task'), task.id);
+
+        await page.getByRole('button', {name: 'View audit'}).click();
+        await page.getByRole('heading', {name: 'Task audit', exact: true}).waitFor();
+        await page.evaluate(() => window.pressTelegramBack());
+        await page.getByText('The release notes are ready.').waitFor();
+        assert.equal(await page.evaluate(() => window.backVisible), true);
+
+        await page.evaluate(() => window.pressTelegramBack());
+        assert.equal(await search.inputValue(), 'release notes');
+        assert.equal(await opener.evaluate(element => element === document.activeElement), true);
+        assert.equal(await page.evaluate(() => window.scrollY), listScroll);
+        assert.equal(await page.evaluate(() => window.backVisible), false);
+        assert.equal(new URL(page.url()).searchParams.has('task'), false);
+        assert.deepEqual(searches, [{query: 'release notes', offset: 0}, {query: 'release notes', offset: 8}]);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
+    } finally {
+        await browser.close();
+    }
+});
+
 test('completing a task moves it to paginated history and reopening selects it again', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
     try {
@@ -228,6 +295,10 @@ test('completing a task moves it to paginated history and reopening selects it a
                 assert.deepEqual(data, {query: 'older plan', offset: 0});
                 return {items: [archived], next_offset: null};
             }
+            if (action === 'task-detail') {
+                assert.deepEqual(data, {task: archived.id});
+                return {task: archived, requests: []};
+            }
             if (action === 'select-task') {
                 assert.deepEqual(data, {task: current.id, revision: 8});
                 current.state = 'idle';
@@ -248,7 +319,11 @@ test('completing a task moves it to paginated history and reopening selects it a
         await page.getByText('Completed', {exact: true}).click();
         await task.getByText('Completed', {exact: true}).waitFor();
         await page.getByRole('button', {name: 'Load more tasks', exact: true}).click();
-        await page.getByRole('heading', {name: archived.title}).waitFor();
+        const olderTask = page.getByRole('heading', {name: archived.title}).locator('..');
+        await olderTask.getByRole('button', {name: 'Open task', exact: true}).click();
+        await page.getByRole('button', {name: 'Back to tasks', exact: true}).click();
+        await olderTask.waitFor();
+        assert.equal(historyCalls, 2);
         await task.getByRole('button', {name: 'Reopen', exact: true}).click();
         await page.getByText('Task reopened. Send your next message in Telegram.').waitFor();
         await page.getByRole('button', {name: 'Open', exact: true}).click();
