@@ -142,7 +142,9 @@ export async function operate(browser, route, data, signal) {
             ...(capture ? {viewport: captureViewport, deviceScaleFactor: 1} : {}),
             ...(directory ? {recordVideo: {dir: directory, size: captureViewport}} : {}),
         });
-        const closeOnAbort = () => void context.close().catch(() => {});
+        let closing;
+        const closeContext = () => (closing ??= context.close());
+        const closeOnAbort = () => void closeContext().catch(() => {});
         signal?.addEventListener('abort', closeOnAbort, {once: true});
         let result;
         try {
@@ -152,7 +154,7 @@ export async function operate(browser, route, data, signal) {
             result = await operatePage(context, route, data, capture, signal);
         } finally {
             signal?.removeEventListener('abort', closeOnAbort);
-            await context.close();
+            await closeContext();
         }
         if (!directory) return result;
         return {...result, bytes: await encodeRecording(result.bytes, directory, recording, signal)};

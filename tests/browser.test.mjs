@@ -126,12 +126,22 @@ test('captures allow visual assets but keep browser requests read-only', () => {
 test('captures a PNG and a playable MP4, and deletes recording files on success, error, or cancellation', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
     const directories = [];
+    const closedDirectories = [];
     let scrollRequests = 0;
     const abort = new AbortController();
     const fixture = {
         async newContext(settings) {
-            if (settings.recordVideo) directories.push(settings.recordVideo.dir);
             const context = await browser.newContext(settings);
+            const directory = settings.recordVideo?.dir;
+            if (directory) {
+                directories.push(directory);
+                const close = context.close.bind(context);
+                context.close = async () => {
+                    await close();
+                    await access(directory);
+                    closedDirectories.push(directory);
+                };
+            }
             const newPage = context.newPage.bind(context);
             context.newPage = async () => {
                 const page = await newPage();
@@ -179,6 +189,7 @@ test('captures a PNG and a playable MP4, and deletes recording files on success,
 
         await assert.rejects(operate(fixture, '/record', {url: 'https://fixture.example/cancel'}, abort.signal));
         await assert.rejects(access(directories[2]), {code: 'ENOENT'});
+        assert.deepEqual(closedDirectories, directories);
     } finally {
         await browser.close();
     }
