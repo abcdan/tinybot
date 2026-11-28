@@ -11,6 +11,7 @@ pub(crate) const ORIGIN: &str = "https://docblock.dev";
 pub(crate) const WRITE: &str = "notes:write";
 const PROPOSE: &str = "notes:propose";
 const DEFAULT_EXPIRY_DAYS: u64 = 7;
+const READ_RESULT_BYTES: usize = 10_500;
 
 pub(crate) fn is_endpoint(endpoint: &str) -> bool {
     matches!(endpoint, ENDPOINT | ALIAS)
@@ -411,12 +412,42 @@ pub(crate) fn read_result(response: &Value) -> Result<Value> {
     let body = note["body"]
         .as_str()
         .context("Docblock did not return the note body")?;
-    let excerpt = clip(body, 6_000);
-    Ok(
-        json!({"id":note["id"],"workspaceId":note["workspaceId"],"path":note["path"],
-        "title":note["title"],"tags":note["tags"],"version":note["version"],"revisionToken":note["revisionToken"],
-        "url":docblock_url(&note["url"], false),"body":excerpt,"partial":excerpt.len() != body.len()}),
-    )
+    let text = |key: &str, limit| note[key].as_str().map(|value| json_excerpt(value, limit));
+    let tags: Vec<_> = note["tags"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .take(20)
+        .map(|tag| json_excerpt(tag, 120))
+        .collect();
+    let mut result = json!({
+        "id":text("id", 100),"workspaceId":text("workspaceId", 100),
+        "path":text("path", 480),"title":text("title", 320),"tags":tags,
+        "version":note["version"].as_u64(),"revisionToken":text("revisionToken", 80),
+        "url":docblock_url(&note["url"], false).filter(|url| url.len() <= 1_000),
+        "body":"","partial":false
+    });
+    let body_budget = READ_RESULT_BYTES.saturating_sub(result.to_string().len());
+    let excerpt = json_excerpt(clip(body, 6_000), body_budget);
+    result["body"] = json!(excerpt);
+    result["partial"] = json!(excerpt.len() != body.len());
+    Ok(result)
+}
+
+fn json_excerpt(value: &str, limit: usize) -> &str {
+    let mut bytes = 0;
+    for (index, character) in value.char_indices() {
+        bytes += match character {
+            '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+            '\u{0}'..='\u{1f}' => 6,
+            _ => character.len_utf8(),
+        };
+        if bytes > limit {
+            return &value[..index];
+        }
+    }
+    value
 }
 
 pub(crate) fn write_result(tool: &str, response: &Value) -> Result<Value> {
@@ -539,6 +570,25 @@ mod tests {
             write_result("create_share", &json!({"isError":true})).unwrap()["docblock_refused"],
             true
         );
+    }
+
+    #[test]
+    fn docblock_read_result_stays_complete_json_when_the_note_needs_escaping() {
+        let id = Uuid::new_v4();
+        let body = "\u{b}\u{b}📝💬\n".repeat(1_000);
+        let note = json!({
+            "note": {"id":id.to_string(),"path":"daily/2026-11-28","title":"Daily report",
+            "tags":["draft"],"version":3,"revisionToken":"a".repeat(64),"body":body,
+            "url":format!("https://docblock.dev/example#/note/{id}")}
+        });
+        let response = json!({"content":[{"type":"text","text":note.to_string()}]});
+        let result = read_result(&response).unwrap();
+        assert_eq!(result["id"], id.to_string());
+        assert_eq!(result["partial"], true);
+        let excerpt = result["body"].as_str().unwrap();
+        assert!(body.starts_with(excerpt));
+        assert!(!excerpt.is_empty());
+        assert!(result.to_string().len() <= READ_RESULT_BYTES);
     }
 
     #[tokio::test]
