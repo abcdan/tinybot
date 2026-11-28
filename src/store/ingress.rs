@@ -355,7 +355,14 @@ async fn ingest_message(
                     sqlx::query("INSERT INTO events(task,role,body) VALUES(?,'user','I checked the external destination. Continue from here and do not automatically retry the earlier action.')")
                         .bind(&active).execute(&mut *tx).await?;
                 }
-                response=Some(if resumed {"Task resumed after reconciliation."} else {"The active task does not need reconciliation."}.into());
+                response = Some(
+                    if resumed {
+                        "I’ll continue from here."
+                    } else {
+                        "There’s no task waiting for you to check its result."
+                    }
+                    .into(),
+                );
             }
             "/use" => response = Some("Message your Chief here. It can delegate to saved agents.".into()),
             _ if text.is_empty() => response = Some("Send a text message to give TinyBot a task.".into()),

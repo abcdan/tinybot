@@ -150,7 +150,7 @@ async fn record_failure(
     )
     .await;
     let explanation = if group {
-        String::from("I couldn’t finish this group task. Reply here to continue.")
+        super::group::STOPPED.to_owned()
     } else {
         super::failure::explain(&app.db, task, &failure)
             .await

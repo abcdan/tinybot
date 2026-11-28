@@ -342,7 +342,7 @@ async fn send_item(
             return Ok(MessageDelivery::Skipped);
         };
         if retryable {
-            message.push_str("\n\nTap Retry to try your saved message again.");
+            message.push_str("\n\nTap Retry to try again.");
         }
         return adapter
             .send(

@@ -20,6 +20,7 @@ pub(super) async fn run(app: &App, task: &Task, preview: Preview) -> Result<()> 
         let raw = model.complete_brief_reply(
             concat!(
                 "Simulate this saved routine using only the synthetic sample and stored instructions supplied as data. ",
+                chat_voice!(),
                 "Show what each step would produce and where it would need a live service or review. ",
                 "Never claim any tool, connector, helper or external action ran. Return JSON with one text field."
             ),

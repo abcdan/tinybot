@@ -6,8 +6,8 @@ use anyhow::Result;
 use serde_json::Value;
 use sqlx::SqlitePool;
 
-const INPUT_LIMIT: &str = "The model could not fit the task context into its context window.";
-const OUTPUT_LIMIT: &str = "The model reached its response limit before it finished the answer.";
+const INPUT_LIMIT: &str = "The conversation was too long for the model to process.";
+const OUTPUT_LIMIT: &str = "The answer hit the model’s response limit.";
 
 pub(super) struct Failure {
     pub category: &'static str,
@@ -47,11 +47,11 @@ pub(super) fn classify(error: &anyhow::Error) -> Failure {
             false,
         ),
         Some(ProviderFailure::RateLimited) => (
-            "The model provider reached a rate or usage limit. Give it some time before continuing.",
+            "The model provider is limiting requests right now. Give it a moment.",
             true,
         ),
         Some(ProviderFailure::TimedOut) => (
-            "The model provider took too long to respond. Your task is saved.",
+            "The model took too long to answer. Your task is saved.",
             true,
         ),
         Some(ProviderFailure::Temporary) => (
@@ -77,7 +77,7 @@ pub(super) fn classify(error: &anyhow::Error) -> Failure {
             false,
         ),
         None => (
-            "I paused this task after an internal error. Open Audit in Settings & forms to see where the run stopped.",
+            "I ran into a problem and paused the task. Open Activity in the Mini App to see what happened.",
             false,
         ),
     };
