@@ -28,11 +28,18 @@ let tab = ({docblock: 'connectors', mail: 'mail'})[params.get('connect')] ?? 'ho
 let generation = 0;
 let opened = false;
 let disposeOnboarding;
+let backAction;
 
 export function show(text, error = false) {
     notice.textContent = text;
     notice.hidden = !text;
     notice.classList.toggle('error', error);
+}
+
+export function setBackAction(callback) {
+    backAction = callback;
+    if (callback) backButton?.show?.();
+    else backButton?.hide?.();
 }
 
 export async function api(action, data = {}) {
@@ -64,14 +71,14 @@ export async function refresh(animate = false) {
         }
         show('');
         if (needsOnboarding) {
-            backButton?.hide?.();
+            setBackAction();
             state = undefined;
             openOnboarding(result);
             return;
         }
         closeOnboarding();
         if (formId) {
-            backButton?.hide?.();
+            setBackAction();
             let item;
             if (result.kind === 'settings-form') {
                 item = settingsForm(result);
@@ -94,7 +101,7 @@ export async function refresh(animate = false) {
             closeOnboarding();
             state = undefined;
             tabs.hidden = true;
-            backButton?.hide?.();
+            setBackAction();
             footer.hidden = true;
             refreshButton.hidden = !telegram?.initData || error.status === 403;
             content.replaceChildren();
@@ -204,11 +211,11 @@ function render(animate = false) {
     content.setAttribute('aria-label', mainTabs[mainTab]);
     content.replaceChildren();
     if (mainTab !== tab) {
-        backButton?.show?.();
+        setBackAction(returnToSettings);
         const back = button('Back to settings', returnToSettings, true);
         back.classList.add('back-link');
         content.append(back);
-    } else backButton?.hide?.();
+    } else if (tab !== 'home') setBackAction();
     ({home, agents, audit, settings, memories, connectors, mail, browser, schedules, invites, model, settingsHistory})[tab](state);
     if (animate && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
         content.getAnimations?.().forEach(animation => animation.cancel());
@@ -444,9 +451,7 @@ sourceLink.addEventListener('click', event => {
 for (const item of tabs.querySelectorAll('button')) {
     item.addEventListener('click', () => setTab(item.dataset.tab));
 }
-backButton?.onClick?.(() => {
-    if (state && !formId && !Object.hasOwn(mainTabs, tab)) returnToSettings();
-});
+backButton?.onClick?.(() => backAction?.());
 syncColorScheme();
 telegram?.onEvent?.('themeChanged', syncColorScheme);
 if (telegram?.isVersionAtLeast?.('6.1')) {
