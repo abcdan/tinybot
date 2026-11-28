@@ -155,7 +155,7 @@ pub(super) async fn session(connection: &mut SqliteConnection, id: i64) -> Resul
          FROM audit_deliveries WHERE session=? ORDER BY outbox",
     )
     .bind(id)
-    .fetch_all(connection)
+    .fetch_all(&mut *connection)
     .await?;
     // The provider-call records avoid double-counting nested model scopes.
     let (model_ms, review_ms): (Option<i64>, Option<i64>) = sqlx::query_as(
