@@ -48,11 +48,16 @@ export async function api(action, data = {}) {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({init: telegram.initData, action, data})
+    }).catch(() => {
+        throw Object.assign(new Error('Could not reach TinyBot.'), {temporary: true});
     });
-    const result = await response.json();
+    const result = await response.json().catch(() => undefined);
     if (!response.ok) {
-        throw Object.assign(new Error(result.error || 'The request did not complete.'), {status: response.status});
+        throw Object.assign(new Error(result?.error || 'The request did not complete.'), {
+            status: response.status, temporary: response.status === 429 || response.status >= 500,
+        });
     }
+    if (result === undefined) throw Object.assign(new Error('TinyBot returned an unreadable response.'), {temporary: true});
     return result;
 }
 
@@ -98,6 +103,10 @@ export async function refresh(animate = false) {
         }
     } catch (error) {
         if (sequence === generation) {
+            if (state && !formId && error.temporary) {
+                show('Could not refresh TinyBot. Try again in a moment.', true);
+                return;
+            }
             closeOnboarding();
             state = undefined;
             tabs.hidden = true;
