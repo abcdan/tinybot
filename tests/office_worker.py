@@ -61,6 +61,9 @@ def main():
     workbook = load_workbook(checked_bytes("xlsx"))
     sheet = workbook.active
     assert sheet["A1"].value == TITLE
+    assert {str(cells) for cells in sheet.merged_cells.ranges} == {
+        "A1:C1", "A2:C2", "A3:C3", "A4:C4", "A5:C5",
+    }
     assert sheet["B7"].value == 4.46 and sheet["B7"].data_type == "n"
     assert sheet["C7"].value is True
     assert sheet["A8"].value == "=1+1" and sheet["A8"].data_type == "s"
