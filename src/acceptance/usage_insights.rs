@@ -15,6 +15,7 @@ async fn invite(db: &SqlitePool, guest: &str, expanded: bool) {
     .unwrap() else {
         panic!("expected a valid invitation");
     };
+    assert_eq!(id, invitation.id);
     assert!(invitations::accept(db, guest, &id, expanded).await.unwrap());
 }
 

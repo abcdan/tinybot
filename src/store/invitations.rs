@@ -9,21 +9,24 @@ pub(crate) const REVIEW: &str = "You’re invited to TinyBot. You’ll set up yo
 
 #[derive(Serialize)]
 pub struct Invitation {
+    pub id: String,
     pub command: String,
     pub expires: i64,
 }
 
 pub async fn create(tx: &mut Transaction<'_, Sqlite>, operator: &str) -> Result<Invitation> {
     let code = token();
+    let id = id();
     let expires = now() + LIFETIME;
     sqlx::query("INSERT INTO bot_invitations(id,token_hash,issuer,expires) VALUES(?,?,?,?)")
-        .bind(id())
+        .bind(&id)
         .bind(hash(&code))
         .bind(operator)
         .bind(expires)
         .execute(&mut **tx)
         .await?;
     Ok(Invitation {
+        id,
         command: format!("/start {code}"),
         expires,
     })

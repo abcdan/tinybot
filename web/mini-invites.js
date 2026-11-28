@@ -7,15 +7,38 @@ const money = new Intl.NumberFormat(undefined, {style: 'currency', currency: 'US
 export function invites(state) {
     const setup = card('Invite someone', 'An invitation works once and expires after 24 hours. Each guest sets up their own model and approves access before their account is created.');
     const code = node('pre');
+    code.tabIndex = -1;
+    let visibleInvite;
     const copy = button('Copy invitation', async () => {
-        await navigator.clipboard.writeText(code.textContent);
-        show('Invitation copied. Ask your guest to send it to TinyBot.');
+        const invite = visibleInvite;
+        if (!invite) return;
+        if (invite.expires < Math.floor(Date.now() / 1000)) {
+            displayInvite();
+            show('This invitation expired. Create a new one.', true);
+            return;
+        }
+        try {
+            await navigator.clipboard.writeText(invite.command);
+            if (visibleInvite === invite) show('Invitation copied. Ask your guest to send it to TinyBot.');
+        } catch {
+            if (visibleInvite !== invite || !code.isConnected) return;
+            code.focus();
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(code);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            show('Invitation selected. Copy it and send it privately.');
+        }
     }, true);
-    code.hidden = copy.hidden = true;
+    function displayInvite(invite) {
+        visibleInvite = invite;
+        code.textContent = invite?.command ?? '';
+        code.hidden = copy.hidden = !invite;
+    }
+    displayInvite();
     setup.append(button('Create invitation', async () => {
-        const invite = await api('create-invite');
-        code.textContent = invite.command;
-        code.hidden = copy.hidden = false;
+        displayInvite(await api('create-invite'));
         await load();
     }), code, copy);
     const roster = node('div');
@@ -32,7 +55,7 @@ export function invites(state) {
                 const item = card('Unused invitation', `Expires ${expiry.format(new Date(invite.expires * 1000))}`);
                 item.append(button('Revoke invitation', async () => {
                     await api('revoke-invite', {id: invite.id});
-                    code.hidden = copy.hidden = true;
+                    if (visibleInvite?.id === invite.id) displayInvite();
                     show('Invitation revoked.');
                     await load();
                 }, true));

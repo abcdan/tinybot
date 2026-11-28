@@ -2154,6 +2154,59 @@ test('OpenRouter server tool toggles save independently and restore on rejection
     }
 });
 
+test('an invitation stays shareable when a different code is revoked or clipboard access is denied', async () => {
+    const browser = await chromium.launch({chromiumSandbox: true});
+    try {
+        const context = await browser.newContext({viewport: {width: 320, height: 640}});
+        await context.addInitScript(() => {
+            Object.defineProperty(navigator, 'clipboard', {value: {
+                writeText: async () => { throw new DOMException('Clipboard denied', 'NotAllowedError'); },
+            }});
+        });
+        const expires = Math.floor(Date.now() / 1000) + 3600;
+        const command = '/start fixture-new-invitation';
+        const older = {id: 'old', expires};
+        const latest = {id: 'new', expires};
+        let pending = [older];
+        const revoked = [];
+        const state = {user: '1', operator: true, provider: 'codex', time_zone: 'UTC', requests: [], tasks: []};
+        await mockMiniApp(context, ({action, data}) => {
+            if (action === 'status') return state;
+            if (action === 'list-invites') return {pending, guests: []};
+            if (action === 'create-invite') {
+                pending.push(latest);
+                return {...latest, command};
+            }
+            if (action === 'revoke-invite') {
+                revoked.push(data.id);
+                pending = pending.filter(invite => invite.id !== data.id);
+                return {ok: true};
+            }
+            assert.fail(`Unexpected Mini App action ${action}`);
+        });
+        const page = await context.newPage();
+        await page.goto('https://tinybot.test/mini');
+        await openSettings(page, 'Invites');
+        await page.getByRole('button', {name: 'Create invitation', exact: true}).click();
+        const code = page.getByText(command, {exact: true});
+        await code.waitFor();
+        const revoke = page.getByRole('button', {name: 'Revoke invitation', exact: true});
+        await revoke.nth(1).waitFor();
+        await revoke.first().click();
+        await page.getByText('Invitation revoked.', {exact: true}).waitFor();
+        await page.getByRole('button', {name: 'Copy invitation', exact: true}).click();
+        await page.getByText('Invitation selected. Copy it and send it privately.', {exact: true}).waitFor();
+        assert.equal(await page.evaluate(() => window.getSelection().toString()), command);
+        await revoke.click();
+        await page.getByText('No pending invitations.', {exact: true}).waitFor();
+        assert.equal(await page.locator('pre').textContent(), '');
+        assert.equal(await page.getByRole('button', {name: 'Copy invitation', exact: true}).count(), 0);
+        assert.deepEqual(revoked, ['old', 'new']);
+    } finally {
+        await browser.close();
+    }
+});
+
 test('operator invitations and guest shared memory respect the signed account view', async () => {
     const browser = await chromium.launch({chromiumSandbox: true});
     try {
