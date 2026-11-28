@@ -430,23 +430,43 @@ pub async fn claim_outbox(db: &SqlitePool) -> Result<Option<Outbound>> {
     claim_next_outbox(db, false).await
 }
 
+const NEXT_OUTBOX: &str = "SELECT o.id FROM outbox o WHERE o.state='queued'
+    AND o.retry_at<=?1 AND (o.button IS NULL OR substr(o.button,1,?2)<>?3)
+    AND (NOT ?4 OR NOT EXISTS(
+        SELECT 1 FROM outbox prior WHERE prior.delivery_lane=o.delivery_lane
+        AND prior.state IN ('queued','sending')
+        AND (prior.state='sending' OR (prior.id<o.id
+            AND (prior.button IS NULL OR substr(prior.button,1,?2)<>?3)))))
+    AND (o.assistant_event_id IS NULL OR NOT EXISTS(
+        SELECT 1 FROM outbox prior WHERE prior.assistant_event_id=o.assistant_event_id
+        AND prior.id<o.id AND prior.state IN ('queued','sending')))
+    ORDER BY o.id LIMIT 1";
+
 async fn claim_next_outbox(db: &SqlitePool, order_delivery: bool) -> Result<Option<Outbound>> {
-    Ok(sqlx::query_as(
-        "UPDATE outbox SET state='sending' WHERE id=(SELECT o.id FROM outbox o WHERE o.state='queued'
-        AND o.retry_at<=?1 AND (o.button IS NULL OR substr(o.button,1,?2)<>?3)
-        AND (NOT ?4 OR NOT EXISTS(
-            SELECT 1 FROM outbox prior WHERE prior.delivery_lane=o.delivery_lane
-            AND prior.state IN ('queued','sending')
-            AND (prior.state='sending' OR (prior.id<o.id
-                AND (prior.button IS NULL OR substr(prior.button,1,?2)<>?3)))))
-        AND (o.assistant_event_id IS NULL OR NOT EXISTS(
-            SELECT 1 FROM outbox prior WHERE prior.assistant_event_id=o.assistant_event_id
-            AND prior.id<o.id AND prior.state IN ('queued','sending')))
-        ORDER BY o.id LIMIT 1) RETURNING id,user,agent,task,body,button,widget,reaction_event,reply_to_message_id",
-    )
-    .bind(now())
-    .bind(super::acknowledgements::WAIT_PREFIX.len() as i64)
-    .bind(super::acknowledgements::WAIT_PREFIX)
+    let time = now();
+    let wait_prefix = super::acknowledgements::WAIT_PREFIX;
+    let wait_prefix_len = wait_prefix.len() as i64;
+
+    // The fallback poll can check an idle or blocked queue without taking SQLite's writer lock.
+    let ready: bool = sqlx::query_scalar(&format!("SELECT EXISTS({NEXT_OUTBOX})"))
+        .bind(time)
+        .bind(wait_prefix_len)
+        .bind(wait_prefix)
+        .bind(order_delivery)
+        .fetch_one(db)
+        .await?;
+    if !ready {
+        return Ok(None);
+    }
+
+    // Recheck eligibility during the atomic claim, since another worker may claim the next row.
+    Ok(sqlx::query_as(&format!(
+        "UPDATE outbox SET state='sending' WHERE id=({NEXT_OUTBOX})
+         RETURNING id,user,agent,task,body,button,widget,reaction_event,reply_to_message_id",
+    ))
+    .bind(time)
+    .bind(wait_prefix_len)
+    .bind(wait_prefix)
     .bind(order_delivery)
     .fetch_optional(db)
     .await?)
@@ -492,4 +512,57 @@ pub async fn can_deliver(db: &SqlitePool, item: &Outbound) -> Result<bool> {
         }
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn blocked_delivery_polls_without_waiting_for_the_writer() {
+        let path =
+            std::env::temp_dir().join(format!("tinybot-outbox-{}.sqlite", crate::security::id()));
+        let db = super::super::open(&path).await.unwrap();
+        super::super::seed(&db, "42").await.unwrap();
+        super::super::seed(&db, "43").await.unwrap();
+
+        notify(&db, "42", "First reply", None).await.unwrap();
+        notify(&db, "42", "Second reply", None).await.unwrap();
+        notify(&db, "43", "Future reply", None).await.unwrap();
+        sqlx::query("UPDATE outbox SET retry_at=? WHERE user='43'")
+            .bind(now() + 60)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        notify(&db, "43", "Later reply in the other chat", None)
+            .await
+            .unwrap();
+        let first = claim_delivery(&db).await.unwrap().unwrap();
+        assert_eq!(first.body, "First reply");
+        let transaction = db.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        let blocked = tokio::time::timeout(Duration::from_secs(1), claim_delivery(&db)).await;
+        transaction.rollback().await.unwrap();
+
+        sqlx::query("UPDATE outbox SET state='sent' WHERE id=?")
+            .bind(first.id)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE outbox SET retry_at=0 WHERE body='Future reply'")
+            .execute(&db)
+            .await
+            .unwrap();
+        let (first_worker, second_worker) = tokio::join!(claim_delivery(&db), claim_delivery(&db));
+
+        db.close().await;
+        std::fs::remove_file(&path).unwrap();
+        assert!(blocked.unwrap().unwrap().is_none());
+        let first_claim = first_worker.unwrap().unwrap();
+        let second_claim = second_worker.unwrap().unwrap();
+        let mut claimed = [first_claim.body.as_str(), second_claim.body.as_str()];
+        claimed.sort_unstable();
+        assert_eq!(claimed, ["Future reply", "Second reply"]);
+    }
 }
