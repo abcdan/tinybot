@@ -577,7 +577,7 @@ mod tests {
         let id = Uuid::new_v4();
         let body = "\u{b}\u{b}📝💬\n".repeat(1_000);
         let note = json!({
-            "note": {"id":id,"path":"daily/2026-11-28","title":"Daily report",
+            "note": {"id":id.to_string(),"path":"daily/2026-11-28","title":"Daily report",
             "tags":["draft"],"version":3,"revisionToken":"a".repeat(64),"body":body,
             "url":format!("https://docblock.dev/example#/note/{id}")}
         });
