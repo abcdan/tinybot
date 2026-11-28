@@ -253,19 +253,37 @@ function schedulePanel(label, load) {
     return panel;
 }
 
+const weekdays = [['1', 'Monday'], ['2', 'Tuesday'], ['3', 'Wednesday'], ['4', 'Thursday'],
+    ['5', 'Friday'], ['6', 'Saturday'], ['0', 'Sunday']];
+
+function savedRecurrence(cron) {
+    const match = /^(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+(\*|1-5|[0-6])$/.exec(cron?.trim());
+    if (!match || Number(match[1]) > 59 || Number(match[2]) > 23) return null;
+    const [, minute, hour, day] = match;
+    const time = `${hour.padStart(2, '0')}:${minute.padStart(2, '0')}`;
+    if (day === '*') return {mode: 'daily', time};
+    if (day === '1-5') return {mode: 'weekdays', time};
+    return {mode: 'weekly', time, day};
+}
+
 function routineForm(state, draft, editing) {
+    const recurrence = savedRecurrence(draft.cron);
     const timing = field('timing', 'When to run', {
-        choices: [['manual', 'Manually'], ['once', 'Once'], ['recurring', 'On a schedule']],
-        value: draft.cron ? 'recurring' : draft.local_at ? 'once' : 'manual',
+        choices: [['manual', 'Manually'], ['once', 'Once'], ['daily', 'Daily'], ['weekdays', 'Weekdays'],
+            ['weekly', 'Weekly'], ['custom', 'Custom schedule (cron)']],
+        value: recurrence?.mode ?? (draft.cron ? 'custom' : draft.local_at ? 'once' : 'manual'),
     });
     const timezone = draft.time_zone ?? state.time_zone;
     const at = field('at', 'Date and time', {type: 'datetime-local', value: draft.local_at, hint: timezone});
+    const time = field('time', 'Time of day', {type: 'time', value: recurrence?.time ?? '09:00', hint: timezone});
+    const weekday = field('weekday', 'Day of the week', {choices: weekdays, value: recurrence?.day ?? '1'});
     const cron = field('cron', 'Cron expression', {value: draft.cron ?? '', max: 110, hint: `Five fields in ${timezone}, such as 0 9 * * 1 for Mondays at 9 am.`});
-    const scheduleControls = [at, cron];
+    const scheduleControls = [[at, ['once']], [time, ['daily', 'weekdays', 'weekly']],
+        [weekday, ['weekly']], [cron, ['custom']]];
     const timingControl = timing.querySelector('select');
-    const updateTiming = () => scheduleControls.forEach((label, index) => {
-        label.hidden = timingControl.value !== ['once', 'recurring'][index];
-        label.querySelector('input').disabled = label.hidden;
+    const updateTiming = () => scheduleControls.forEach(([label, modes]) => {
+        label.hidden = !modes.includes(timingControl.value);
+        label.querySelector('input, select').disabled = label.hidden;
     });
     timingControl.addEventListener('change', updateTiming);
     updateTiming();
@@ -274,7 +292,7 @@ function routineForm(state, draft, editing) {
     return form(editing ? 'Save changes' : 'Save routine', [
         field('title', 'Title', {value: draft.title, max: 100}),
         field('input', draft.kind === 'reminder' ? 'Reminder text' : 'Instructions', {type: 'textarea', value: draft.instructions, max: 2000}),
-        timing, ...scheduleControls, steps,
+        timing, ...scheduleControls.map(([label]) => label), steps,
     ], async data => {
         const names = [...steps.querySelectorAll('fieldset')];
         const routine = {
@@ -287,6 +305,11 @@ function routineForm(state, draft, editing) {
         };
         if (data.at) routine.at = data.at === draft.local_at ? draft.scheduled_at : data.at;
         if (data.cron) routine.cron = data.cron;
+        if (data.time) {
+            const [hour, minute] = data.time.split(':').map(Number);
+            const day = {daily: '*', weekdays: '1-5', weekly: data.weekday}[data.timing];
+            routine.cron = `${minute} ${hour} * * ${day}`;
+        }
         if (editing) await api('edit-schedule', {id: draft.id, revision: draft.revision, routine});
         else await api('create-routine', {source: draft.source, routine});
         await refresh();
